@@ -1,0 +1,71 @@
+{
+  "started_at": "2026-08-10T10:07:41+0800",
+  "models": {
+    "pipeline": {
+      "batch_id": "eecc83f4-d5eb-4780-b9a1-32e0a0c82794",
+      "final_results": [
+        {
+          "data_id": "compare_pipeline_scan_formula",
+          "file_name": "scan_formula.pdf",
+          "state": "done",
+          "err_msg": "",
+          "full_zip_url": "https://cdn-mineru.openxlab.org.cn/pdf/2026-08-10/a772ae4a-f7b2-420c-bac7-3deefc6a278f.zip"
+        },
+        {
+          "data_id": "compare_pipeline_probability_table",
+          "file_name": "probability_table.pdf",
+          "state": "done",
+          "err_msg": "",
+          "full_zip_url": "https://cdn-mineru.openxlab.org.cn/pdf/2026-08-10/9f65d701-ad10-4f4b-a4fc-75e60a682fac.zip"
+        },
+        {
+          "data_id": "compare_pipeline_highschool_geometry",
+          "file_name": "highschool_geometry.pdf",
+          "state": "done",
+          "err_msg": "",
+          "full_zip_url": "https://cdn-mineru.openxlab.org.cn/pdf/2026-08-10/fff34548-aee0-452d-aa43-47d2816efd6a.zip"
+        },
+        {
+          "data_id": "compare_pipeline_hybrid_middle_school",
+          "file_name": "hybrid_middle_school.pdf",
+          "state": "done",
+          "err_msg": "",
+          "full_zip_url": "https://cdn-mineru.openxlab.org.cn/pdf/2026-08-10/e022753b-0a6f-44a8-9b78-b47a11a0e66a.zip"
+        }
+      ]
+    },
+    "vlm": {
+      "batch_id": "46062c80-cac9-4498-9047-63fe60d613f1",
+      "final_results": [
+        {
+          "data_id": "compare_vlm_scan_formula",
+          "file_name": "scan_formula.pdf",
+          "state": "done",
+          "err_msg": "",
+          "full_zip_url": "https://cdn-mineru.openxlab.org.cn/pdf/2026-08-10/3e19e57b-2d56-4f1f-a9d8-30315bea57c6.zip"
+        },
+        {
+          "data_id": "compare_vlm_probability_table",
+          "file_name": "probability_table.pdf",
+          "state": "done",
+          "err_msg": "",
+          "full_zip_url": "https://cdn-mineru.openxlab.org.cn/pdf/2026-08-10/18e33c70-2cc7-4b46-a24b-16e50fa8ffbe.zip"
+        },
+        {
+          "data_id": "compare_vlm_highschool_geometry",
+          "file_name": "highschool_geometry.pdf",
+          "state": "done",
+          "err_msg": "",
+          "full_zip_url": "https://cdn-mineru.openxlab.org.cn/pdf/2026-08-10/1fe67a99-82f8-4085-9b25-22f9f9b014b3.zip"
+        },
+        {
+          "data_id": "compare_vlm_hybrid_middle_school",
+          "file_name": "hybrid_middle_school.pdf",
+          "state": "done",
+          "err_msg": "",
+          "full_zip_url": "https://cdn-mineru.openxlab.org.cn/pdf/2026-08-10/452231c2-b9a4-4482-8b20-1a6466410512.zip"
+        }
+      ]
+    }
+  }
+}

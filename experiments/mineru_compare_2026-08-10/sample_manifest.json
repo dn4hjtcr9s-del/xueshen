@@ -1,0 +1,42 @@
+[
+  {
+    "sample_id": "scan_formula",
+    "source": "fudan_shufen_textbook_1.pdf",
+    "start_page": 188,
+    "end_page": 195,
+    "description": "纯扫描数学分析页，包含 Taylor 公式和上下标",
+    "source_path": "/Users/kebofeier/Desktop/xueshen/math_text/fudan_shufen_textbook_1.pdf",
+    "sample_path": "/Users/kebofeier/Desktop/xueshen/experiments/mineru_compare_2026-08-10/input/scan_formula.pdf",
+    "page_count": 8
+  },
+  {
+    "sample_id": "probability_table",
+    "source": "概率论与数理统计 第五版 (盛骤 , 谢式千 , 潘承毅) (z-library.sk, 1lib.sk, z-lib.sk).pdf",
+    "start_page": 219,
+    "end_page": 226,
+    "description": "纯扫描概率统计页，包含概率公式和统计表格",
+    "source_path": "/Users/kebofeier/Desktop/xueshen/math_text/概率论与数理统计 第五版 (盛骤 , 谢式千 , 潘承毅) (z-library.sk, 1lib.sk, z-lib.sk).pdf",
+    "sample_path": "/Users/kebofeier/Desktop/xueshen/experiments/mineru_compare_2026-08-10/input/probability_table.pdf",
+    "page_count": 8
+  },
+  {
+    "sample_id": "highschool_geometry",
+    "source": "普通高中教科书·数学（A版）必修 第二册.pdf",
+    "start_page": 132,
+    "end_page": 139,
+    "description": "高中立体几何页，包含彩色几何图和练习题",
+    "source_path": "/Users/kebofeier/Desktop/xueshen/math_text/普通高中教科书·数学（A版）必修 第二册.pdf",
+    "sample_path": "/Users/kebofeier/Desktop/xueshen/experiments/mineru_compare_2026-08-10/input/highschool_geometry.pdf",
+    "page_count": 8
+  },
+  {
+    "sample_id": "hybrid_middle_school",
+    "source": "（根据2022年版课程标准修订）义务教育教科书·数学八年级下册.pdf",
+    "start_page": 130,
+    "end_page": 137,
+    "description": "混合型初中教材页，覆盖正文、公式和图形",
+    "source_path": "/Users/kebofeier/Desktop/xueshen/math_text/（根据2022年版课程标准修订）义务教育教科书·数学八年级下册.pdf",
+    "sample_path": "/Users/kebofeier/Desktop/xueshen/experiments/mineru_compare_2026-08-10/input/hybrid_middle_school.pdf",
+    "page_count": 8
+  }
+]
