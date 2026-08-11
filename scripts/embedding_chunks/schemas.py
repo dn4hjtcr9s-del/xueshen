@@ -131,6 +131,26 @@ class SemanticUnit:
 
 
 @dataclass(frozen=True, slots=True)
+class ChunkDraft:
+    """切块阶段的中间记录，稳定 ID 和哈希在后续统一生成。"""
+
+    book_id: str
+    book_name: str
+    grade_level: str
+    section: str
+    chapter_path: tuple[str, ...]
+    content_role: ContentRole
+    retrieval_weight: float
+    content_text: str
+    embedding_text: str
+    source_refs: tuple[SourceRef, ...]
+    token_count: int
+    tokenizer_id: str
+    unit_sequence: int
+    part_index: int
+
+
+@dataclass(frozen=True, slots=True)
 class ChunkRecord:
     """最终写入 chunks.jsonl 的单条 embedding 记录。"""
 
