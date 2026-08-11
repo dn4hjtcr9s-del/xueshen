@@ -31,9 +31,7 @@ def _raw_record(raw_text: str = "函数") -> dict[str, Any]:
 
 
 def _source_ref(record: dict[str, Any]) -> SourceRef:
-    payload = json.dumps(
-        record["raw"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
+    payload = json.dumps(record["raw"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return SourceRef(
         source_page=7,
         mineru_page_index=6,

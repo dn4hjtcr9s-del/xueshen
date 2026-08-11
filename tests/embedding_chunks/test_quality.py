@@ -77,7 +77,7 @@ def test_validate_chunks_aggregates_duplicate_pollution_and_size_errors() -> Non
     polluted = replace(
         _chunk(
             chunk_id="duplicate",
-            content_text='<table><tr><td>images/page_1.png</td></tr></table>',
+            content_text="<table><tr><td>images/page_1.png</td></tr></table>",
             embedding_text="one two three four five six seven eight nine",
         ),
         token_count=3,

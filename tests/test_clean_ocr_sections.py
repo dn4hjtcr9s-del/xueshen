@@ -117,9 +117,7 @@ def test_extract_chapter_header_hint_reads_dropped_header_text() -> None:
         "element_type": "page_header",
         "source_page": 14,
         "raw": {
-            "content": {
-                "page_header_content": [{"type": "text", "content": "第 1 章 行列式"}]
-            }
+            "content": {"page_header_content": [{"type": "text", "content": "第 1 章 行列式"}]}
         },
     }
 

@@ -48,9 +48,7 @@ def _record(
         ("练习 求函数定义域。", "exercise"),
     ],
 )
-def test_classifies_math_roles(
-    source_ref: SourceRef, text: str, expected_role: str
-) -> None:
+def test_classifies_math_roles(source_ref: SourceRef, text: str, expected_role: str) -> None:
     result = classify_record(_record(source_ref, text), ("第一章",))
 
     assert result.role == expected_role

@@ -161,7 +161,10 @@ def test_unlabelled_back_matter_defaults_to_answer_key_and_formats_math() -> Non
     assert len(units) == 1
     assert units[0].content_role == "answer_key"
     assert units[0].retrieval_weight == 0.65
-    assert units[0].content_text == r"""$$
+    assert (
+        units[0].content_text
+        == r"""$$
 x \in [0, 1]
 $$"""
+    )
     assert units[0].segments[0].splittable is False

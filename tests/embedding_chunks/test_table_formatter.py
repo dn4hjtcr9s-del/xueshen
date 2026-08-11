@@ -4,10 +4,7 @@ from scripts.embedding_chunks.table_formatter import linearize_table
 
 
 def test_linearize_table_preserves_caption_rows_and_entities() -> None:
-    html = (
-        "<table><tr><th>x</th><th>f(x)</th></tr>"
-        "<tr><td>-1</td><td>x &lt; 0</td></tr></table>"
-    )
+    html = "<table><tr><th>x</th><th>f(x)</th></tr><tr><td>-1</td><td>x &lt; 0</td></tr></table>"
 
     text = linearize_table(html, "表1 函数值")
 
