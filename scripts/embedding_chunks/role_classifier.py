@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Literal
 
 from scripts.embedding_chunks.schemas import CleanRecord, ContentRole
 
 ANSWER_PAT = re.compile(r"(部分)?习题(参考)?答案|参考答案|答案与提示")
-NON_CONTENT_PAT = re.compile(r"参考文献|索引|中英文名词|名词索引")
+NON_CONTENT_PAT = re.compile(
+    r"参考文献|索引|中英文名词|名词索引|按拼音字母序|郑重声明|防伪查询|读者意见反馈"
+)
+BackMatterMode = Literal["answer_key", "non_content"]
 APPENDIX_PAT = re.compile(r"^附录")
 DEFINITION_PAT = re.compile(r"^(定义|公理)\s*[\d一二三四五六七八九十.．-]*")
 THEOREM_PAT = re.compile(r"^(定理|引理|推论|命题|法则)\s*[\d一二三四五六七八九十.．-]*")
@@ -18,6 +22,16 @@ SOLUTION_PAT = re.compile(r"^解(?:答)?\s*[:：.]?")
 EXERCISE_PAT = re.compile(
     r"^(习题|练习|复习题|测试题|探究|思考|观察|做一做|想一想|试一试|复习巩固|综合运用|拓广探索)"
 )
+
+
+def back_matter_mode_for_heading(text: str) -> BackMatterMode | None:
+    """识别后置材料总标题；普通章标题不改变已经进入的模式。"""
+    normalized = " ".join(text.split())
+    if NON_CONTENT_PAT.search(normalized):
+        return "non_content"
+    if ANSWER_PAT.search(normalized):
+        return "answer_key"
+    return None
 
 
 @dataclass(frozen=True, slots=True)

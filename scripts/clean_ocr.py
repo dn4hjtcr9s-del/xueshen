@@ -44,13 +44,16 @@ NEW_PARA_START = re.compile(
     r"|\(?\d+[)）、.]|第[一二三四五六七八九十百零0-9]+[章节]|习题|复习题|练习)"
 )
 
-CHAPTER_PAT = re.compile(r"^第[一二三四五六七八九十百零0-9]+章")
-SECTION_PAT = re.compile(r"^第[一二三四五六七八九十百零0-9]+节")
+CHAPTER_PAT = re.compile(
+    r"^第\s*(?P<number>[一二三四五六七八九十百零0-9]+)\s*章"
+)
+SECTION_PAT = re.compile(r"^第\s*[一二三四五六七八九十百零0-9]+\s*节")
 SUB1_PAT = re.compile(r"^[一二三四五六七八九十]+、")
 SUB2_PAT = re.compile(r"^\d+\s*[.、]\s*\S")
 
 BACK_MATTER_PAT = re.compile(
-    r"^(附录|部分习题答案|习题答案|参考答案|习题参考答案|参考文献|索引|名词索引|中英文名词)"
+    r"^(部分习题答案|习题答案|参考答案|习题参考答案|参考文献|索引|名词索引|"
+    r"中英文名词|按拼音字母序|郑重声明|防伪查询|读者意见反馈)"
 )
 
 CJK = r"一-鿿㐀-䶿"
@@ -62,6 +65,31 @@ LEVEL_MAP = {  # book_id 数字前缀 -> 学段
 }
 
 # ---------------------------------------------------------------- 工具函数
+
+
+def chapter_key(text: str) -> str | None:
+    """把中文或阿拉伯数字章号规范为同一键，便于识别书末重复章标题。"""
+    match = CHAPTER_PAT.match(text.strip())
+    if match is None:
+        return None
+    number = match.group("number")
+    if number.isdigit():
+        return str(int(number))
+
+    digits = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+    total = 0
+    current = 0
+    for char in number:
+        if char in digits:
+            current = digits[char]
+        elif char == "十":
+            total += (current or 1) * 10
+            current = 0
+        elif char == "百":
+            total += (current or 1) * 100
+            current = 0
+    return str(total + current)
 
 
 def brace_delta(s: str) -> int:
@@ -224,6 +252,21 @@ def build_source_ref(rec: dict) -> dict:
     }
 
 
+def extract_chapter_header_hint(rec: dict) -> tuple[int, str] | None:
+    """从将被丢弃的页眉中提取章号，用于补偿正文章标题 OCR 缺失。"""
+    if rec.get("element_type") != "page_header":
+        return None
+    items = content_items(rec.get("raw", {}), "page_header_content")
+    text = "".join(
+        str(item.get("content", "")) for item in items if isinstance(item, dict)
+    ).strip()
+    key = chapter_key(text)
+    page = rec.get("source_page")
+    if key is None or not isinstance(page, int):
+        return None
+    return page, key
+
+
 def rebuild_block(rec: dict, report: dict):
     """从 raw 重建块的 markdown 文本。返回 (kind, text, extra) 或 None(丢弃)。"""
     etype = rec.get("element_type")
@@ -320,16 +363,35 @@ def heading_level(title: str, mineru_level: int) -> int:
     return max(1, min(mineru_level or 2, 4))
 
 
-def assign_sections(blocks):
+def assign_sections(blocks, chapter_header_hints=()):
     """打 front_matter / body / back_matter 标签。"""
     section = "front_matter"
+    max_page = max((b.get("source_page", 0) for b in blocks), default=0)
+    first_chapter = None
+    first_header_hint = min(chapter_header_hints, key=lambda item: item[0], default=None)
     for b in blocks:
+        if (
+            section == "front_matter"
+            and first_header_hint is not None
+            and b.get("source_page", 0) >= first_header_hint[0]
+        ):
+            # 页眉不会写入 clean 数据，只用于恢复缺失的首章正文边界。
+            section = "body"
+            first_chapter = first_header_hint[1]
         if b["kind"] == "title":
-            t = b["text"]
-            if section == "front_matter" and CHAPTER_PAT.match(t):
+            t = b["text"].strip()
+            current_chapter_key = chapter_key(t)
+            if section == "front_matter" and current_chapter_key is not None:
                 section = "body"
-            elif section == "body" and BACK_MATTER_PAT.match(t):
-                section = "back_matter"
+                first_chapter = current_chapter_key
+            elif section == "body":
+                repeated_first_chapter = (
+                    current_chapter_key is not None
+                    and current_chapter_key == first_chapter
+                    and b.get("source_page", 0) >= max_page * 0.7
+                )
+                if BACK_MATTER_PAT.match(t) or repeated_first_chapter:
+                    section = "back_matter"
         b["section"] = section
     # 没找到章标题的书: 全部归入 body
     if all(b["section"] == "front_matter" for b in blocks):
@@ -459,10 +521,14 @@ def process_book(book_dir: Path, outroot: Path):
         level = "未知"
 
     blocks = []
+    chapter_header_hints = []
     with open(book_dir / "content_list.jsonl") as f:
         for line in f:
             rec = json.loads(line)
             counts["blocks_in"] += 1
+            header_hint = extract_chapter_header_hint(rec)
+            if header_hint is not None:
+                chapter_header_hints.append(header_hint)
             r = rebuild_block(rec, counts)
             if r is None:
                 continue
@@ -501,7 +567,7 @@ def process_book(book_dir: Path, outroot: Path):
         else:
             b.pop("mineru_level", None)
 
-    blocks = assign_sections(blocks)
+    blocks = assign_sections(blocks, chapter_header_hints)
     blocks = dedupe_duplicate_pages(blocks, counts)
     blocks = merge_paragraphs(blocks, counts)
     blocks = merge_split_display_formulas(blocks, counts)

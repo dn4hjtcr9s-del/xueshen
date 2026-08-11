@@ -5,7 +5,11 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from scripts.embedding_chunks.heading_tracker import HeadingTracker
-from scripts.embedding_chunks.role_classifier import classify_record
+from scripts.embedding_chunks.role_classifier import (
+    BackMatterMode,
+    back_matter_mode_for_heading,
+    classify_record,
+)
 from scripts.embedding_chunks.schemas import (
     CleanRecord,
     ContentRole,
@@ -69,6 +73,7 @@ def build_semantic_units(
     current_path: tuple[str, ...] = ()
     current_record: CleanRecord | None = None
     unit_sequence = 0
+    back_matter_mode: BackMatterMode | None = None
 
     def flush() -> None:
         nonlocal current_segments, current_role, current_path, current_record, unit_sequence
@@ -92,21 +97,54 @@ def build_semantic_units(
         current_path = ()
         current_record = None
 
-    def start(record: CleanRecord, path: tuple[str, ...], role: ContentRole) -> None:
+    def start(
+        record: CleanRecord,
+        path: tuple[str, ...],
+        role: ContentRole,
+        segment_role: ContentRole,
+    ) -> None:
         nonlocal current_role, current_path, current_record
         current_role = role
         current_path = path
         current_record = record
-        current_segments.append(_segment_for(record, role))
+        current_segments.append(_segment_for(record, segment_role))
 
     for record in records:
         if record.element_type == "title":
             flush()
+            if record.section == "back_matter":
+                detected_mode = back_matter_mode_for_heading(record.text)
+                if detected_mode is not None:
+                    back_matter_mode = detected_mode
+                elif back_matter_mode is None:
+                    # 清洗器可通过书末重复章标题识别无总标题答案区。
+                    back_matter_mode = "answer_key"
+            else:
+                back_matter_mode = None
             tracker.update(record.level or 2, record.text)
             continue
 
         path = tracker.path
-        classification = classify_record(record, path)
+        if record.section == "back_matter" and back_matter_mode is None:
+            # 后置区若没有显式总标题，默认按习题答案处理，直到遇到非内容标题。
+            back_matter_mode = "answer_key"
+        if record.section == "back_matter" and back_matter_mode == "non_content":
+            flush()
+            excluded.append(
+                ExcludedRecord(
+                    book_id=record.book_id,
+                    reason="non_content_back_matter",
+                    text=record.text,
+                    source_refs=record.source_refs,
+                    element_type=record.element_type,
+                    chapter_path=path,
+                )
+            )
+            continue
+
+        answer_mode = record.section == "back_matter" and back_matter_mode == "answer_key"
+        # 答案模式只覆盖语义单元角色；元素自身类型仍负责公式、表格和图片格式化。
+        classification = classify_record(record, () if answer_mode else path)
         if classification.role is None:
             if classification.exclusion_reason != "image_without_caption":
                 flush()
@@ -122,36 +160,37 @@ def build_semantic_units(
             )
             continue
 
-        role = classification.role
+        segment_role = classification.role
+        role: ContentRole = "answer_key" if answer_mode else segment_role
         if current_record is not None and (
             current_record.section != record.section or current_path != path
         ):
             flush()
 
         if current_role is None:
-            start(record, path, role)
+            start(record, path, role, segment_role)
             continue
 
         # 定理后的证明、例题后的解答属于前一锚点，不改变单元主角色。
         if role == "proof" and current_role in {"definition", "theorem", "proof"}:
-            current_segments.append(_segment_for(record, role))
+            current_segments.append(_segment_for(record, segment_role))
             continue
         if role == "solution" and current_role in {"example", "exercise", "solution"}:
-            current_segments.append(_segment_for(record, role))
+            current_segments.append(_segment_for(record, segment_role))
             continue
 
         # 公式、表格和图注优先绑定当前上下文；正文继续扩展当前锚点。
         if role in {"body", "formula", "table", "figure_caption"}:
-            current_segments.append(_segment_for(record, role))
+            current_segments.append(_segment_for(record, segment_role))
             continue
 
         # 连续答案或附录记录维持同一单元，其余强锚点开始新单元。
         if role == current_role and role in {"answer_key", "appendix"}:
-            current_segments.append(_segment_for(record, role))
+            current_segments.append(_segment_for(record, segment_role))
             continue
         if role in ANCHOR_ROLES or role in {"proof", "solution"}:
             flush()
-            start(record, path, role)
+            start(record, path, role, segment_role)
             continue
 
         current_segments.append(_segment_for(record, role))

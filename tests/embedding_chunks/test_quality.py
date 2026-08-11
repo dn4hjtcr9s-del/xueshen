@@ -109,3 +109,13 @@ def test_validate_chunks_detects_hash_mismatches() -> None:
         "content_hash_mismatch": 1,
         "source_hash_mismatch": 1,
     }
+
+
+def test_validate_chunks_does_not_treat_math_inequalities_as_html() -> None:
+    content = "$ a < b, c > d $；并且 a<b 或 a>b"
+    chunk = _chunk(content_text=content, embedding_text=f"book chapter {content}")
+
+    report = validate_chunks([chunk], WhitespaceTokenizer(), chunk_size=20)
+
+    assert report.passed is True
+    assert report.error_counts == {}

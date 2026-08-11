@@ -9,6 +9,10 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+# 直接以文件路径运行时，先把项目根目录加入模块搜索路径。
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from scripts.embedding_chunks.builder import (
     BuildConfig,
     BuildError,

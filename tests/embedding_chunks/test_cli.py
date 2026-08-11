@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +59,21 @@ def _write_single_book(clean_root: Path, raw_root: Path) -> None:
     (raw_root / "01_book" / "content_list.jsonl").write_text(
         json.dumps(raw_record, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+
+
+def test_cli_script_can_be_executed_directly() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+
+    completed = subprocess.run(
+        [sys.executable, "scripts/build_embedding_chunks.py", "--help"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--chunk-size" in completed.stdout
 
 
 def test_cli_builds_one_book_with_production_tokenizer(tmp_path: Path) -> None:

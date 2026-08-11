@@ -116,3 +116,52 @@ def test_excluded_records_keep_reason_and_source_refs() -> None:
     assert units == []
     assert [item.reason for item in excluded] == ["front_matter", "image_without_caption"]
     assert excluded[1].source_refs[0].block_index == 1
+
+
+def test_back_matter_mode_persists_across_chapter_and_letter_headings() -> None:
+    records = [
+        _record(
+            0,
+            "习题答案与提示",
+            element_type="title",
+            level=1,
+            section="back_matter",
+        ),
+        _record(1, "第一章", element_type="title", level=1, section="back_matter"),
+        _record(2, "1. A；2. B。", section="back_matter"),
+        _record(3, "参考文献", element_type="title", level=1, section="back_matter"),
+        _record(4, "A", element_type="title", level=1, section="back_matter"),
+        _record(5, "作者，书名，出版社。", section="back_matter"),
+    ]
+
+    units, excluded = build_semantic_units(records)
+
+    assert len(units) == 1
+    assert units[0].content_role == "answer_key"
+    assert units[0].retrieval_weight == 0.65
+    assert units[0].content_text == "1. A；2. B。"
+    assert [item.reason for item in excluded] == ["non_content_back_matter"]
+    assert excluded[0].text == "作者，书名，出版社。"
+
+
+def test_unlabelled_back_matter_defaults_to_answer_key_and_formats_math() -> None:
+    records = [
+        _record(0, "第一章", element_type="title", level=1, section="back_matter"),
+        _record(
+            1,
+            r"x \in [0, 1]",
+            element_type="equation_interline",
+            section="back_matter",
+        ),
+    ]
+
+    units, excluded = build_semantic_units(records)
+
+    assert excluded == []
+    assert len(units) == 1
+    assert units[0].content_role == "answer_key"
+    assert units[0].retrieval_weight == 0.65
+    assert units[0].content_text == r"""$$
+x \in [0, 1]
+$$"""
+    assert units[0].segments[0].splittable is False

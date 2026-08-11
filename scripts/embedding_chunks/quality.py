@@ -11,7 +11,22 @@ from scripts.embedding_chunks.identifiers import content_hash, source_hash
 from scripts.embedding_chunks.schemas import ChunkRecord
 from scripts.embedding_chunks.tokenizer import Tokenizer
 
-_HTML_TAG_PATTERN = re.compile(r"<\s*/?\s*[a-zA-Z][^>]*>")
+# 只识别实际 HTML/MathML/SVG 标签名，避免把数学不等式 “a < b > c” 当成标签。
+_HTML_TAG_NAMES = (
+    "a|abbr|article|aside|b|blockquote|body|br|caption|code|col|colgroup|dd|div|dl|dt|"
+    "em|figcaption|figure|footer|h1|h2|h3|h4|h5|h6|head|header|hr|html|i|img|"
+    "li|main|math|meta|nav|ol|p|path|pre|section|small|span|strong|style|sub|sup|"
+    "svg|table|tbody|td|tfoot|th|thead|title|tr|u|ul"
+)
+_HTML_ATTRIBUTE = (
+    r"[A-Za-z_:][A-Za-z0-9_.:-]*"
+    r"(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?"
+)
+_HTML_TAG_PATTERN = re.compile(
+    rf"(?:<!--.*?-->|<!DOCTYPE\b[^>]*>|"
+    rf"</?(?:{_HTML_TAG_NAMES})\b(?:\s+{_HTML_ATTRIBUTE})*\s*/?>)",
+    re.IGNORECASE | re.DOTALL,
+)
 _IMAGE_PATH_PATTERN = re.compile(
     r"(?:^|[\s\"'(<>=])[^\s\"'<>]*\.(?:png|jpe?g|gif|webp|svg|bmp|tiff?)(?=$|[\s\"')<>])",
     re.IGNORECASE,
