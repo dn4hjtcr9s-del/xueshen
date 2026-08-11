@@ -26,7 +26,7 @@ RAG 使用独立资源：
 
 | 资源 | RAG 配置 |
 |---|---|
-| Compose | `/Users/kebofeier/Desktop/xueshen/.local/worktrees/embedding-chunks-v1/docker-compose.rag.yml` |
+| Compose | `/Users/kebofeier/Desktop/xueshen/docker-compose.rag.yml` |
 | 服务 | `rag-postgres` |
 | 镜像 | `pgvector/pgvector:pg17` |
 | 本地端口 | `55433` |
@@ -34,7 +34,7 @@ RAG 使用独立资源：
 | 用户 | `rag` |
 | volume | `rag-postgres-data` |
 | URL | `RAG_DATABASE_URL=postgresql+psycopg://rag:rag@127.0.0.1:55433/rag` |
-| migration | `/Users/kebofeier/Desktop/xueshen/.local/worktrees/embedding-chunks-v1/rag_migrations/` |
+| migration | `/Users/kebofeier/Desktop/xueshen/rag_migrations/` |
 | version table | `rag.rag_alembic_version` |
 
 ## Schema 设计
@@ -79,7 +79,7 @@ RAG 使用独立资源：
 ## 本地运行
 
 ```bash
-cd /Users/kebofeier/Desktop/xueshen/.local/worktrees/embedding-chunks-v1
+cd /Users/kebofeier/Desktop/xueshen
 
 # 1. 只启动独立 RAG PostgreSQL
  docker compose -f docker-compose.rag.yml up -d rag-postgres
