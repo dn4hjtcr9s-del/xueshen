@@ -253,20 +253,14 @@ class EmbeddingRunner:
         retry_failures: bool = False,
     ) -> RunSummary:
         """运行本轮批次；瞬时失败保持 pending，其余完整批次立即写 shard。"""
-        completed_before = self._store.load_completed_batches(
-            retry_failures=retry_failures
-        )
-        pending = [
-            plan for plan in self._store.batches if plan.batch_index not in completed_before
-        ]
+        completed_before = self._store.load_completed_batches(retry_failures=retry_failures)
+        pending = [plan for plan in self._store.batches if plan.batch_index not in completed_before]
         selected = self._select_batches(pending, limit)
         completed_this_run = 0
         deferred: list[int] = []
         if selected:
             with ThreadPoolExecutor(max_workers=self._settings.concurrency) as executor:
-                futures = {
-                    executor.submit(self._execute_batch, plan): plan for plan in selected
-                }
+                futures = {executor.submit(self._execute_batch, plan): plan for plan in selected}
                 for future in as_completed(futures):
                     plan = futures[future]
                     try:

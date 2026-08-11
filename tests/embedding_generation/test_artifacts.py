@@ -172,9 +172,7 @@ def test_shards_resume_and_publish_ready_manifest(tmp_path: Path) -> None:
     records = [json.loads(line) for line in (output / "embeddings.jsonl").read_text().splitlines()]
     assert [record["chunk_index"] for record in records] == [0, 1, 2]
     assert all(record["dimensions"] == 3 for record in records)
-    assert ready["files"]["embeddings.jsonl"]["sha256"] == _sha256(
-        output / "embeddings.jsonl"
-    )
+    assert ready["files"]["embeddings.jsonl"]["sha256"] == _sha256(output / "embeddings.jsonl")
 
 
 def test_temporary_shard_is_not_treated_as_completed(tmp_path: Path) -> None:
@@ -251,8 +249,7 @@ def test_failure_record_keeps_manifest_partial_and_is_published(tmp_path: Path) 
     assert manifest["counts"]["successful_chunks"] == 1
     assert manifest["counts"]["failed_chunks"] == 1
     failures = [
-        json.loads(line)
-        for line in (store.output_root / "failures.jsonl").read_text().splitlines()
+        json.loads(line) for line in (store.output_root / "failures.jsonl").read_text().splitlines()
     ]
     assert failures[0]["error_code"] == "http_400"
     assert "vector" not in failures[0]

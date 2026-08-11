@@ -53,8 +53,7 @@ def test_cli_script_can_be_executed_directly() -> None:
 def test_cli_returns_nonzero_when_api_key_is_missing(tmp_path: Path, capsys) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "EMBEDDING_BASE_URL=https://example.invalid/v1\n"
-        "EMBEDDING_MODEL=text-embedding-v4\n",
+        "EMBEDDING_BASE_URL=https://example.invalid/v1\nEMBEDDING_MODEL=text-embedding-v4\n",
         encoding="utf-8",
     )
     chunk_root = write_chunk_root(tmp_path / "chunks", ["text"])
