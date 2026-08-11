@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 clean_ocr.py — MinerU OCR 结果清洗流水线
 
@@ -19,9 +18,11 @@ clean_ocr.py — MinerU OCR 结果清洗流水线
     cleaning_report.json  每条规则的删/改统计
 """
 import argparse
+import hashlib
 import json
 import re
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 # ---------------------------------------------------------------- 规则常量
@@ -207,6 +208,22 @@ def content_items(raw: dict, key: str):
     return raw.get("content", {}).get(key) or []
 
 
+def build_source_ref(rec: dict) -> dict:
+    """从原始 OCR 记录构造可稳定校验的精确 block 引用。"""
+    raw = rec.get("raw", {})
+    payload = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return {
+        "source_page": rec.get("source_page"),
+        "mineru_page_index": rec.get("mineru_page_index"),
+        "block_index": rec.get("block_index"),
+        "source_chunk_id": rec.get("chunk_id", ""),
+        "source_pdf": rec.get("source_pdf", ""),
+        "element_type": rec.get("element_type", ""),
+        "bbox": raw.get("bbox", []),
+        "raw_hash": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+    }
+
+
 def rebuild_block(rec: dict, report: dict):
     """从 raw 重建块的 markdown 文本。返回 (kind, text, extra) 或 None(丢弃)。"""
     etype = rec.get("element_type")
@@ -329,7 +346,7 @@ def dedupe_duplicate_pages(blocks, report):
             pages.setdefault(b["source_page"], []).append(b["text"].strip())
     dup_pages = set()
     nums = sorted(pages)
-    for a, b_ in zip(nums, nums[1:]):
+    for a, b_ in pairwise(nums):
         if b_ - a <= 1 and pages[a] == pages[b_]:
             dup_pages.add(b_)
     if not dup_pages:
@@ -350,6 +367,7 @@ def merge_paragraphs(blocks, report):
                     and not NEW_PARA_START.match(b["text"])):
                 out[-1]["text"] = prev + b["text"]
                 out[-1]["end_page"] = b["source_page"]
+                out[-1]["source_refs"].extend(b["source_refs"])
                 report["paragraphs_merged"] += 1
                 continue
         out.append(b)
@@ -367,6 +385,7 @@ def merge_split_display_formulas(blocks, report):
             nb = dict(b)
             nb["text"] = b["text"] + " " + blocks[i + 1]["text"]
             nb["end_page"] = blocks[i + 1]["source_page"]
+            nb["source_refs"] = [*b["source_refs"], *blocks[i + 1]["source_refs"]]
             out.append(nb)
             report["formulas_merged_interline"] += 1
             i += 2
@@ -467,7 +486,9 @@ def process_book(book_dir: Path, outroot: Path):
             blocks.append({
                 "kind": kind, "text": text, "extra": extra,
                 "source_page": rec.get("source_page"),
+                "end_page": rec.get("source_page"),
                 "block_index": rec.get("block_index"),
+                "source_refs": [build_source_ref(rec)],
                 "mineru_level": (rec.get("raw", {}).get("content", {}) or {}).get("level"),
             })
     counts["blocks_out_raw"] = len(blocks)
@@ -514,8 +535,12 @@ def process_book(book_dir: Path, outroot: Path):
         for b in blocks:
             f.write(json.dumps({
                 "book_id": book_id, "book_name": book_name, "grade_level": level,
-                "source_page": b["source_page"], "section": b["section"],
-                "element_type": b["kind"], **({"level": b["level"]} if b["kind"] == "title" else {}),
+                "source_page": b["source_page"],
+                "source_page_end": b.get("end_page", b["source_page"]),
+                "source_refs": b["source_refs"],
+                "section": b["section"],
+                "element_type": b["kind"],
+                **({"level": b["level"]} if b["kind"] == "title" else {}),
                 "text": b["text"], "extra": b.get("extra", {}),
             }, ensure_ascii=False) + "\n")
 
