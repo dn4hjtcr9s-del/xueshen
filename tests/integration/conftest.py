@@ -39,6 +39,7 @@ USER_TABLES = (
     "source_deletions",
     "graph_state_audit",
     "graph_user_node_activity",
+    "graph_activity_seen_events",
     "graph_user_states",
     "memory_graph_links",
     "memory_deleted_evidence_suppressions",
@@ -87,3 +88,72 @@ def memory_service(
     store: LocalMarkdownStore,
 ) -> MemoryService:
     return MemoryService(settings=settings, session_factory=session_factory, store=store)
+
+
+# ---------------------------------------------------------------------------
+# Graph 集成测试设施（runtime context / runner）
+# ---------------------------------------------------------------------------
+
+import logging  # noqa: E402
+
+from backend.memory.graph.openai_client import FakeMemoryLLMClient  # noqa: E402
+from backend.memory.graph.runner import LocalLangGraphRunner  # noqa: E402
+from backend.memory.graph.state import (  # noqa: E402
+    MemoryRuntimeContext,
+    SystemClock,
+    SystemIdGenerator,
+    default_registry_factory,
+)
+from backend.memory.readers.testing import (  # noqa: E402
+    FakeActivityReader,
+    FakeConversationReader,
+)
+from backend.memory.services.graph_state_service import (  # noqa: E402
+    KnowledgeGraphStateService,
+)
+
+
+@pytest.fixture()
+def fake_llm() -> FakeMemoryLLMClient:
+    return FakeMemoryLLMClient()
+
+
+@pytest.fixture()
+def fake_conversation_reader() -> FakeConversationReader:
+    return FakeConversationReader()
+
+
+@pytest.fixture()
+def fake_activity_reader() -> FakeActivityReader:
+    return FakeActivityReader()
+
+
+@pytest.fixture()
+def runtime_context(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    memory_service: MemoryService,
+    fake_llm: FakeMemoryLLMClient,
+    fake_conversation_reader: FakeConversationReader,
+    fake_activity_reader: FakeActivityReader,
+) -> MemoryRuntimeContext:
+    return MemoryRuntimeContext(
+        settings=settings,
+        memory_service=memory_service,
+        graph_state_service=KnowledgeGraphStateService(
+            settings=settings, session_factory=session_factory
+        ),
+        conversation_reader=fake_conversation_reader,
+        activity_reader=fake_activity_reader,
+        graph_registry_factory=default_registry_factory,
+        openai_client=fake_llm,
+        session_factory=session_factory,
+        clock=SystemClock(),
+        id_generator=SystemIdGenerator(),
+        logger=logging.getLogger("test.graph"),
+    )
+
+
+@pytest.fixture()
+def runner(runtime_context: MemoryRuntimeContext) -> LocalLangGraphRunner:
+    return LocalLangGraphRunner(context=runtime_context)

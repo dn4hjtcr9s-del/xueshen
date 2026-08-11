@@ -149,6 +149,11 @@ class MemoryService:
         self._session_factory = session_factory
         self._store = store
 
+    @property
+    def store(self) -> MarkdownStore:
+        """存储边界只读访问（维护分支使用，§10.7）。"""
+        return self._store
+
     # ---------------- 读取 ----------------
 
     async def _load_active_document(

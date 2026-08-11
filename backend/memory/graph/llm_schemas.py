@@ -10,7 +10,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.memory.contracts.commands import LearnerPatch, MasteryPatch
+from backend.memory.contracts.commands import (
+    LearnerPatch,
+    MasteryPatch,
+    MutationPlanDraft,
+    MutationPlanResult,
+)
 
 __all__ = [
     "CandidateExtractionResult",
@@ -67,21 +72,3 @@ class CandidateExtractionResult(BaseModel):
 
     candidates: list[CandidateMemory] = Field(max_length=20)
     ignored_reason_codes: list[str] = Field(default_factory=list)
-
-
-class MutationPlanDraft(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    target_memory_type: Literal["learner", "mastery"]
-    topic_title: str | None = Field(default=None, max_length=120)
-    action: Literal["create", "merge", "replace", "append_evidence", "no_change"]
-    learner_patch: LearnerPatch | None = None
-    mastery_patch: MasteryPatch | None = None
-    candidate_indexes: list[int] = Field(default_factory=list, max_length=20)
-    reasoning_summary: str = Field(max_length=500)
-
-
-class MutationPlanResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    plans: list[MutationPlanDraft] = Field(max_length=8)

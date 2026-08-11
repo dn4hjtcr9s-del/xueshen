@@ -221,6 +221,52 @@ async def upsert_node_activity(
     )
 
 
+async def record_activity_event_once(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    node_id: str,
+    activity_type: str,
+    activity_id: str,
+    event_count: int,
+    occurred_at: datetime,
+) -> bool:
+    """seen 去重 + 计数 upsert 同事务（§10.3.1 / 裁决 A）。
+
+    返回 True 表示首次见到该事件并已累加计数；False 表示重复事件，未改动。
+    """
+    from backend.memory.persistence.database import exec_rowcount
+
+    inserted = await exec_rowcount(
+        session,
+        text(
+            """
+            INSERT INTO graph_activity_seen_events (
+                user_id, node_id, activity_type, activity_id
+            ) VALUES (:user_id, :node_id, :activity_type, :activity_id)
+            ON CONFLICT DO NOTHING
+            """
+        ),
+        {
+            "user_id": user_id,
+            "node_id": node_id,
+            "activity_type": activity_type,
+            "activity_id": activity_id,
+        },
+    )
+    if inserted != 1:
+        return False
+    await upsert_node_activity(
+        session,
+        user_id=user_id,
+        node_id=node_id,
+        activity_type=activity_type,
+        event_count=event_count,
+        occurred_at=occurred_at,
+    )
+    return True
+
+
 async def list_node_activity(session: AsyncSession, *, user_id: UUID) -> list[dict[str, Any]]:
     result = await session.execute(
         text("SELECT * FROM graph_user_node_activity WHERE user_id = :user_id"),

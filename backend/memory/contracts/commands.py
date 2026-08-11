@@ -274,6 +274,8 @@ class MutationPlanDraft(BaseModel):
 
 
 class MutationPlanResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     plans: list[MutationPlanDraft] = Field(max_length=8)
 
 
