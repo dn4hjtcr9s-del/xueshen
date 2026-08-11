@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 clean_ocr.py — MinerU OCR 结果清洗流水线
 
@@ -19,9 +18,11 @@ clean_ocr.py — MinerU OCR 结果清洗流水线
     cleaning_report.json  每条规则的删/改统计
 """
 import argparse
+import hashlib
 import json
 import re
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 # ---------------------------------------------------------------- 规则常量
@@ -43,13 +44,16 @@ NEW_PARA_START = re.compile(
     r"|\(?\d+[)）、.]|第[一二三四五六七八九十百零0-9]+[章节]|习题|复习题|练习)"
 )
 
-CHAPTER_PAT = re.compile(r"^第[一二三四五六七八九十百零0-9]+章")
-SECTION_PAT = re.compile(r"^第[一二三四五六七八九十百零0-9]+节")
+CHAPTER_PAT = re.compile(
+    r"^第\s*(?P<number>[一二三四五六七八九十百零0-9]+)\s*章"
+)
+SECTION_PAT = re.compile(r"^第\s*[一二三四五六七八九十百零0-9]+\s*节")
 SUB1_PAT = re.compile(r"^[一二三四五六七八九十]+、")
 SUB2_PAT = re.compile(r"^\d+\s*[.、]\s*\S")
 
 BACK_MATTER_PAT = re.compile(
-    r"^(附录|部分习题答案|习题答案|参考答案|习题参考答案|参考文献|索引|名词索引|中英文名词)"
+    r"^(部分习题答案|习题答案|参考答案|习题参考答案|参考文献|索引|名词索引|"
+    r"中英文名词|按拼音字母序|郑重声明|防伪查询|读者意见反馈)"
 )
 
 CJK = r"一-鿿㐀-䶿"
@@ -61,6 +65,31 @@ LEVEL_MAP = {  # book_id 数字前缀 -> 学段
 }
 
 # ---------------------------------------------------------------- 工具函数
+
+
+def chapter_key(text: str) -> str | None:
+    """把中文或阿拉伯数字章号规范为同一键，便于识别书末重复章标题。"""
+    match = CHAPTER_PAT.match(text.strip())
+    if match is None:
+        return None
+    number = match.group("number")
+    if number.isdigit():
+        return str(int(number))
+
+    digits = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+    total = 0
+    current = 0
+    for char in number:
+        if char in digits:
+            current = digits[char]
+        elif char == "十":
+            total += (current or 1) * 10
+            current = 0
+        elif char == "百":
+            total += (current or 1) * 100
+            current = 0
+    return str(total + current)
 
 
 def brace_delta(s: str) -> int:
@@ -207,6 +236,37 @@ def content_items(raw: dict, key: str):
     return raw.get("content", {}).get(key) or []
 
 
+def build_source_ref(rec: dict) -> dict:
+    """从原始 OCR 记录构造可稳定校验的精确 block 引用。"""
+    raw = rec.get("raw", {})
+    payload = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return {
+        "source_page": rec.get("source_page"),
+        "mineru_page_index": rec.get("mineru_page_index"),
+        "block_index": rec.get("block_index"),
+        "source_chunk_id": rec.get("chunk_id", ""),
+        "source_pdf": rec.get("source_pdf", ""),
+        "element_type": rec.get("element_type", ""),
+        "bbox": raw.get("bbox", []),
+        "raw_hash": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+    }
+
+
+def extract_chapter_header_hint(rec: dict) -> tuple[int, str] | None:
+    """从将被丢弃的页眉中提取章号，用于补偿正文章标题 OCR 缺失。"""
+    if rec.get("element_type") != "page_header":
+        return None
+    items = content_items(rec.get("raw", {}), "page_header_content")
+    text = "".join(
+        str(item.get("content", "")) for item in items if isinstance(item, dict)
+    ).strip()
+    key = chapter_key(text)
+    page = rec.get("source_page")
+    if key is None or not isinstance(page, int):
+        return None
+    return page, key
+
+
 def rebuild_block(rec: dict, report: dict):
     """从 raw 重建块的 markdown 文本。返回 (kind, text, extra) 或 None(丢弃)。"""
     etype = rec.get("element_type")
@@ -303,16 +363,35 @@ def heading_level(title: str, mineru_level: int) -> int:
     return max(1, min(mineru_level or 2, 4))
 
 
-def assign_sections(blocks):
+def assign_sections(blocks, chapter_header_hints=()):
     """打 front_matter / body / back_matter 标签。"""
     section = "front_matter"
+    max_page = max((b.get("source_page", 0) for b in blocks), default=0)
+    first_chapter = None
+    first_header_hint = min(chapter_header_hints, key=lambda item: item[0], default=None)
     for b in blocks:
+        if (
+            section == "front_matter"
+            and first_header_hint is not None
+            and b.get("source_page", 0) >= first_header_hint[0]
+        ):
+            # 页眉不会写入 clean 数据，只用于恢复缺失的首章正文边界。
+            section = "body"
+            first_chapter = first_header_hint[1]
         if b["kind"] == "title":
-            t = b["text"]
-            if section == "front_matter" and CHAPTER_PAT.match(t):
+            t = b["text"].strip()
+            current_chapter_key = chapter_key(t)
+            if section == "front_matter" and current_chapter_key is not None:
                 section = "body"
-            elif section == "body" and BACK_MATTER_PAT.match(t):
-                section = "back_matter"
+                first_chapter = current_chapter_key
+            elif section == "body":
+                repeated_first_chapter = (
+                    current_chapter_key is not None
+                    and current_chapter_key == first_chapter
+                    and b.get("source_page", 0) >= max_page * 0.7
+                )
+                if BACK_MATTER_PAT.match(t) or repeated_first_chapter:
+                    section = "back_matter"
         b["section"] = section
     # 没找到章标题的书: 全部归入 body
     if all(b["section"] == "front_matter" for b in blocks):
@@ -329,7 +408,7 @@ def dedupe_duplicate_pages(blocks, report):
             pages.setdefault(b["source_page"], []).append(b["text"].strip())
     dup_pages = set()
     nums = sorted(pages)
-    for a, b_ in zip(nums, nums[1:]):
+    for a, b_ in pairwise(nums):
         if b_ - a <= 1 and pages[a] == pages[b_]:
             dup_pages.add(b_)
     if not dup_pages:
@@ -350,6 +429,7 @@ def merge_paragraphs(blocks, report):
                     and not NEW_PARA_START.match(b["text"])):
                 out[-1]["text"] = prev + b["text"]
                 out[-1]["end_page"] = b["source_page"]
+                out[-1]["source_refs"].extend(b["source_refs"])
                 report["paragraphs_merged"] += 1
                 continue
         out.append(b)
@@ -367,6 +447,7 @@ def merge_split_display_formulas(blocks, report):
             nb = dict(b)
             nb["text"] = b["text"] + " " + blocks[i + 1]["text"]
             nb["end_page"] = blocks[i + 1]["source_page"]
+            nb["source_refs"] = [*b["source_refs"], *blocks[i + 1]["source_refs"]]
             out.append(nb)
             report["formulas_merged_interline"] += 1
             i += 2
@@ -440,10 +521,14 @@ def process_book(book_dir: Path, outroot: Path):
         level = "未知"
 
     blocks = []
+    chapter_header_hints = []
     with open(book_dir / "content_list.jsonl") as f:
         for line in f:
             rec = json.loads(line)
             counts["blocks_in"] += 1
+            header_hint = extract_chapter_header_hint(rec)
+            if header_hint is not None:
+                chapter_header_hints.append(header_hint)
             r = rebuild_block(rec, counts)
             if r is None:
                 continue
@@ -467,7 +552,9 @@ def process_book(book_dir: Path, outroot: Path):
             blocks.append({
                 "kind": kind, "text": text, "extra": extra,
                 "source_page": rec.get("source_page"),
+                "end_page": rec.get("source_page"),
                 "block_index": rec.get("block_index"),
+                "source_refs": [build_source_ref(rec)],
                 "mineru_level": (rec.get("raw", {}).get("content", {}) or {}).get("level"),
             })
     counts["blocks_out_raw"] = len(blocks)
@@ -480,7 +567,7 @@ def process_book(book_dir: Path, outroot: Path):
         else:
             b.pop("mineru_level", None)
 
-    blocks = assign_sections(blocks)
+    blocks = assign_sections(blocks, chapter_header_hints)
     blocks = dedupe_duplicate_pages(blocks, counts)
     blocks = merge_paragraphs(blocks, counts)
     blocks = merge_split_display_formulas(blocks, counts)
@@ -514,8 +601,12 @@ def process_book(book_dir: Path, outroot: Path):
         for b in blocks:
             f.write(json.dumps({
                 "book_id": book_id, "book_name": book_name, "grade_level": level,
-                "source_page": b["source_page"], "section": b["section"],
-                "element_type": b["kind"], **({"level": b["level"]} if b["kind"] == "title" else {}),
+                "source_page": b["source_page"],
+                "source_page_end": b.get("end_page", b["source_page"]),
+                "source_refs": b["source_refs"],
+                "section": b["section"],
+                "element_type": b["kind"],
+                **({"level": b["level"]} if b["kind"] == "title" else {}),
                 "text": b["text"], "extra": b.get("extra", {}),
             }, ensure_ascii=False) + "\n")
 

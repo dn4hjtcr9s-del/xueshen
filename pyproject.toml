@@ -30,6 +30,9 @@ dev = [
     "mypy>=1.17,<2.0",
     "testcontainers[postgres]>=4.10,<5.0",
 ]
+embedding = [
+    "tiktoken>=0.11,<1",
+]
 
 [tool.uv]
 package = false
