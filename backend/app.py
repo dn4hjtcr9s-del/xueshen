@@ -37,6 +37,8 @@ from backend.memory.api.dependencies import (
     trace_id_from_headers,
 )
 from backend.memory.contracts.errors import MemoryError, PublicError
+from backend.memory.logging_config import configure_logging
+from backend.memory.persistence import break_glass as bg_repo
 from backend.settings import Settings, get_settings
 
 logger = logging.getLogger("memory.api")
@@ -133,6 +135,7 @@ async def _build_runtime(settings: Settings, app: FastAPI) -> ApiRuntime:
 
 def create_app(settings: Settings | None = None, *, runtime: ApiRuntime | None = None) -> FastAPI:
     settings = settings or get_settings()
+    configure_logging(settings)
     app = FastAPI(title="MemoryManagerGraph API", version="0.1.0")
     app.state.settings = settings
     app.state.runtime = runtime
@@ -152,6 +155,7 @@ def create_app(settings: Settings | None = None, *, runtime: ApiRuntime | None =
             "X-Dev-User-Id",
             "X-Dev-Actor-Type",
             "X-Dev-Scopes",
+            "X-Break-Glass-Grant-Id",
             "traceparent",
         ],
     )
@@ -165,7 +169,49 @@ def create_app(settings: Settings | None = None, *, runtime: ApiRuntime | None =
         metrics.memory_http_requests_total.labels(
             route=route_path, method=request.method, status=str(response.status_code)
         ).inc()
+        # §13.15：break-glass 会话的所有正文读取/修改必须写审计
+        break_glass = getattr(request.state, "break_glass", None)
+        if (
+            break_glass is not None
+            and request.url.path.startswith("/api/v1/memory")
+            and response.status_code < 400
+        ):
+            await _write_break_glass_body_audit(
+                request,
+                break_glass,
+                action=("read_body" if request.method == "GET" else "modify_body"),
+                resource_type=route_path,
+            )
         return response
+
+    async def _write_break_glass_body_audit(
+        request: Request,
+        break_glass: dict[str, object],
+        *,
+        action: str,
+        resource_type: str,
+    ) -> None:
+        from uuid import uuid4
+
+        runtime: ApiRuntime | None = getattr(request.app.state, "runtime", None)
+        if runtime is None:
+            return
+        try:
+            async with runtime.session_factory() as session:
+                await bg_repo.insert_audit(
+                    session,
+                    audit_id=uuid4(),
+                    grant_id=break_glass["grant_id"],  # type: ignore[arg-type]
+                    admin_user_id=break_glass["admin_user_id"],  # type: ignore[arg-type]
+                    target_user_id=break_glass["target_user_id"],  # type: ignore[arg-type]
+                    action=action,
+                    resource_type=resource_type,
+                    resource_id=None,
+                    trace_id=request.state.trace_id,
+                )
+                await session.commit()
+        except Exception:
+            logger.error("break-glass 正文审计写入失败", exc_info=True)
 
     @app.exception_handler(MemoryError)
     async def memory_error_handler(request: Request, exc: MemoryError) -> JSONResponse:

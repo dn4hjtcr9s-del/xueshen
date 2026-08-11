@@ -34,6 +34,7 @@ from backend.memory.contracts.common import (
 from backend.memory.contracts.errors import InvalidPayloadError
 from backend.memory.contracts.evidence import GraphProjectionEvidence
 from backend.memory.contracts.operations import MemoryOperation
+from backend.memory.logging_config import configure_logging
 from backend.memory.persistence import notifications as notifications_repo
 from backend.memory.persistence import operations as ops_repo
 from backend.memory.persistence import outbox as outbox_repo
@@ -421,7 +422,7 @@ async def _run() -> None:
     from backend.settings import get_settings
 
     settings = get_settings()
-    logging.basicConfig(level=settings.log_level.upper())
+    configure_logging(settings)
     db = Database(settings)
     try:
         consumer = OutboxConsumer(

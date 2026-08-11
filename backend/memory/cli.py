@@ -183,6 +183,127 @@ def _cmd_verify_backup_restore(_args: argparse.Namespace) -> int:
     return 2
 
 
+def _cmd_create_break_glass_grant(args: argparse.Namespace) -> int:
+    """创建 break-glass grant（§13.15）：限用户、限时、必填 reason/scopes。"""
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+
+    from backend.memory.break_glass import validate_grant_creation
+    from backend.memory.contracts.common import new_trace_id
+    from backend.memory.persistence import break_glass as bg_repo
+
+    settings = get_settings()
+    now = datetime.now(UTC)
+    expires_at = now + timedelta(minutes=args.minutes)
+    scopes = [s for s in args.scopes.split() if s]
+    grant_id = uuid4()
+
+    try:
+        validate_grant_creation(
+            settings=settings,
+            reason=args.reason,
+            scopes=scopes,
+            expires_at=expires_at,
+            now=now,
+            admin_user_id=args.admin_user_id,
+            approved_by=args.approved_by,
+        )
+    except ValueError as exc:
+        print(f"[break-glass] 校验失败：{exc}", file=sys.stderr)
+        return 2
+
+    summary = {
+        "grant_id": str(grant_id),
+        "admin_user_id": str(args.admin_user_id),
+        "target_user_id": str(args.target_user_id),
+        "scopes": scopes,
+        "expires_at": expires_at.isoformat(),
+        "approved_by": str(args.approved_by) if args.approved_by else None,
+    }
+    if args.dry_run:
+        print(f"[break-glass] --dry-run 摘要：{summary}")
+        return 0
+
+    async def _run() -> int:
+        db = Database(settings)
+        try:
+            async with db.session() as session:
+                trace_id = new_trace_id()
+                await bg_repo.create_grant(
+                    session,
+                    grant_id=grant_id,
+                    admin_user_id=args.admin_user_id,
+                    target_user_id=args.target_user_id,
+                    reason=args.reason,
+                    scopes=scopes,
+                    approved_by=args.approved_by,
+                    expires_at=expires_at,
+                )
+                for action in ("request", "approve"):
+                    await bg_repo.insert_audit(
+                        session,
+                        audit_id=uuid4(),
+                        grant_id=grant_id,
+                        admin_user_id=args.admin_user_id,
+                        target_user_id=args.target_user_id,
+                        action=action,
+                        resource_type="grant",
+                        resource_id=str(grant_id),
+                        trace_id=trace_id,
+                    )
+                await session.commit()
+                print(f"[break-glass] 已创建 grant：{summary}")
+                return 0
+        finally:
+            await db.close()
+
+    return asyncio.run(_run())
+
+
+def _cmd_revoke_break_glass_grant(args: argparse.Namespace) -> int:
+    """撤销 break-glass grant 并写审计（§13.15）。"""
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from backend.memory.contracts.common import new_trace_id
+    from backend.memory.persistence import break_glass as bg_repo
+
+    settings = get_settings()
+
+    async def _run() -> int:
+        db = Database(settings)
+        try:
+            async with db.session() as session:
+                grant = await bg_repo.get_grant(session, args.grant_id)
+                if grant is None:
+                    print(f"[break-glass] grant 不存在：{args.grant_id}", file=sys.stderr)
+                    return 2
+                revoked = await bg_repo.revoke_grant(
+                    session, grant_id=args.grant_id, revoked_at=datetime.now(UTC)
+                )
+                if not revoked:
+                    print(f"[break-glass] grant 已撤销过：{args.grant_id}", file=sys.stderr)
+                    return 3
+                await bg_repo.insert_audit(
+                    session,
+                    audit_id=uuid4(),
+                    grant_id=args.grant_id,
+                    admin_user_id=grant["admin_user_id"],
+                    target_user_id=grant["target_user_id"],
+                    action="revoke",
+                    resource_type="grant",
+                    resource_id=str(args.grant_id),
+                    trace_id=new_trace_id(),
+                )
+                await session.commit()
+                print(f"[break-glass] 已撤销 grant：{args.grant_id}")
+                return 0
+        finally:
+            await db.close()
+
+    return asyncio.run(_run())
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="backend.memory.cli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -208,6 +329,20 @@ def build_parser() -> argparse.ArgumentParser:
     verify = sub.add_parser("verify-backup-restore")
     verify.add_argument("--batch-id", required=True, type=UUID)
     verify.set_defaults(func=_cmd_verify_backup_restore)
+
+    bg_create = sub.add_parser("create-break-glass-grant")
+    bg_create.add_argument("--admin-user-id", required=True, type=UUID)
+    bg_create.add_argument("--target-user-id", required=True, type=UUID)
+    bg_create.add_argument("--reason", required=True)
+    bg_create.add_argument("--scopes", required=True, help="空格分隔，如 'memory:read'")
+    bg_create.add_argument("--minutes", type=int, default=30, help="有效期分钟数（≤60）")
+    bg_create.add_argument("--approved-by", type=UUID, default=None)
+    bg_create.add_argument("--dry-run", action="store_true")
+    bg_create.set_defaults(func=_cmd_create_break_glass_grant)
+
+    bg_revoke = sub.add_parser("revoke-break-glass-grant")
+    bg_revoke.add_argument("--grant-id", required=True, type=UUID)
+    bg_revoke.set_defaults(func=_cmd_revoke_break_glass_grant)
 
     return parser
 

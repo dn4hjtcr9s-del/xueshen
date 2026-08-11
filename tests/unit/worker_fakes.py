@@ -20,6 +20,9 @@ class FakeSession:
     async def __aexit__(self, *exc: object) -> None:
         return None
 
+    async def commit(self) -> None:
+        return None
+
     async def execute(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover
         raise AssertionError("FakeSession.execute 不应被调用：请 monkeypatch 仓储函数")
 

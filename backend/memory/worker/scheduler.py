@@ -35,6 +35,7 @@ from backend.memory.contracts.common import (
     new_trace_id,
 )
 from backend.memory.contracts.operations import MemoryOperation
+from backend.memory.logging_config import configure_logging
 from backend.memory.persistence import documents as docs_repo
 from backend.memory.persistence import maintenance as maintenance_repo
 from backend.memory.persistence import notifications as notifications_repo
@@ -512,7 +513,7 @@ async def _run() -> None:
     from backend.settings import get_settings
 
     settings = get_settings()
-    logging.basicConfig(level=settings.log_level.upper())
+    configure_logging(settings)
     db = Database(settings)
     try:
         scheduler = Scheduler(

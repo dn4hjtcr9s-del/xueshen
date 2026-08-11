@@ -21,6 +21,7 @@ from backend.memory.graph.state import (
     SystemIdGenerator,
     default_registry_factory,
 )
+from backend.memory.logging_config import configure_logging
 from backend.memory.persistence.database import Database
 from backend.memory.services.graph_state_service import KnowledgeGraphStateService
 from backend.memory.services.memory_service import MemoryService
@@ -80,7 +81,7 @@ async def _run() -> None:
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
     settings = get_settings()
-    logging.basicConfig(level=settings.log_level.upper())
+    configure_logging(settings)
     logger = logging.getLogger("memory.worker")
     db = Database(settings)
     try:

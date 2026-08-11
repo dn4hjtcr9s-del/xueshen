@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from collections.abc import Collection
@@ -21,13 +22,18 @@ from uuid import UUID, uuid4
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from backend.auth.context import AuthContext
+from backend.auth.context import (
+    ALL_SCOPES,
+    SCOPE_MEMORY_BREAK_GLASS,
+    AuthContext,
+)
 from backend.auth.verifier import (
     AuthError,
     CompositeAuthVerifier,
     DevelopmentAuthAdapter,
     ProductionJwtAuthAdapter,
 )
+from backend.memory.break_glass import validate_grant_for_use
 from backend.memory.contracts.commands import MemoryPayload
 from backend.memory.contracts.common import (
     OPERATION_ROUTING,
@@ -38,6 +44,7 @@ from backend.memory.contracts.common import (
     idempotency_payload_hash,
     new_trace_id,
     sign_cursor,
+    user_log_hash,
     verify_cursor,
 )
 from backend.memory.contracts.errors import (
@@ -56,6 +63,7 @@ from backend.memory.contracts.operations import (
     MutationResult,
 )
 from backend.memory.graph.runner import MemoryGraphRunner
+from backend.memory.persistence import break_glass as bg_repo
 from backend.memory.persistence import operations as ops_repo
 from backend.memory.persistence.database import Database
 from backend.memory.persistence.identity import IdentityMappingRepository
@@ -66,6 +74,11 @@ from backend.settings import Settings
 
 #: P0/P1 快速路径同步等待窗口（§14.2 第 3–4 条）
 FAST_PATH_TIMEOUT_SECONDS = 2.0
+
+#: Break-glass grant 请求头（§13.15）
+BREAK_GLASS_HEADER = "x-break-glass-grant-id"
+
+logger = logging.getLogger("memory.api")
 
 
 @dataclass
@@ -125,7 +138,11 @@ def get_trace_id(request: Request) -> str:
 
 
 async def get_auth_context(request: Request) -> AuthContext:
-    """认证入口：development 优先 dev auth，其余走生产 JWT（§18.1）。"""
+    """认证入口：development 优先 dev auth，其余走生产 JWT（§18.1）。
+
+    携带 X-Break-Glass-Grant-Id 时走 §13.15 校验：限 admin、限 grant 属主、
+    限时、限目标用户；校验通过则本次请求以目标用户身份执行并写使用审计。
+    """
     settings = get_settings(request)
     runtime = get_runtime(request)
     headers = {k.lower(): v for k, v in request.headers.items()}
@@ -136,7 +153,87 @@ async def get_auth_context(request: Request) -> AuthContext:
             dev_adapter=DevelopmentAuthAdapter(settings),
             prod_adapter=ProductionJwtAuthAdapter(settings=settings, identity_resolver=resolver),
         )
-        return await verifier.authenticate(headers)
+        auth = await verifier.authenticate(headers)
+        raw_grant = headers.get(BREAK_GLASS_HEADER)
+        if raw_grant is None:
+            return auth
+        return await _apply_break_glass(request, settings, session, auth, raw_grant)
+
+
+async def _apply_break_glass(
+    request: Request,
+    settings: Settings,
+    session: AsyncSession,
+    auth: AuthContext,
+    raw_grant: str,
+) -> AuthContext:
+    """校验 break-glass grant 并构造以目标用户身份执行的 AuthContext。"""
+    trace_id = get_trace_id(request)
+    if auth.actor_type != "admin" or not auth.has_scope(SCOPE_MEMORY_BREAK_GLASS):
+        raise AuthError(
+            "AUTH_FORBIDDEN",
+            "break-glass 仅限持有 memory:break_glass scope 的 admin 使用",
+            forbidden=True,
+        )
+    try:
+        grant_id = UUID(raw_grant)
+    except ValueError as exc:
+        raise AuthError("AUTH_FORBIDDEN", "grant_id 不是合法 UUID", forbidden=True) from exc
+
+    grant = await bg_repo.get_grant(session, grant_id)
+    now = datetime.now(UTC)
+    reason = validate_grant_for_use(
+        settings=settings, grant=grant, admin_user_id=auth.user_id, now=now
+    )
+    if reason is not None:
+        if reason == "expired" and grant is not None:
+            await bg_repo.insert_audit(
+                session,
+                audit_id=uuid4(),
+                grant_id=grant["grant_id"],
+                admin_user_id=grant["admin_user_id"],
+                target_user_id=grant["target_user_id"],
+                action="expired_check",
+                resource_type="auth_context",
+                resource_id=None,
+                trace_id=trace_id,
+            )
+            await session.commit()
+        raise AuthError("AUTH_FORBIDDEN", f"break-glass grant 不可用: {reason}", forbidden=True)
+    assert grant is not None  # reason is None 时 grant 必然存在
+
+    await bg_repo.insert_audit(
+        session,
+        audit_id=uuid4(),
+        grant_id=grant["grant_id"],
+        admin_user_id=grant["admin_user_id"],
+        target_user_id=grant["target_user_id"],
+        action="use",
+        resource_type="auth_context",
+        resource_id=None,
+        trace_id=trace_id,
+    )
+    await session.commit()
+    request.state.break_glass = {
+        "grant_id": grant["grant_id"],
+        "admin_user_id": auth.user_id,
+        "target_user_id": grant["target_user_id"],
+    }
+    logger.info(
+        "break-glass 使用: admin=%s target=%s grant=%s",
+        user_log_hash(settings.log_hmac_key, str(auth.user_id)),
+        user_log_hash(settings.log_hmac_key, str(grant["target_user_id"])),
+        grant["grant_id"],
+    )
+    scopes = frozenset(s for s in grant["scopes"] if s in ALL_SCOPES)
+    return AuthContext(
+        user_id=grant["target_user_id"],
+        actor_type="admin",
+        scopes=scopes,
+        issuer=auth.issuer,
+        external_subject=auth.external_subject,
+        break_glass_grant_id=grant["grant_id"],
+    )
 
 
 def require(
@@ -152,9 +249,13 @@ def require(
 
     async def _dep(auth: AuthContext = Depends(get_auth_context)) -> AuthContext:
         if auth.actor_type not in actors:
-            raise AuthError(
-                "AUTH_FORBIDDEN", f"actor_type={auth.actor_type} 无权访问该接口", forbidden=True
-            )
+            # §13.15：持有效 break-glass grant 的 admin 以目标用户身份放行
+            if not (auth.actor_type == "admin" and auth.break_glass_grant_id is not None):
+                raise AuthError(
+                    "AUTH_FORBIDDEN",
+                    f"actor_type={auth.actor_type} 无权访问该接口",
+                    forbidden=True,
+                )
         if scope is not None and not auth.has_scope(scope):
             raise AuthError("AUTH_FORBIDDEN", f"缺少 scope: {scope}", forbidden=True)
         if any_scopes and not any(auth.has_scope(s) for s in any_scopes):
