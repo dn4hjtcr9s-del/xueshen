@@ -873,3 +873,83 @@ body::before {
   .masthead-title { font-size: 32px; }
   .plan-pct { font-size: 72px; }
 }
+
+/* ---- Memory 接入（Profile / KnowledgeMap / 通知）---- */
+
+.mock-badge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--gold);
+  border: 1px dashed var(--gold);
+  padding: 3px 8px;
+  margin-bottom: 14px;
+}
+
+.memory-editor {
+  margin-top: 10px;
+  padding: 14px;
+  border: var(--hairline);
+  background: var(--card);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.editor-field { display: flex; flex-direction: column; gap: 4px; }
+.editor-label { font-size: 11px; color: var(--ink-faint); font-family: var(--mono); letter-spacing: 1px; }
+.editor-field input,
+.editor-field textarea,
+.candidate-resolution select,
+.map-filterbar input,
+.map-filterbar select {
+  font-family: var(--ui);
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--paper, #f8f1e2);
+  border: 1px solid var(--line);
+  padding: 7px 9px;
+  border-radius: 3px;
+}
+.editor-field input:focus,
+.editor-field textarea:focus { outline: none; border-color: var(--ink); }
+
+.editor-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+.memory-block { margin: 6px 0; }
+.memory-block ul { margin: 4px 0 0; padding-left: 18px; }
+.memory-block li { font-size: 13px; line-height: 1.7; color: var(--ink-soft); }
+
+.candidate-resolution {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  flex-wrap: wrap;
+}
+.candidate-resolution label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+
+.notice-success { border-color: var(--pine) !important; }
+.notice-error,
+.notice-conflict { border-color: var(--cinnabar) !important; }
+.notice-info { border-color: var(--gold) !important; }
+
+.map-filterbar {
+  display: flex;
+  gap: 12px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+.map-filterbar input { flex: 1; min-width: 180px; }
+
+.map-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }

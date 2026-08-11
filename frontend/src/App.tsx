@@ -1,5 +1,5 @@
 // 生产前端样例骨架：左侧图标窄轨 + 顶部工具条 + 页面切换 + 通知面板。
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Bell,
   BookMarked,
@@ -11,7 +11,12 @@ import {
   Users,
 } from "lucide-react";
 import type { PageKey } from "./data";
-import { notifications, user } from "./data";
+import { user } from "./data";
+import {
+  listNotifications,
+  markNotificationRead,
+  type MemoryNotification,
+} from "./api/memory";
 import { Masthead } from "./ui";
 import { HomePage } from "./pages/Home";
 import { ChatPage } from "./pages/Chat";
@@ -40,7 +45,18 @@ const MASTHEADS: Record<PageKey, { kicker: string; title: string; aside: string[
   profile: { kicker: "Profile · 君子慎独", title: "个人中心", aside: ["记忆透明可管"] },
 };
 
-function NotifPanel({ onClose }: { onClose: () => void }) {
+// 通知面板（§20.2）：真实 API；系统按新证据调整状态时在此显示，可查看简短依据。
+function NotifPanel({
+  items,
+  error,
+  onClose,
+  onReadAll,
+}: {
+  items: MemoryNotification[];
+  error: string | null;
+  onClose: () => void;
+  onReadAll: () => void;
+}) {
   return (
     <>
       <div style={{ position: "fixed", inset: 0, zIndex: 40 }} onClick={onClose} />
@@ -48,16 +64,23 @@ function NotifPanel({ onClose }: { onClose: () => void }) {
         <div className="notif-head">
           <span className="t">通知</span>
           <div style={{ flex: 1 }} />
-          <button className="link-btn" onClick={onClose}>全部已读</button>
+          <button className="link-btn" onClick={onReadAll}>
+            全部已读
+          </button>
         </div>
-        {notifications.map((n) => (
-          <div key={n.id} className={`notif-item ${n.read ? "" : "unread"}`}>
-            <div className={`notif-ico ${n.kind}`}>
+        {error && <div className="notif-time">{error}</div>}
+        {!error && items.length === 0 && <div className="notif-time">暂无通知</div>}
+        {items.map((n) => (
+          <div key={n.notification_id} className={`notif-item ${n.read_at ? "" : "unread"}`}>
+            <div className="notif-ico">
               <Bell size={14} />
             </div>
             <div>
-              <div className="notif-text">{n.text}</div>
-              <div className="notif-time">{n.time}</div>
+              <div className="notif-text">
+                {n.title}
+                {n.body ? ` — ${n.body}` : ""}
+              </div>
+              <div className="notif-time">{new Date(n.created_at).toLocaleString("zh-CN", { hour12: false })}</div>
             </div>
           </div>
         ))}
@@ -69,7 +92,36 @@ function NotifPanel({ onClose }: { onClose: () => void }) {
 export default function App() {
   const [page, setPage] = useState<PageKey>("home");
   const [showNotif, setShowNotif] = useState(false);
-  const unread = notifications.some((n) => !n.read);
+  const [notifications, setNotifications] = useState<MemoryNotification[]>([]);
+  const [notifError, setNotifError] = useState<string | null>(null);
+  const unread = notifications.some((n) => !n.read_at);
+
+  const loadNotifications = useCallback(async () => {
+    try {
+      const page = await listNotifications();
+      setNotifications(page.items);
+      setNotifError(null);
+    } catch {
+      setNotifError("通知加载失败");
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadNotifications();
+  }, [loadNotifications]);
+
+  const toggleNotif = () => {
+    setShowNotif((v) => {
+      if (!v) void loadNotifications();
+      return !v;
+    });
+  };
+
+  const readAll = async () => {
+    const unreadItems = notifications.filter((n) => !n.read_at);
+    await Promise.allSettled(unreadItems.map((n) => markNotificationRead(n.notification_id)));
+    await loadNotifications();
+  };
 
   // 页面间联动：知识地图/计划里的"去问 AI"跳转到对话页。
   const goChat = () => setPage("chat");
@@ -102,7 +154,7 @@ export default function App() {
             <Search size={13} />
             <span>搜索知识点、对话、笔记…</span>
           </div>
-          <button className="icon-btn" onClick={() => setShowNotif((v) => !v)} aria-label="通知">
+          <button className="icon-btn" onClick={toggleNotif} aria-label="通知">
             <Bell size={15} strokeWidth={1.8} />
             {unread && <span className="dot" />}
           </button>
@@ -133,7 +185,14 @@ export default function App() {
         </main>
       </div>
 
-      {showNotif && <NotifPanel onClose={() => setShowNotif(false)} />}
+      {showNotif && (
+        <NotifPanel
+          items={notifications}
+          error={notifError}
+          onClose={() => setShowNotif(false)}
+          onReadAll={() => void readAll()}
+        />
+      )}
     </div>
   );
 }

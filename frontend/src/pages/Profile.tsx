@@ -1,43 +1,50 @@
 // 个人中心页：账号信息 + 学习统计 + 「AI 记住了我什么」记忆管理面板。
-import { Pencil, ShieldCheck, Trash2 } from "lucide-react";
-import { memories, user } from "../data";
+// 只有「AI 记住了我什么」接真实 API（§20.1）；其余区域为 Mock：
+// development 显著标注“展示数据”，production 构建默认隐藏。
+import { Pencil, ShieldCheck } from "lucide-react";
+import { user } from "../data";
 import { SectionHead } from "../ui";
+import { MemorySection } from "./profile/MemorySection";
 
-const CAT_CLASS: Record<string, string> = {
-  目标: "red",
-  掌握度: "gold",
-  学习偏好: "green",
-};
+const SHOW_MOCK = import.meta.env.DEV;
 
 export function ProfilePage() {
   return (
     <div className="profile-grid">
-      <div className="card profile-card rise">
-        <div className="profile-avatar">{user.initials}</div>
-        <div className="profile-name">{user.name}</div>
-        <div className="profile-sub">加入 {user.joinedDays} 天 · 通用数学学习者</div>
-        <div className="profile-stats">
-          <div className="profile-stat">
-            <div className="n">{user.streakDays}</div>
-            <div className="l">连续学习（天）</div>
+      {SHOW_MOCK && (
+        <div className="card profile-card rise">
+          <div className="mock-badge" data-testid="mock-badge">
+            展示数据 · 非真实统计
           </div>
-          <div className="profile-stat">
-            <div className="n">186</div>
-            <div className="l">累计提问</div>
+          <div className="profile-avatar">{user.initials}</div>
+          <div className="profile-name">{user.name}</div>
+          <div className="profile-sub">加入 {user.joinedDays} 天 · 通用数学学习者</div>
+          <div className="profile-stats">
+            <div className="profile-stat">
+              <div className="n">{user.streakDays}</div>
+              <div className="l">连续学习（天）</div>
+            </div>
+            <div className="profile-stat">
+              <div className="n">186</div>
+              <div className="l">累计提问</div>
+            </div>
+            <div className="profile-stat">
+              <div className="n">11</div>
+              <div className="l">已掌握知识点</div>
+            </div>
+            <div className="profile-stat">
+              <div className="n">5</div>
+              <div className="l">错题收藏</div>
+            </div>
           </div>
-          <div className="profile-stat">
-            <div className="n">11</div>
-            <div className="l">已掌握知识点</div>
-          </div>
-          <div className="profile-stat">
-            <div className="n">5</div>
-            <div className="l">错题收藏</div>
-          </div>
+          <button
+            className="btn btn-ghost"
+            style={{ marginTop: 20, width: "100%", justifyContent: "center" }}
+          >
+            <Pencil size={13} /> 编辑资料
+          </button>
         </div>
-        <button className="btn btn-ghost" style={{ marginTop: 20, width: "100%", justifyContent: "center" }}>
-          <Pencil size={13} /> 编辑资料
-        </button>
-      </div>
+      )}
 
       <div>
         <SectionHead num="01" title="AI 记住了我什么" note="透明 · 可纠正 · 可删除" />
@@ -49,17 +56,7 @@ export function ProfilePage() {
           </span>
         </div>
         <div className="rise" style={{ animationDelay: "0.12s" }}>
-          {memories.map((m, i) => (
-            <div key={i} className="memory-item">
-              <span className={`tag ${CAT_CLASS[m.category] ?? ""}`}>{m.category}</span>
-              <span className="memory-text">{m.text}</span>
-              <span className="memory-time">{m.updatedAt}</span>
-              <span className="memory-actions">
-                <button aria-label="纠正"><Pencil size={13} /></button>
-                <button aria-label="删除"><Trash2 size={13} /></button>
-              </span>
-            </div>
-          ))}
+          <MemorySection />
         </div>
       </div>
     </div>
