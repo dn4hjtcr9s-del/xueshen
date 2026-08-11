@@ -1,0 +1,3201 @@
+{
+  "components": {
+    "schemas": {
+      "AccountMemoryPurgeRequest": {
+        "additionalProperties": false,
+        "description": "POST /internal/account-memory/purge 请求体；不允许直接注入内部 user_id。",
+        "properties": {
+          "account_deletion_id": {
+            "format": "uuid",
+            "title": "Account Deletion Id",
+            "type": "string"
+          },
+          "external_subject": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "External Subject",
+            "type": "string"
+          },
+          "issuer": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Issuer",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "requested_at": {
+            "format": "date-time",
+            "title": "Requested At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_deletion_id",
+          "issuer",
+          "external_subject",
+          "requested_at",
+          "reason"
+        ],
+        "title": "AccountMemoryPurgeRequest",
+        "type": "object"
+      },
+      "ActivityEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "activity_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Activity Ids",
+            "type": "array"
+          },
+          "activity_type": {
+            "enum": [
+              "forum_post",
+              "forum_reply",
+              "wrong_question_upload",
+              "exercise_attempt",
+              "review_result",
+              "page_view",
+              "bookmark",
+              "check_in"
+            ],
+            "title": "Activity Type",
+            "type": "string"
+          },
+          "aggregated_count": {
+            "default": 1,
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Aggregated Count",
+            "type": "integer"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Ref"
+          },
+          "graph_node_hints": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Graph Node Hints",
+            "type": "array"
+          },
+          "kind": {
+            "const": "activity_evidence",
+            "default": "activity_evidence",
+            "title": "Kind",
+            "type": "string"
+          },
+          "topic_hints": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Topic Hints",
+            "type": "array"
+          },
+          "window_ended_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Ended At"
+          },
+          "window_started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Started At"
+          }
+        },
+        "required": [
+          "activity_type",
+          "activity_ids"
+        ],
+        "title": "ActivityEvidence",
+        "type": "object"
+      },
+      "CandidateContentView": {
+        "additionalProperties": false,
+        "description": "候选内容的受控结构化联合（v1.1 裁决 7）。",
+        "properties": {
+          "difficulties": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Difficulties",
+            "type": "array"
+          },
+          "goals": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Goals",
+            "type": "array"
+          },
+          "memory_type": {
+            "enum": [
+              "learner",
+              "mastery"
+            ],
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "overview": {
+            "anyOf": [
+              {
+                "maxLength": 1200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overview"
+          },
+          "plans": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Plans",
+            "type": "array"
+          },
+          "preferences": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Preferences",
+            "type": "array"
+          },
+          "review_advice": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Review Advice",
+            "type": "array"
+          },
+          "topic_key": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic Key"
+          },
+          "topic_title": {
+            "anyOf": [
+              {
+                "maxLength": 240,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic Title"
+          },
+          "understood": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Understood",
+            "type": "array"
+          }
+        },
+        "required": [
+          "memory_type"
+        ],
+        "title": "CandidateContentView",
+        "type": "object"
+      },
+      "ConversationEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checkpoint Id"
+          },
+          "graph_node_hints": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Graph Node Hints",
+            "type": "array"
+          },
+          "kind": {
+            "const": "conversation_evidence",
+            "default": "conversation_evidence",
+            "title": "Kind",
+            "type": "string"
+          },
+          "message_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Message Ids",
+            "type": "array"
+          },
+          "thread_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "topic_hints": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Topic Hints",
+            "type": "array"
+          },
+          "trigger": {
+            "enum": [
+              "explicit_remember",
+              "turn_boundary",
+              "topic_switch",
+              "exercise_completed",
+              "conversation_end"
+            ],
+            "title": "Trigger",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "message_ids",
+          "trigger"
+        ],
+        "title": "ConversationEvidence",
+        "type": "object"
+      },
+      "CorrectMemoryCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_version": {
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "correct_memory",
+            "default": "correct_memory",
+            "title": "Kind",
+            "type": "string"
+          },
+          "memory_id": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "replacement": {
+            "discriminator": {
+              "mapping": {
+                "learner": "#/components/schemas/LearnerReplacement",
+                "mastery": "#/components/schemas/MasteryReplacement"
+              },
+              "propertyName": "replacement_type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LearnerReplacement"
+              },
+              {
+                "$ref": "#/components/schemas/MasteryReplacement"
+              }
+            ],
+            "title": "Replacement"
+          }
+        },
+        "required": [
+          "memory_id",
+          "expected_version",
+          "replacement"
+        ],
+        "title": "CorrectMemoryCommand",
+        "type": "object"
+      },
+      "CursorPage_DeletedMemoryItem_": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DeletedMemoryItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "has_more"
+        ],
+        "title": "CursorPage[DeletedMemoryItem]",
+        "type": "object"
+      },
+      "CursorPage_ReviewCandidateView_": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewCandidateView"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "has_more"
+        ],
+        "title": "CursorPage[ReviewCandidateView]",
+        "type": "object"
+      },
+      "DeletedMemoryItem": {
+        "properties": {
+          "deleted_at": {
+            "format": "date-time",
+            "title": "Deleted At",
+            "type": "string"
+          },
+          "deleted_version": {
+            "title": "Deleted Version",
+            "type": "integer"
+          },
+          "memory_id": {
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "memory_type": {
+            "enum": [
+              "learner",
+              "mastery"
+            ],
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "restore_until": {
+            "format": "date-time",
+            "title": "Restore Until",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "topic_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic Key"
+          }
+        },
+        "required": [
+          "memory_id",
+          "memory_type",
+          "topic_key",
+          "title",
+          "deleted_version",
+          "deleted_at",
+          "restore_until"
+        ],
+        "title": "DeletedMemoryItem",
+        "type": "object"
+      },
+      "ForgetMemoryCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_version": {
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "forget_memory",
+            "default": "forget_memory",
+            "title": "Kind",
+            "type": "string"
+          },
+          "memory_id": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "memory_id",
+          "expected_version"
+        ],
+        "title": "ForgetMemoryCommand",
+        "type": "object"
+      },
+      "GraphEdgeView": {
+        "properties": {
+          "from_node_id": {
+            "title": "From Node Id",
+            "type": "string"
+          },
+          "relation_type": {
+            "const": "prerequisite",
+            "title": "Relation Type",
+            "type": "string"
+          },
+          "to_node_id": {
+            "title": "To Node Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_node_id",
+          "to_node_id",
+          "relation_type"
+        ],
+        "title": "GraphEdgeView",
+        "type": "object"
+      },
+      "GraphNodeDetailView": {
+        "properties": {
+          "node": {
+            "$ref": "#/components/schemas/GraphNodeView"
+          },
+          "overlay": {
+            "$ref": "#/components/schemas/GraphOverlayView"
+          },
+          "prerequisite_node_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Prerequisite Node Ids",
+            "type": "array"
+          },
+          "successor_node_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Successor Node Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "node",
+          "overlay",
+          "prerequisite_node_ids",
+          "successor_node_ids"
+        ],
+        "title": "GraphNodeDetailView",
+        "type": "object"
+      },
+      "GraphNodeView": {
+        "properties": {
+          "group_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Key"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "node_id": {
+            "pattern": "^n\\d{3,}$",
+            "title": "Node Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node_id",
+          "title",
+          "group_key",
+          "metadata"
+        ],
+        "title": "GraphNodeView",
+        "type": "object"
+      },
+      "GraphOverlayView": {
+        "properties": {
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "learning",
+                  "proficient",
+                  "expert"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "status_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "user",
+                  "summary_memory",
+                  "system_recompute"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Source"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "node_id",
+          "status",
+          "version",
+          "status_source",
+          "updated_at"
+        ],
+        "title": "GraphOverlayView",
+        "type": "object"
+      },
+      "GraphStateChangeView": {
+        "properties": {
+          "after_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "learning",
+                  "proficient",
+                  "expert"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After Status"
+          },
+          "after_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After Version"
+          },
+          "before_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "learning",
+                  "proficient",
+                  "expert"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before Status"
+          },
+          "before_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before Version"
+          },
+          "changed_at": {
+            "format": "date-time",
+            "title": "Changed At",
+            "type": "string"
+          },
+          "node_id": {
+            "pattern": "^n\\d{3,}$",
+            "title": "Node Id",
+            "type": "string"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "source_type": {
+            "enum": [
+              "user",
+              "summary_memory",
+              "system_recompute"
+            ],
+            "title": "Source Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node_id",
+          "before_status",
+          "after_status",
+          "before_version",
+          "after_version",
+          "source_type",
+          "changed_at"
+        ],
+        "title": "GraphStateChangeView",
+        "type": "object"
+      },
+      "GraphStateExplanation": {
+        "properties": {
+          "changed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed At"
+          },
+          "current_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "learning",
+                  "proficient",
+                  "expert"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Status"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "explanation_available": {
+            "title": "Explanation Available",
+            "type": "boolean"
+          },
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "source_memory_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Memory Id"
+          },
+          "source_memory_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Memory Version"
+          },
+          "source_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "user",
+                  "summary_memory",
+                  "system_recompute"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Type"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          }
+        },
+        "required": [
+          "node_id",
+          "current_status",
+          "explanation_available",
+          "summary",
+          "reason_codes",
+          "source_type",
+          "source_memory_id",
+          "source_memory_version",
+          "evidence_refs",
+          "changed_at"
+        ],
+        "title": "GraphStateExplanation",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "KnowledgeGraphSnapshot": {
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/GraphEdgeView"
+            },
+            "title": "Edges",
+            "type": "array"
+          },
+          "manifest_checksum": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Manifest Checksum",
+            "type": "string"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/GraphNodeView"
+            },
+            "title": "Nodes",
+            "type": "array"
+          },
+          "synced_at": {
+            "format": "date-time",
+            "title": "Synced At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "nodes",
+          "edges",
+          "manifest_checksum",
+          "synced_at"
+        ],
+        "title": "KnowledgeGraphSnapshot",
+        "type": "object"
+      },
+      "LearnerMemoryView": {
+        "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "goals": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Goals",
+            "type": "array"
+          },
+          "memory_id": {
+            "const": "learner",
+            "default": "learner",
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "memory_type": {
+            "const": "learner",
+            "default": "learner",
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "plans": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Plans",
+            "type": "array"
+          },
+          "preferences": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Preferences",
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "preferences",
+          "goals",
+          "plans",
+          "evidence_refs",
+          "updated_at"
+        ],
+        "title": "LearnerMemoryView",
+        "type": "object"
+      },
+      "LearnerReplacement": {
+        "additionalProperties": false,
+        "properties": {
+          "goals": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Goals",
+            "type": "array"
+          },
+          "plans": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Plans",
+            "type": "array"
+          },
+          "preferences": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Preferences",
+            "type": "array"
+          },
+          "replacement_type": {
+            "const": "learner",
+            "default": "learner",
+            "title": "Replacement Type",
+            "type": "string"
+          }
+        },
+        "title": "LearnerReplacement",
+        "type": "object"
+      },
+      "MasteryMemoryView": {
+        "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "difficulties": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Difficulties",
+            "type": "array"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "memory_id": {
+            "pattern": "^mastery:.+",
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "memory_type": {
+            "const": "mastery",
+            "default": "mastery",
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "overview": {
+            "title": "Overview",
+            "type": "string"
+          },
+          "review_advice": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Review Advice",
+            "type": "array"
+          },
+          "topic_key": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Topic Key",
+            "type": "string"
+          },
+          "topic_title": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Topic Title",
+            "type": "string"
+          },
+          "understood": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Understood",
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "memory_id",
+          "topic_key",
+          "topic_title",
+          "version",
+          "overview",
+          "understood",
+          "difficulties",
+          "review_advice",
+          "evidence_refs",
+          "updated_at"
+        ],
+        "title": "MasteryMemoryView",
+        "type": "object"
+      },
+      "MasteryReplacement": {
+        "additionalProperties": false,
+        "properties": {
+          "difficulties": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Difficulties",
+            "type": "array"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "overview": {
+            "default": "",
+            "maxLength": 1200,
+            "title": "Overview",
+            "type": "string"
+          },
+          "replacement_type": {
+            "const": "mastery",
+            "default": "mastery",
+            "title": "Replacement Type",
+            "type": "string"
+          },
+          "review_advice": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Review Advice",
+            "type": "array"
+          },
+          "topic_title": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Topic Title",
+            "type": "string"
+          },
+          "understood": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Understood",
+            "type": "array"
+          }
+        },
+        "required": [
+          "topic_title"
+        ],
+        "title": "MasteryReplacement",
+        "type": "object"
+      },
+      "MemoryIndexEntryView": {
+        "properties": {
+          "memory_id": {
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "memory_type": {
+            "enum": [
+              "learner",
+              "mastery"
+            ],
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "topic_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic Key"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "memory_id",
+          "memory_type",
+          "topic_key",
+          "title",
+          "version",
+          "updated_at"
+        ],
+        "title": "MemoryIndexEntryView",
+        "type": "object"
+      },
+      "MemoryIndexView": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryIndexEntryView"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "version": {
+            "minimum": 0.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "entries",
+          "updated_at",
+          "stale"
+        ],
+        "title": "MemoryIndexView",
+        "type": "object"
+      },
+      "MemoryNotification": {
+        "properties": {
+          "aggregate_id": {
+            "title": "Aggregate Id",
+            "type": "string"
+          },
+          "aggregate_type": {
+            "title": "Aggregate Type",
+            "type": "string"
+          },
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "event_type": {
+            "title": "Event Type",
+            "type": "string"
+          },
+          "notification_id": {
+            "format": "uuid",
+            "title": "Notification Id",
+            "type": "string"
+          },
+          "read_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Read At"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "notification_id",
+          "event_type",
+          "title",
+          "body",
+          "aggregate_type",
+          "aggregate_id",
+          "read_at",
+          "created_at"
+        ],
+        "title": "MemoryNotification",
+        "type": "object"
+      },
+      "MemoryNotificationPage": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryNotification"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "unread_count": {
+            "minimum": 0.0,
+            "title": "Unread Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "has_more",
+          "unread_count"
+        ],
+        "title": "MemoryNotificationPage",
+        "type": "object"
+      },
+      "MemoryOperationResult": {
+        "properties": {
+          "cancelled_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancelled At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublicError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "graph_state_changes": {
+            "items": {
+              "$ref": "#/components/schemas/GraphStateChangeView"
+            },
+            "title": "Graph State Changes",
+            "type": "array"
+          },
+          "mutations": {
+            "items": {
+              "$ref": "#/components/schemas/MutationResult"
+            },
+            "title": "Mutations",
+            "type": "array"
+          },
+          "operation_id": {
+            "format": "uuid",
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "operation_type": {
+            "enum": [
+              "conversation_evidence",
+              "activity_evidence",
+              "correct_memory",
+              "forget_memory",
+              "restore_memory",
+              "override_learner_profile",
+              "review_candidate",
+              "set_graph_state",
+              "project_summary_to_graph",
+              "rebuild_index",
+              "verify_checksums",
+              "purge_tombstones",
+              "cleanup_orphan_versions",
+              "cleanup_checkpoints",
+              "purge_account_memory"
+            ],
+            "title": "Operation Type",
+            "type": "string"
+          },
+          "review_candidate_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Review Candidate Ids",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "retry_wait",
+              "succeeded",
+              "needs_review",
+              "dead_letter",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "operation_id",
+          "status",
+          "operation_type",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "MemoryOperationResult",
+        "type": "object"
+      },
+      "MutationResult": {
+        "properties": {
+          "action": {
+            "enum": [
+              "create",
+              "merge",
+              "replace",
+              "append_evidence",
+              "forget",
+              "restore"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "after_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After Version"
+          },
+          "before_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before Version"
+          },
+          "memory_id": {
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "mutation_id": {
+            "format": "uuid",
+            "title": "Mutation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mutation_id",
+          "memory_id",
+          "action",
+          "before_version",
+          "after_version"
+        ],
+        "title": "MutationResult",
+        "type": "object"
+      },
+      "OverrideLearnerProfileCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version"
+          },
+          "goals": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goals"
+          },
+          "kind": {
+            "const": "override_learner_profile",
+            "default": "override_learner_profile",
+            "title": "Kind",
+            "type": "string"
+          },
+          "plans": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plans"
+          },
+          "preferences": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preferences"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "title": "OverrideLearnerProfileCommand",
+        "type": "object"
+      },
+      "PublicError": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable",
+          "trace_id"
+        ],
+        "title": "PublicError",
+        "type": "object"
+      },
+      "RestoreMemoryCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "deleted_version": {
+            "minimum": 1.0,
+            "title": "Deleted Version",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "restore_memory",
+            "default": "restore_memory",
+            "title": "Kind",
+            "type": "string"
+          },
+          "memory_id": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Memory Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "memory_id",
+          "deleted_version"
+        ],
+        "title": "RestoreMemoryCommand",
+        "type": "object"
+      },
+      "ReviewCandidateView": {
+        "properties": {
+          "base_memory_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Memory Id"
+          },
+          "base_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Version"
+          },
+          "candidate_content": {
+            "$ref": "#/components/schemas/CandidateContentView"
+          },
+          "candidate_id": {
+            "format": "uuid",
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "candidate_type": {
+            "enum": [
+              "learner",
+              "mastery",
+              "topic_conflict",
+              "version_conflict"
+            ],
+            "title": "Candidate Type",
+            "type": "string"
+          },
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "resolution_target": {
+            "anyOf": [
+              {
+                "enum": [
+                  "merge_existing",
+                  "create_new_topic"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution Target"
+          },
+          "resolved_operation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved Operation Id"
+          },
+          "reviewed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed At"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "accepted",
+              "corrected",
+              "rejected",
+              "expired"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target_memory_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Memory Id"
+          },
+          "topic_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic Key"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_id",
+          "candidate_type",
+          "base_memory_id",
+          "base_version",
+          "topic_key",
+          "candidate_content",
+          "evidence_refs",
+          "confidence",
+          "status",
+          "resolution_target",
+          "target_memory_id",
+          "resolved_operation_id",
+          "reviewed_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ReviewCandidateView",
+        "type": "object"
+      },
+      "ReviewDecisionRequest": {
+        "additionalProperties": false,
+        "description": "POST /review-candidates/{candidate_id}/decision 的公开请求体。\n\n与 GraphStatePutRequest 同模式（§6.4）：kind/candidate_id 由 Gateway\n固定注入后构造内部 ReviewCandidateCommand；客户端传入一律 422。",
+        "properties": {
+          "corrected_content": {
+            "anyOf": [
+              {
+                "discriminator": {
+                  "mapping": {
+                    "learner": "#/components/schemas/LearnerReplacement",
+                    "mastery": "#/components/schemas/MasteryReplacement"
+                  },
+                  "propertyName": "replacement_type"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/LearnerReplacement"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MasteryReplacement"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Corrected Content"
+          },
+          "decision": {
+            "enum": [
+              "accept",
+              "correct",
+              "reject"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "resolution_target": {
+            "anyOf": [
+              {
+                "enum": [
+                  "merge_existing",
+                  "create_new_topic"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution Target"
+          },
+          "target_memory_id": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Memory Id"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "ReviewDecisionRequest",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "_GraphStatePutBody": {
+        "additionalProperties": false,
+        "description": "PUT state 原始 body：action 先按字符串接收，以便把 expert 映射到专用错误码。\n\n字段集合与 GraphStatePutRequest 一致（extra=\"forbid\"，§6.4）。",
+        "properties": {
+          "action": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Action",
+            "type": "string"
+          },
+          "expected_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "_GraphStatePutBody",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "MemoryManagerGraph API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/internal/account-memory/purge": {
+      "post": {
+        "description": "创建 purge_account_memory operation + manifest + Outbox（同一事务）。",
+        "operationId": "purge_account_memory_api_v1_internal_account_memory_purge_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountMemoryPurgeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryOperationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Purge Account Memory",
+        "tags": [
+          "internal"
+        ]
+      }
+    },
+    "/api/v1/knowledge-graph/me/nodes": {
+      "get": {
+        "description": "当前用户全部 Overlay；无行节点由前端解释为无状态（§19.5）。",
+        "operationId": "list_my_node_states_api_v1_knowledge_graph_me_nodes_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/GraphOverlayView"
+                  },
+                  "title": "Response List My Node States Api V1 Knowledge Graph Me Nodes Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List My Node States",
+        "tags": [
+          "knowledge-graph"
+        ]
+      }
+    },
+    "/api/v1/knowledge-graph/me/nodes/{node_id}": {
+      "get": {
+        "operationId": "get_my_node_detail_api_v1_knowledge_graph_me_nodes__node_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "node_id",
+            "required": true,
+            "schema": {
+              "pattern": "^n\\d{3,}$",
+              "title": "Node Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphNodeDetailView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get My Node Detail",
+        "tags": [
+          "knowledge-graph"
+        ]
+      }
+    },
+    "/api/v1/knowledge-graph/me/nodes/{node_id}/explanation": {
+      "get": {
+        "description": "由最近一次 graph_state_audit 生成受控解释（§19.5）。",
+        "operationId": "get_node_explanation_api_v1_knowledge_graph_me_nodes__node_id__explanation_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "node_id",
+            "required": true,
+            "schema": {
+              "pattern": "^n\\d{3,}$",
+              "title": "Node Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphStateExplanation"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Explanation",
+        "tags": [
+          "knowledge-graph"
+        ]
+      }
+    },
+    "/api/v1/knowledge-graph/me/nodes/{node_id}/state": {
+      "delete": {
+        "description": "clear：有 Overlay 缺版本 422；无 Overlay 可省略版本并幂等 no_change（§19.5）。",
+        "operationId": "delete_node_state_api_v1_knowledge_graph_me_nodes__node_id__state_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "node_id",
+            "required": true,
+            "schema": {
+              "pattern": "^n\\d{3,}$",
+              "title": "Node Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expected_version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expected Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryOperationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Node State",
+        "tags": [
+          "knowledge-graph"
+        ]
+      },
+      "put": {
+        "operationId": "put_node_state_api_v1_knowledge_graph_me_nodes__node_id__state_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "node_id",
+            "required": true,
+            "schema": {
+              "pattern": "^n\\d{3,}$",
+              "title": "Node Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_GraphStatePutBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryOperationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Node State",
+        "tags": [
+          "knowledge-graph"
+        ]
+      }
+    },
+    "/api/v1/knowledge-graph/nodes": {
+      "get": {
+        "description": "全量固定节点、分组和边，不分页、不返回用户状态（§19.5）。",
+        "operationId": "get_knowledge_graph_api_v1_knowledge_graph_nodes_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeGraphSnapshot"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Knowledge Graph",
+        "tags": [
+          "knowledge-graph"
+        ]
+      }
+    },
+    "/api/v1/memory/commands/correct": {
+      "post": {
+        "operationId": "correct_memory_api_v1_memory_commands_correct_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CorrectMemoryCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryOperationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Correct Memory",
+        "tags": [
+          "memory"
+        ]
+      }
+    },
+    "/api/v1/memory/commands/forget": {
+      "post": {
+        "operationId": "forget_memory_api_v1_memory_commands_forget_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForgetMemoryCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryOperationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Forget Memory",
+        "tags": [
+          "memory"
+        ]
+      }
+    },
+    "/api/v1/memory/commands/restore": {
+      "post": {
+        "operationId": "restore_memory_api_v1_memory_commands_restore_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreMemoryCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryOperationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore Memory",
+        "tags": [
+          "memory"
+        ]
+      }
+    },
+    "/api/v1/memory/deleted": {
+      "get": {
+        "description": "30 天恢复窗口内的已删除记忆（§19.4）；cursor 绑定路由/用户/筛选。",
+        "operationId": "list_deleted_api_v1_memory_deleted_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 1000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CursorPage_DeletedMemoryItem_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Deleted",
+        "tags": [
+          "memory"
+        ]
+      }
+    },
+    "/api/v1/memory/events": {
+      "post": {
+        "description": "学习证据入队（§19.1）；P2/P3 不走快速路径，固定 202。",
+        "operationId": "submit_event_api_v1_memory_events_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "discriminator": {
+                  "mapping": {
+                    "activity_evidence": "#/components/schemas/ActivityEvidence",
+                    "conversation_evidence": "#/components/schemas/ConversationEvidence"
+                  },
+                  "propertyName": "kind"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ConversationEvidence"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ActivityEvidence"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryOperationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Event",
+        "tags": [
+          "memory"
+        ]
+      }
+    },
+    "/api/v1/memory/index": {
+      "get": {
+        "description": "index 生命周期（§8.6.1）：未构建 version=0/stale=true，不 404。",
+        "operationId": "get_index_api_v1_memory_index_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryIndexView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Index",
+        "tags": [
+          "memory"
+        ]
+      }
+    },
+    "/api/v1/memory/learner": {
+      "get": {
+        "operationId": "get_learner_api_v1_memory_learner_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearnerMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Learner",
+        "tags": [
+          "memory"
+        ]
+      },
+      "put": {
+        "operationId": "override_learner_api_v1_memory_learner_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OverrideLearnerProfileCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryOperationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Override Learner",
+        "tags": [
+          "memory"
+        ]
+      }
+    },
+    "/api/v1/memory/mastery/{topic_key}": {
+      "get": {
+        "operationId": "get_mastery_api_v1_memory_mastery__topic_key__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "topic_key",
+            "required": true,
+            "schema": {
+              "title": "Topic Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MasteryMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Mastery",
+        "tags": [
+          "memory"
+        ]
+      }
+    },
+    "/api/v1/memory/memories/{memory_id}": {
+      "get": {
+        "operationId": "get_memory_by_id_api_v1_memory_memories__memory_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "title": "Memory Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/LearnerMemoryView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/MasteryMemoryView"
+                    }
+                  ],
+                  "title": "Response Get Memory By Id Api V1 Memory Memories  Memory Id  Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Memory By Id",
+        "tags": [
+          "memory"
+        ]
+      }
+    },
+    "/api/v1/memory/notifications": {
+      "get": {
+        "operationId": "list_notifications_api_v1_memory_notifications_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "unread_only",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Unread Only",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 1000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryNotificationPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Notifications",
+        "tags": [
+          "memory-notifications"
+        ]
+      }
+    },
+    "/api/v1/memory/notifications/{notification_id}/read": {
+      "post": {
+        "description": "幂等已读（§19.6）；他人通知一律 404（§18.4）。",
+        "operationId": "mark_notification_read_api_v1_memory_notifications__notification_id__read_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "notification_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Notification Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryNotification"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mark Notification Read",
+        "tags": [
+          "memory-notifications"
+        ]
+      }
+    },
+    "/api/v1/memory/operations/{operation_id}": {
+      "get": {
+        "description": "查询 operation 状态（§19.3）；他人 operation 一律 404（§18.4 IDOR）。",
+        "operationId": "get_operation_api_v1_memory_operations__operation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryOperationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Operation",
+        "tags": [
+          "memory-operations"
+        ]
+      }
+    },
+    "/api/v1/memory/operations/{operation_id}/cancel": {
+      "post": {
+        "description": "取消规则（§11.6）：queued/retry_wait 立即取消；running 协作取消；\n\nneeds_review 可取消；succeeded/dead_letter/cancelled 返回 409。",
+        "operationId": "cancel_operation_api_v1_memory_operations__operation_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryOperationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Operation",
+        "tags": [
+          "memory-operations"
+        ]
+      }
+    },
+    "/api/v1/memory/review-candidates": {
+      "get": {
+        "operationId": "list_review_candidates_api_v1_memory_review_candidates_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "pending",
+                    "accepted",
+                    "corrected",
+                    "rejected",
+                    "expired"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 1000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CursorPage_ReviewCandidateView_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Review Candidates",
+        "tags": [
+          "memory-review-candidates"
+        ]
+      }
+    },
+    "/api/v1/memory/review-candidates/{candidate_id}/decision": {
+      "post": {
+        "description": "候选审核 P0 命令（§19.2）；候选归属与非 pending 状态在 Gateway 预检。",
+        "operationId": "decide_review_candidate_api_v1_memory_review_candidates__candidate_id__decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "candidate_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Candidate Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryOperationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Decide Review Candidate",
+        "tags": [
+          "memory-review-candidates"
+        ]
+      }
+    },
+    "/health/live": {
+      "get": {
+        "operationId": "health_live_health_live_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Health Live Health Live Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health Live"
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "description": "PostgreSQL、迁移版本、存储目录可读写、图谱注册表已加载（§14.8）。",
+        "operationId": "health_ready_health_ready_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health Ready"
+      }
+    },
+    "/health/startup": {
+      "get": {
+        "operationId": "health_startup_health_startup_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health Startup"
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "metrics_endpoint_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Metrics Endpoint"
+      }
+    }
+  }
+}

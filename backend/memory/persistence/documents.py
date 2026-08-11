@@ -191,6 +191,41 @@ async def list_deleted_in_window(
     return [dict(r) for r in result.mappings().all()]
 
 
+async def list_deleted_page(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    now: datetime,
+    limit: int,
+    cursor_deleted_at: datetime | None,
+    cursor_memory_id: str | None,
+) -> list[dict[str, Any]]:
+    """GET /memory/deleted 的 cursor 分页（§19.4 / §19.9）：仅 30 天恢复窗口内。"""
+    result = await session.execute(
+        text(
+            """
+            SELECT * FROM memory_documents
+            WHERE user_id = :user_id AND deleted_at IS NOT NULL
+              AND tombstone_until > :now
+              AND (
+                    CAST(:cursor_deleted_at AS timestamptz) IS NULL
+                    OR (deleted_at, memory_id) < (:cursor_deleted_at, :cursor_memory_id)
+                  )
+            ORDER BY deleted_at DESC, memory_id DESC
+            LIMIT :limit
+            """
+        ),
+        {
+            "user_id": user_id,
+            "now": now,
+            "limit": limit,
+            "cursor_deleted_at": cursor_deleted_at,
+            "cursor_memory_id": cursor_memory_id,
+        },
+    )
+    return [dict(r) for r in result.mappings().all()]
+
+
 async def list_expired_tombstones(
     session: AsyncSession, *, now: datetime, batch_size: int, cursor: str | None
 ) -> list[dict[str, Any]]:

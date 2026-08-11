@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.memory.contracts.common import max_attempts_for_priority
+from backend.memory.contracts.errors import OperationCancelNotAllowedError
 from backend.memory.contracts.operations import MemoryOperation
 from backend.memory.persistence.database import exec_rowcount
 
@@ -168,6 +169,32 @@ async def heartbeat(
     return rowcount == 1
 
 
+async def mark_commit_started(session: AsyncSession, *, operation_id: UUID) -> None:
+    """进入 commit 副作用前打标记（§11.6 取消仲裁）；仅对 running 行生效。
+
+    必须在独立短事务中调用，与提交事务分离：进程在 commit 中崩溃时标记残留，
+    由 Lease 回收后执行层在下次开始执行时清除（clear_commit_started）。
+    """
+    await session.execute(
+        text(
+            "UPDATE memory_operations SET commit_started_at = now(), updated_at = now() "
+            "WHERE operation_id = :operation_id AND status = 'running'"
+        ),
+        {"operation_id": operation_id},
+    )
+
+
+async def clear_commit_started(session: AsyncSession, *, operation_id: UUID) -> None:
+    """清除 commit 标记：提交事务结束后、或执行开始时清理崩溃残留（§11.6）。"""
+    await session.execute(
+        text(
+            "UPDATE memory_operations SET commit_started_at = NULL, updated_at = now() "
+            "WHERE operation_id = :operation_id AND commit_started_at IS NOT NULL"
+        ),
+        {"operation_id": operation_id},
+    )
+
+
 async def complete_operation(
     session: AsyncSession,
     *,
@@ -185,6 +212,7 @@ async def complete_operation(
                 public_error = CAST(:public_error AS jsonb),
                 completed_at = now(), updated_at = now(),
                 locked_by = NULL, lease_expires_at = NULL,
+                commit_started_at = NULL,
                 llm_call_count = llm_call_count + :llm_call_count
             WHERE operation_id = :operation_id
             """
@@ -210,7 +238,7 @@ async def reschedule_operation(
             """
             UPDATE memory_operations
             SET status = :status, next_run_at = :next_run_at, updated_at = now(),
-                locked_by = NULL, lease_expires_at = NULL
+                locked_by = NULL, lease_expires_at = NULL, commit_started_at = NULL
             WHERE operation_id = :operation_id
             """
         ),
@@ -253,6 +281,11 @@ async def request_cancel(session: AsyncSession, *, operation_id: UUID) -> dict[s
             {"operation_id": operation_id},
         )
     elif status == "running":
+        if row.get("commit_started_at") is not None:
+            # 已进入 commit 副作用，不允许取消（§11.6，裁决 2026-08-11）
+            raise OperationCancelNotAllowedError(
+                "operation 已进入 commit，不允许取消", field="status"
+            )
         # 协作取消：Runner 在节点入口/commit 前检查 cancel_requested_at
         await session.execute(
             text(

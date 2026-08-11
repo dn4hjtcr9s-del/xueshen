@@ -13,6 +13,7 @@ ERROR_CODES: frozenset[str] = frozenset(
         "AUTH_REQUIRED",
         "AUTH_FORBIDDEN",
         "INVALID_PAYLOAD",
+        "REQUEST_EXTRA_FIELD",
         "INVALID_IDEMPOTENCY_KEY",
         "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD",
         "MEMORY_NOT_FOUND",
@@ -26,6 +27,8 @@ ERROR_CODES: frozenset[str] = frozenset(
         "GRAPH_STATE_VERSION_CONFLICT",
         "GRAPH_STATE_VERSION_REQUIRED",
         "OPERATION_CANCEL_NOT_ALLOWED",
+        "OPERATION_NOT_FOUND",
+        "NOTIFICATION_NOT_FOUND",
         "IDENTITY_MAPPING_NOT_FOUND",
         "ACCOUNT_PURGE_ALREADY_RUNNING",
         "SOURCE_TOO_LARGE",
@@ -70,6 +73,13 @@ class MemoryError(Exception):
 
 class InvalidPayloadError(MemoryError):
     code = "INVALID_PAYLOAD"
+    http_status = 422
+
+
+class RequestExtraFieldError(MemoryError):
+    """公开请求携带契约外字段（§6.4 / §19.5）。"""
+
+    code = "REQUEST_EXTRA_FIELD"
     http_status = 422
 
 
@@ -136,6 +146,20 @@ class GraphStateVersionRequiredError(MemoryError):
 class OperationCancelNotAllowedError(MemoryError):
     code = "OPERATION_CANCEL_NOT_ALLOWED"
     http_status = 409
+
+
+class OperationNotFoundError(MemoryError):
+    """operation 不存在或不属于当前用户（§7.3 未列 operation 专用码，见施工报告）。"""
+
+    code = "OPERATION_NOT_FOUND"
+    http_status = 404
+
+
+class NotificationNotFoundError(MemoryError):
+    """通知不存在或不属于当前用户（§7.3 未列通知专用码，见施工报告）。"""
+
+    code = "NOTIFICATION_NOT_FOUND"
+    http_status = 404
 
 
 class IdentityMappingNotFoundError(MemoryError):

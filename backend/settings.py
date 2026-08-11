@@ -35,9 +35,8 @@ class Settings(BaseSettings):
     # API 进程
     memory_api_host: str = Field(default="127.0.0.1", alias="MEMORY_API_HOST")
     memory_api_port: int = Field(default=8000, alias="MEMORY_API_PORT")
-    memory_allowed_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:5173"], alias="MEMORY_ALLOWED_ORIGINS"
-    )
+    # §18.5：默认为空 —— 开发环境由 app.py 回落到 http://localhost:5173，生产默认关闭跨域
+    memory_allowed_origins: list[str] = Field(default_factory=list, alias="MEMORY_ALLOWED_ORIGINS")
 
     # Worker / Scheduler / Outbox（§14.1 / §11.5 / §14.4）
     memory_worker_concurrency: int = Field(default=4, alias="MEMORY_WORKER_CONCURRENCY")

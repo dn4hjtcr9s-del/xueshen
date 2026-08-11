@@ -94,6 +94,14 @@ class Worker:
                     batch_size=self.config.batch_size,
                 )
 
+    async def execute_claimed(self, row: dict[str, Any]) -> None:
+        """执行一条已领取的 operation（§14.2：Gateway 快速路径复用同一执行语义）。
+
+        调用方必须先通过共享的 claim_operation 领取；心跳、超时、完成/失败
+        回写与 Worker 轮询路径完全一致。
+        """
+        await self._execute_guarded(row)
+
     async def _execute_guarded(self, row: dict[str, Any]) -> None:
         async with self._semaphore:
             try:
@@ -109,6 +117,11 @@ class Worker:
         )
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(operation_id))
         try:
+            # §11.6（裁决 2026-08-11）：进程在 commit 中崩溃会残留 commit_started_at；
+            #  Lease 回收后重新执行时先清除残留标记，再检查协作取消
+            async with self.session_factory() as session:
+                async with session.begin():
+                    await ops_repo.clear_commit_started(session, operation_id=operation_id)
             # cancel 在 commit 前生效（§23.2）
             async with self.session_factory() as session:
                 cancelled = await ops_repo.get_cancel_requested(session, operation_id=operation_id)

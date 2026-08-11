@@ -48,6 +48,11 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 # 代码注释与 docstring 使用中文全角标点属于有意为之，关闭歧义字符检查
 ignore = ["RUF001", "RUF002", "RUF003"]
 
+[tool.ruff.lint.per-file-ignores]
+# FastAPI 依赖注入工厂模式（Depends(require(...))/Depends(rate_limit(...))）是
+# 框架标准用法，B008 函数调用默认值在此为有意为之
+"backend/memory/api/**" = ["B008"]
+
 [tool.mypy]
 python_version = "3.13"
 strict = true

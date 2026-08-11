@@ -87,6 +87,7 @@ class _Recorder:
     def __init__(self) -> None:
         self.completed: list[dict[str, Any]] = []
         self.rescheduled: list[dict[str, Any]] = []
+        self.cleared_commit_marker: list[Any] = []
         self.cancel_requested: bool = False
 
 
@@ -103,9 +104,13 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
     async def fake_cancel_requested(session: Any, operation_id: Any) -> bool:
         return rec.cancel_requested
 
+    async def fake_clear_commit_started(session: Any, *, operation_id: Any) -> None:
+        rec.cleared_commit_marker.append(operation_id)
+
     monkeypatch.setattr(ops_repo, "complete_operation", fake_complete)
     monkeypatch.setattr(ops_repo, "reschedule_operation", fake_reschedule)
     monkeypatch.setattr(ops_repo, "get_cancel_requested", fake_cancel_requested)
+    monkeypatch.setattr(ops_repo, "clear_commit_started", fake_clear_commit_started)
     return rec
 
 
@@ -125,6 +130,15 @@ async def test_cancel_before_commit_takes_effect(recorder: _Recorder) -> None:
     await _worker(runner)._execute(_row())
     assert runner.calls == []  # 未执行 Graph
     assert [c["status"] for c in recorder.completed] == ["cancelled"]
+
+
+async def test_execute_clears_stale_commit_marker_first(recorder: _Recorder) -> None:
+    """§11.6（裁决 2026-08-11）：崩溃残留的 commit_started_at 在执行开始时清除。"""
+    row = _row()
+    runner = _FakeRunner()
+    await _worker(runner)._execute(row)
+    assert recorder.cleared_commit_marker == [row["operation_id"]]
+    assert len(runner.calls) == 1
 
 
 async def test_success_completes_with_result(recorder: _Recorder) -> None:

@@ -201,6 +201,48 @@ async def test_expected_version_conflict(
         await _commit(memory_service, session_factory, [stale])
 
 
+async def _commit_marker(
+    session_factory: async_sessionmaker[AsyncSession], operation_id: UUID
+) -> object:
+    async with session_factory() as session:
+        result = await session.execute(
+            text("SELECT commit_started_at FROM memory_operations WHERE operation_id = :o"),
+            {"o": operation_id},
+        )
+        return result.scalar_one()
+
+
+async def test_commit_marker_cleared_after_success(
+    memory_service: MemoryService, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """§11.6（裁决 2026-08-11）：commit 事务成功后清除 commit_started_at。"""
+    op_id = uuid4()
+    outcome = await _commit(
+        memory_service, session_factory, [_learner_create()], operation_id=op_id
+    )
+    assert not outcome.replayed
+    assert await _commit_marker(session_factory, op_id) is None
+
+
+async def test_commit_marker_cleared_after_rollback(
+    memory_service: MemoryService, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """§11.6（裁决 2026-08-11）：提交事务回滚后同样清除 commit_started_at。"""
+    await _commit(memory_service, session_factory, [_mastery_create("quadratic", "二次函数")])
+    bad_plan = CommitMutationPlan(
+        mutation_id=uuid4(),
+        memory_id="mastery:quadratic",
+        target_memory_type="mastery",
+        action="merge",
+        expected_version=99,  # 陈旧令牌 → 整事务回滚
+        mastery_patch=MasteryPatch(understood_to_add=["求根公式"]),
+    )
+    op_id = uuid4()
+    with pytest.raises(MemoryVersionConflictError):
+        await _commit(memory_service, session_factory, [bad_plan], operation_id=op_id)
+    assert await _commit_marker(session_factory, op_id) is None
+
+
 async def test_forget_tombstone_then_restore_new_version(
     memory_service: MemoryService, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

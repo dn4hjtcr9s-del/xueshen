@@ -133,6 +133,69 @@ class ReviewCandidateCommand(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# 候选审核公开请求（§19.2）：candidate_id 由 URL 路径注入，body 不得携带
+# ---------------------------------------------------------------------------
+
+
+class ReviewDecisionRequest(BaseModel):
+    """POST /review-candidates/{candidate_id}/decision 的公开请求体。
+
+    与 GraphStatePutRequest 同模式（§6.4）：kind/candidate_id 由 Gateway
+    固定注入后构造内部 ReviewCandidateCommand；客户端传入一律 422。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["accept", "correct", "reject"]
+    resolution_target: Literal["merge_existing", "create_new_topic"] | None = None
+    target_memory_id: str | None = Field(default=None, max_length=160)
+    corrected_content: MemoryReplacement | None = None
+    reason: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_review_fields(self) -> ReviewDecisionRequest:
+        if self.decision == "correct" and self.corrected_content is None:
+            raise ValueError("corrected_content is required for correct")
+        if self.decision in {"accept", "reject"} and self.corrected_content is not None:
+            raise ValueError("corrected_content is only allowed for correct")
+        if self.resolution_target == "merge_existing" and not self.target_memory_id:
+            raise ValueError("target_memory_id is required for merge_existing")
+        if self.resolution_target == "create_new_topic" and self.target_memory_id is not None:
+            raise ValueError("target_memory_id is forbidden for create_new_topic")
+        if self.resolution_target is None and self.target_memory_id is not None:
+            raise ValueError("target_memory_id requires resolution_target=merge_existing")
+        return self
+
+    def to_command(self, *, candidate_id: UUID) -> ReviewCandidateCommand:
+        """路径 candidate_id 注入内部命令（§6.3）。"""
+        return ReviewCandidateCommand(
+            candidate_id=candidate_id,
+            decision=self.decision,
+            resolution_target=self.resolution_target,
+            target_memory_id=self.target_memory_id,
+            corrected_content=self.corrected_content,
+            reason=self.reason,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 内部账号删除公开请求（§19.7）
+# ---------------------------------------------------------------------------
+
+
+class AccountMemoryPurgeRequest(BaseModel):
+    """POST /internal/account-memory/purge 请求体；不允许直接注入内部 user_id。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_deletion_id: UUID
+    issuer: str = Field(min_length=1, max_length=300)
+    external_subject: str = Field(min_length=1, max_length=300)
+    requested_at: datetime
+    reason: str = Field(min_length=1, max_length=500)
+
+
+# ---------------------------------------------------------------------------
 # 图谱命令和派生更新（§6.4）
 # ---------------------------------------------------------------------------
 

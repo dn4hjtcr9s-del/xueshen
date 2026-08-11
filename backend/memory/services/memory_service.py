@@ -37,6 +37,7 @@ from backend.memory.contracts.errors import (
 from backend.memory.contracts.operations import MutationResult
 from backend.memory.persistence import commits as commits_repo
 from backend.memory.persistence import documents as docs_repo
+from backend.memory.persistence import operations as ops_repo
 from backend.memory.persistence import outbox as outbox_repo
 from backend.memory.persistence.database import acquire_user_lock
 from backend.memory.storage.base import MarkdownStore, logical_path_for
@@ -302,6 +303,18 @@ class MemoryService:
 
     # ---------------- 原子提交 ----------------
 
+    async def _mark_commit_started(self, operation_id: UUID) -> None:
+        """§11.6：独立短事务打 commit 标记（仅 status='running' 生效）。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await ops_repo.mark_commit_started(session, operation_id=operation_id)
+
+    async def _clear_commit_started(self, operation_id: UUID) -> None:
+        """§11.6：独立短事务清除 commit 标记（提交事务结束后调用）。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await ops_repo.clear_commit_started(session, operation_id=operation_id)
+
     async def commit_plans(
         self,
         *,
@@ -344,193 +357,202 @@ class MemoryService:
             stored_by_plan.append(stored)
 
         # 2. 数据库事务
-        async with self._session_factory() as session:
-            async with session.begin():
-                await acquire_user_lock(session, user_id)
-                memory_ids = sorted({p.memory_id for p in plans})
-                locked_docs = await docs_repo.lock_documents(
-                    session, user_id=user_id, memory_ids=memory_ids
-                )
-                docs_by_id = {d["memory_id"]: d for d in locked_docs}
+        # §11.6（裁决 2026-08-11）：进入 commit 副作用前用独立短事务打标记，
+        # 取消仲裁据此返回 409；事务结束（含回滚）后清除，崩溃残留由执行层清理。
+        await self._mark_commit_started(operation_id)
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await acquire_user_lock(session, user_id)
+                    memory_ids = sorted({p.memory_id for p in plans})
+                    locked_docs = await docs_repo.lock_documents(
+                        session, user_id=user_id, memory_ids=memory_ids
+                    )
+                    docs_by_id = {d["memory_id"]: d for d in locked_docs}
 
-                for i, (
-                    plan,
-                    _content,
-                    before_version,
-                    after_version,
-                    topic_key,
-                    index_data,
-                ) in enumerate(rendered):
-                    stored = stored_by_plan[i]
-                    # mutation_id 重放：直接返回原 commit（§11.3）
-                    existing = await commits_repo.get_by_mutation_id(session, plan.mutation_id)
-                    if existing is not None:
-                        outcome.mutations.append(
-                            MutationResult(
-                                mutation_id=plan.mutation_id,
-                                memory_id=plan.memory_id,
-                                action=existing["action"],
-                                before_version=existing["before_version"],
-                                after_version=existing["after_version"],
-                            )
-                        )
-                        outcome.replayed = True
-                        continue
-
-                    doc = docs_by_id.get(plan.memory_id)
-                    if plan.action == "create":
-                        if doc is not None and doc["active_version"] is not None:
-                            raise MemoryVersionConflictError(
-                                f"{plan.memory_id} 已存在活动版本",
-                                field="expected_version",
-                            )
-                    else:
-                        current_version = (
-                            int(doc["active_version"])
-                            if doc and doc["active_version"] is not None
-                            else None
-                        )
-                        if current_version is None:
-                            raise MemoryNotFoundError(plan.memory_id)
-                        if plan.expected_version != current_version:
-                            raise MemoryVersionConflictError(
-                                f"{plan.memory_id} 版本冲突: 期望 {plan.expected_version}, "
-                                f"当前 {current_version}",
-                                field="expected_version",
-                            )
-
-                    topic_title = (
-                        plan.topic_title
-                        or (doc["topic_title"] if doc else None)
-                        or (topic_key or "学习者档案")
-                    )
-                    await docs_repo.upsert_document(
-                        session,
-                        user_id=user_id,
-                        memory_id=plan.memory_id,
-                        memory_type=plan.target_memory_type,
-                        topic_key=topic_key,
-                        topic_title=topic_title,
-                        logical_path=logical_path_for(plan.memory_id),
-                    )
-                    await docs_repo.set_active_version(
-                        session,
-                        user_id=user_id,
-                        memory_id=plan.memory_id,
-                        active_version=after_version,
-                        active_storage_key=stored.storage_key,
-                        active_checksum=stored.checksum,
-                    )
-                    evidence_refs = evidence_refs_by_plan[i] if evidence_refs_by_plan else []
-                    await commits_repo.insert_commit(
-                        session,
-                        commit_id=uuid4(),
-                        mutation_id=plan.mutation_id,
-                        operation_id=operation_id,
-                        user_id=user_id,
-                        memory_id=plan.memory_id,
-                        action=plan.action,
-                        before_version=before_version,
-                        after_version=after_version,
-                        storage_key=stored.storage_key,
-                        checksum=stored.checksum,
-                        actor_type=actor_type,
-                        evidence_refs=evidence_refs[:100],
-                        commit_payload={
-                            "reason": plan.reason,
-                            "candidate_indexes": plan.candidate_indexes,
-                        },
-                        prompt_version=prompt_version,
-                        model_name=model_name,
-                    )
-                    await self._upsert_index_entry(
-                        session,
-                        user_id=user_id,
-                        memory_id=plan.memory_id,
-                        memory_type=plan.target_memory_type,
-                        topic_key=topic_key,
-                        source_version=after_version,
-                        index_data=index_data,
-                        evidence_refs=evidence_refs,
-                        now=now,
-                    )
-                    await docs_repo.mark_index_dirty(session, user_id=user_id, dirty_at=now)
-                    # Outbox 事件（§15 触发规则）
-                    node_ids = graph_node_ids_by_plan[i] if graph_node_ids_by_plan else []
-                    if plan.target_memory_type == "mastery":
-                        await outbox_repo.insert_event(
-                            session,
-                            outbox_id=uuid4(),
-                            operation_id=operation_id,
-                            user_id=user_id,
-                            event_type="memory.changed",
-                            aggregate_type="memory",
-                            aggregate_id=plan.memory_id,
-                            aggregate_version=after_version,
-                            payload={
-                                "schema_version": 1,
-                                "memory_id": plan.memory_id,
-                                "memory_type": "mastery",
-                                "before_version": before_version,
-                                "after_version": after_version,
-                                "topic_key": topic_key,
-                                "graph_projection_candidates": node_ids[:20],
-                            },
-                        )
-                        # mastery 活动版本提交后 upsert link（§13.8.1）：
-                        # 先把旧 link 全部置 inactive，再按当前映射重建
-                        from backend.memory.persistence import graph_states as gs_repo
-
-                        method = mapping_methods_by_plan[i] if mapping_methods_by_plan else None
-                        confidence = (
-                            mapping_confidences_by_plan[i] if mapping_confidences_by_plan else None
-                        )
-                        await gs_repo.deactivate_graph_links(
-                            session, user_id=user_id, memory_id=plan.memory_id
-                        )
-                        for node_id in node_ids:
-                            if method and confidence is not None:
-                                await gs_repo.upsert_graph_link(
-                                    session,
-                                    user_id=user_id,
+                    for i, (
+                        plan,
+                        _content,
+                        before_version,
+                        after_version,
+                        topic_key,
+                        index_data,
+                    ) in enumerate(rendered):
+                        stored = stored_by_plan[i]
+                        # mutation_id 重放：直接返回原 commit（§11.3）
+                        existing = await commits_repo.get_by_mutation_id(session, plan.mutation_id)
+                        if existing is not None:
+                            outcome.mutations.append(
+                                MutationResult(
+                                    mutation_id=plan.mutation_id,
                                     memory_id=plan.memory_id,
-                                    node_id=node_id,
-                                    memory_version=after_version,
-                                    mapping_method=method,
-                                    mapping_confidence=confidence,
+                                    action=existing["action"],
+                                    before_version=existing["before_version"],
+                                    after_version=existing["after_version"],
                                 )
-                    else:
-                        changed_sections = index_data.get("changed_sections") or [
-                            "preferences",
-                            "goals",
-                            "plans",
-                        ]
-                        await outbox_repo.insert_event(
+                            )
+                            outcome.replayed = True
+                            continue
+
+                        doc = docs_by_id.get(plan.memory_id)
+                        if plan.action == "create":
+                            if doc is not None and doc["active_version"] is not None:
+                                raise MemoryVersionConflictError(
+                                    f"{plan.memory_id} 已存在活动版本",
+                                    field="expected_version",
+                                )
+                        else:
+                            current_version = (
+                                int(doc["active_version"])
+                                if doc and doc["active_version"] is not None
+                                else None
+                            )
+                            if current_version is None:
+                                raise MemoryNotFoundError(plan.memory_id)
+                            if plan.expected_version != current_version:
+                                raise MemoryVersionConflictError(
+                                    f"{plan.memory_id} 版本冲突: 期望 {plan.expected_version}, "
+                                    f"当前 {current_version}",
+                                    field="expected_version",
+                                )
+
+                        topic_title = (
+                            plan.topic_title
+                            or (doc["topic_title"] if doc else None)
+                            or (topic_key or "学习者档案")
+                        )
+                        await docs_repo.upsert_document(
                             session,
-                            outbox_id=uuid4(),
+                            user_id=user_id,
+                            memory_id=plan.memory_id,
+                            memory_type=plan.target_memory_type,
+                            topic_key=topic_key,
+                            topic_title=topic_title,
+                            logical_path=logical_path_for(plan.memory_id),
+                        )
+                        await docs_repo.set_active_version(
+                            session,
+                            user_id=user_id,
+                            memory_id=plan.memory_id,
+                            active_version=after_version,
+                            active_storage_key=stored.storage_key,
+                            active_checksum=stored.checksum,
+                        )
+                        evidence_refs = evidence_refs_by_plan[i] if evidence_refs_by_plan else []
+                        await commits_repo.insert_commit(
+                            session,
+                            commit_id=uuid4(),
+                            mutation_id=plan.mutation_id,
                             operation_id=operation_id,
                             user_id=user_id,
-                            event_type="learner.updated",
-                            aggregate_type="memory",
-                            aggregate_id="learner",
-                            aggregate_version=after_version,
-                            payload={
-                                "schema_version": 1,
-                                "memory_id": "learner",
-                                "before_version": before_version,
-                                "after_version": after_version,
-                                "changed_sections": changed_sections[:3],
-                            },
-                        )
-                    outcome.mutations.append(
-                        MutationResult(
-                            mutation_id=plan.mutation_id,
                             memory_id=plan.memory_id,
                             action=plan.action,
                             before_version=before_version,
                             after_version=after_version,
+                            storage_key=stored.storage_key,
+                            checksum=stored.checksum,
+                            actor_type=actor_type,
+                            evidence_refs=evidence_refs[:100],
+                            commit_payload={
+                                "reason": plan.reason,
+                                "candidate_indexes": plan.candidate_indexes,
+                            },
+                            prompt_version=prompt_version,
+                            model_name=model_name,
                         )
-                    )
+                        await self._upsert_index_entry(
+                            session,
+                            user_id=user_id,
+                            memory_id=plan.memory_id,
+                            memory_type=plan.target_memory_type,
+                            topic_key=topic_key,
+                            source_version=after_version,
+                            index_data=index_data,
+                            evidence_refs=evidence_refs,
+                            now=now,
+                        )
+                        await docs_repo.mark_index_dirty(session, user_id=user_id, dirty_at=now)
+                        # Outbox 事件（§15 触发规则）
+                        node_ids = graph_node_ids_by_plan[i] if graph_node_ids_by_plan else []
+                        if plan.target_memory_type == "mastery":
+                            await outbox_repo.insert_event(
+                                session,
+                                outbox_id=uuid4(),
+                                operation_id=operation_id,
+                                user_id=user_id,
+                                event_type="memory.changed",
+                                aggregate_type="memory",
+                                aggregate_id=plan.memory_id,
+                                aggregate_version=after_version,
+                                payload={
+                                    "schema_version": 1,
+                                    "memory_id": plan.memory_id,
+                                    "memory_type": "mastery",
+                                    "before_version": before_version,
+                                    "after_version": after_version,
+                                    "topic_key": topic_key,
+                                    "graph_projection_candidates": node_ids[:20],
+                                },
+                            )
+                            # mastery 活动版本提交后 upsert link（§13.8.1）：
+                            # 先把旧 link 全部置 inactive，再按当前映射重建
+                            from backend.memory.persistence import graph_states as gs_repo
+
+                            method = mapping_methods_by_plan[i] if mapping_methods_by_plan else None
+                            confidence = (
+                                mapping_confidences_by_plan[i]
+                                if mapping_confidences_by_plan
+                                else None
+                            )
+                            await gs_repo.deactivate_graph_links(
+                                session, user_id=user_id, memory_id=plan.memory_id
+                            )
+                            for node_id in node_ids:
+                                if method and confidence is not None:
+                                    await gs_repo.upsert_graph_link(
+                                        session,
+                                        user_id=user_id,
+                                        memory_id=plan.memory_id,
+                                        node_id=node_id,
+                                        memory_version=after_version,
+                                        mapping_method=method,
+                                        mapping_confidence=confidence,
+                                    )
+                        else:
+                            changed_sections = index_data.get("changed_sections") or [
+                                "preferences",
+                                "goals",
+                                "plans",
+                            ]
+                            await outbox_repo.insert_event(
+                                session,
+                                outbox_id=uuid4(),
+                                operation_id=operation_id,
+                                user_id=user_id,
+                                event_type="learner.updated",
+                                aggregate_type="memory",
+                                aggregate_id="learner",
+                                aggregate_version=after_version,
+                                payload={
+                                    "schema_version": 1,
+                                    "memory_id": "learner",
+                                    "before_version": before_version,
+                                    "after_version": after_version,
+                                    "changed_sections": changed_sections[:3],
+                                },
+                            )
+                        outcome.mutations.append(
+                            MutationResult(
+                                mutation_id=plan.mutation_id,
+                                memory_id=plan.memory_id,
+                                action=plan.action,
+                                before_version=before_version,
+                                after_version=after_version,
+                            )
+                        )
+
+        finally:
+            await self._clear_commit_started(operation_id)
 
         # 3. 物化 current/（失败不影响活动版本，§8.6）
         for plan, content, _bv, _av, _tk, _idx in rendered:

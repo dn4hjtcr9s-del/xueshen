@@ -81,6 +81,44 @@ async def list_pending_candidates(
     return [dict(row) for row in result.mappings().all()]
 
 
+async def list_candidates_page(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    status: str | None,
+    limit: int,
+    cursor_created_at: datetime | None,
+    cursor_candidate_id: UUID | None,
+) -> list[dict[str, Any]]:
+    """GET /memory/review-candidates 的 cursor 分页（§19.4 / §19.9）。
+
+    排序 (created_at DESC, candidate_id DESC)；cursor 位置由 Gateway 验签后传入。
+    """
+    result = await session.execute(
+        text(
+            """
+            SELECT * FROM memory_review_candidates
+            WHERE user_id = :user_id
+              AND (CAST(:status AS varchar) IS NULL OR status = :status)
+              AND (
+                    CAST(:cursor_created_at AS timestamptz) IS NULL
+                    OR (created_at, candidate_id) < (:cursor_created_at, :cursor_candidate_id)
+                  )
+            ORDER BY created_at DESC, candidate_id DESC
+            LIMIT :limit
+            """
+        ),
+        {
+            "user_id": user_id,
+            "status": status,
+            "limit": limit,
+            "cursor_created_at": cursor_created_at,
+            "cursor_candidate_id": cursor_candidate_id,
+        },
+    )
+    return [dict(row) for row in result.mappings().all()]
+
+
 async def resolve_candidate(
     session: AsyncSession,
     *,
