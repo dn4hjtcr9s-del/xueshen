@@ -57,9 +57,7 @@ def test_client_sends_explicit_model_dimensions_and_sorts_response_indexes() -> 
             True,
         ),
         (
-            openai.APIConnectionError(
-                request=httpx.Request("POST", "https://example.invalid")
-            ),
+            openai.APIConnectionError(request=httpx.Request("POST", "https://example.invalid")),
             "connection",
             True,
         ),

@@ -183,8 +183,7 @@ def load_chunk_dataset(chunk_root: Path) -> ChunkDataset:
     file_count = int(file_entry.get("records", -1))
     if len(chunks) != expected_count or len(chunks) != file_count:
         raise ArtifactError(
-            "Chunk 记录数不匹配："
-            f"实际 {len(chunks)}，manifest {expected_count}，files {file_count}"
+            f"Chunk 记录数不匹配：实际 {len(chunks)}，manifest {expected_count}，files {file_count}"
         )
     return ChunkDataset(
         root=chunk_root,
@@ -413,9 +412,7 @@ class ArtifactStore:
             raise ArtifactError(f"未知 batch_index：{outcome.batch_index}")
         if outcome.batch_id != plan.batch_id:
             raise ArtifactError("BatchOutcome batch_id 与计划不一致")
-        expected_ids = {
-            chunk.chunk_id for job in plan.jobs for chunk in job.chunks
-        }
+        expected_ids = {chunk.chunk_id for job in plan.jobs for chunk in job.chunks}
         actual_ids = [record.chunk_id for record in outcome.records]
         if len(actual_ids) != len(set(actual_ids)) or set(actual_ids) != expected_ids:
             raise ArtifactError("BatchOutcome 未恰好覆盖计划内全部 Chunk")
@@ -477,9 +474,7 @@ class ArtifactStore:
                 str(payload["error_code"]) if payload.get("error_code") is not None else None
             ),
             error_message=(
-                str(payload["error_message"])
-                if payload.get("error_message") is not None
-                else None
+                str(payload["error_message"]) if payload.get("error_message") is not None else None
             ),
             attempts=int(payload.get("attempts", 0)),
         )
@@ -512,9 +507,7 @@ class ArtifactStore:
         )
         if int(metadata.get("record_count", -1)) != len(records):
             raise ArtifactError(f"Shard record_count 不匹配：{path}")
-        expected_ids = {
-            chunk.chunk_id for job in plan.jobs for chunk in job.chunks
-        }
+        expected_ids = {chunk.chunk_id for job in plan.jobs for chunk in job.chunks}
         actual_ids = [record.chunk_id for record in records]
         if len(actual_ids) != len(set(actual_ids)) or set(actual_ids) != expected_ids:
             raise ArtifactError(f"Shard 未恰好覆盖批次 Chunk：{path}")
@@ -643,9 +636,7 @@ class ArtifactStore:
             "total_batches": len(self.batches),
         }
         status = (
-            "ready"
-            if len(successful) == self.dataset.chunk_count and not failed
-            else "partial"
+            "ready" if len(successful) == self.dataset.chunk_count and not failed else "partial"
         )
         files: dict[str, dict[str, Any]] = {
             "profile.json": {"sha256": _file_hash(self.output_root / "profile.json")},

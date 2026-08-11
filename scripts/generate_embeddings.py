@@ -103,13 +103,10 @@ def main(
             overrides=overrides,
         )
         if settings.model != _EXPECTED_MODEL:
-            raise SettingsError(
-                f"阶段二固定模型为 {_EXPECTED_MODEL}，实际配置为 {settings.model}"
-            )
+            raise SettingsError(f"阶段二固定模型为 {_EXPECTED_MODEL}，实际配置为 {settings.model}")
         if settings.dimensions != _EXPECTED_DIMENSIONS:
             raise SettingsError(
-                f"阶段二固定向量维度为 {_EXPECTED_DIMENSIONS}，"
-                f"实际配置为 {settings.dimensions}"
+                f"阶段二固定向量维度为 {_EXPECTED_DIMENSIONS}，实际配置为 {settings.dimensions}"
             )
         dataset = load_chunk_dataset(args.chunk_root)
         output_root = args.output_root or default_output_root(

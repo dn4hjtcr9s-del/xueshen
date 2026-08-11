@@ -68,9 +68,7 @@ def test_settings_reject_missing_required_api_configuration() -> None:
         EmbeddingSettings.from_sources(environ={"EMBEDDING_API_KEY": "secret"})
 
     with pytest.raises(SettingsError, match="API key"):
-        EmbeddingSettings.from_sources(
-            environ={"EMBEDDING_BASE_URL": "https://example.invalid/v1"}
-        )
+        EmbeddingSettings.from_sources(environ={"EMBEDDING_BASE_URL": "https://example.invalid/v1"})
 
 
 def test_settings_reject_invalid_positive_limits() -> None:

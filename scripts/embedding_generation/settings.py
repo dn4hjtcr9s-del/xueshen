@@ -150,9 +150,7 @@ class EmbeddingSettings:
             max_backoff_seconds=_nonnegative_float(
                 "max_backoff_seconds", values.get("max_backoff_seconds", 30.0)
             ),
-            jitter_seconds=_nonnegative_float(
-                "jitter_seconds", values.get("jitter_seconds", 0.5)
-            ),
+            jitter_seconds=_nonnegative_float("jitter_seconds", values.get("jitter_seconds", 0.5)),
             requests_per_second=_nonnegative_float(
                 "requests_per_second", values.get("requests_per_second", 0.0)
             ),

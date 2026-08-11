@@ -155,8 +155,7 @@ def upgrade() -> None:
         """
     )
     op.execute(
-        "CREATE INDEX ix_rag_ingest_runs_corpus "
-        "ON rag.ingest_runs (corpus_id, started_at DESC)"
+        "CREATE INDEX ix_rag_ingest_runs_corpus ON rag.ingest_runs (corpus_id, started_at DESC)"
     )
 
 

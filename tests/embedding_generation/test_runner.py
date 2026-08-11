@@ -148,8 +148,7 @@ def test_runner_splits_permanent_batch_error_and_isolates_bad_input(tmp_path: Pa
     assert summary.manifest["counts"]["failed_chunks"] == 1
     assert len(client.calls) == 5
     failures = [
-        json.loads(line)
-        for line in (store.output_root / "failures.jsonl").read_text().splitlines()
+        json.loads(line) for line in (store.output_root / "failures.jsonl").read_text().splitlines()
     ]
     assert failures[0]["chunk_id"] == "chunk-1"
     assert failures[0]["error_code"] == "http_400"
