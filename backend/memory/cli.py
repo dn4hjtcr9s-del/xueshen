@@ -4,7 +4,11 @@
   uv run python -m backend.memory.cli sync-knowledge-graph --check|--apply [--allow-remove]
   uv run python -m backend.memory.cli create-identity-mapping ...
   uv run python -m backend.memory.cli validate-openai
+  uv run python -m backend.memory.cli create-backup
+  uv run python -m backend.memory.cli restore-backup --batch-id <uuid> [--force]
   uv run python -m backend.memory.cli verify-backup-restore --batch-id <uuid>
+  uv run python -m backend.memory.cli create-break-glass-grant ...
+  uv run python -m backend.memory.cli revoke-break-glass-grant --grant-id <uuid>
 """
 
 from __future__ import annotations
@@ -177,10 +181,76 @@ def _cmd_validate_openai(_args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
-def _cmd_verify_backup_restore(_args: argparse.Namespace) -> int:
-    """步骤 15（备份/恢复）接入完整实现。"""
-    print("[verify-backup-restore] 尚未实现：将在备份/恢复步骤接入", file=sys.stderr)
-    return 2
+def _cmd_create_backup(_args: argparse.Namespace) -> int:
+    """执行一次备份批次（§21.4）：pg_dump + Markdown tar + age 加密 + backup_runs。"""
+    from backend.memory.backup import BackupError, create_backup
+
+    settings = get_settings()
+
+    async def _run() -> int:
+        db = Database(settings)
+        try:
+            batch_id = await create_backup(settings, db.session_factory)
+            print(f"[create-backup] 成功：batch_id={batch_id}")
+            return 0
+        except BackupError as exc:
+            print(f"[create-backup] 失败：{exc}", file=sys.stderr)
+            return 1
+        finally:
+            await db.close()
+
+    return asyncio.run(_run())
+
+
+def _cmd_verify_backup_restore(args: argparse.Namespace) -> int:
+    """每周恢复验证（§21.4）：隔离目录解密校验并更新 backup_runs 验证状态。"""
+    from backend.memory.backup import BackupError, verify_backup_restore
+
+    settings = get_settings()
+
+    async def _run() -> int:
+        db = Database(settings)
+        try:
+            await verify_backup_restore(settings, db.session_factory, batch_id=args.batch_id)
+            print(f"[verify-backup-restore] 成功：batch_id={args.batch_id}")
+            return 0
+        except BackupError as exc:
+            print(f"[verify-backup-restore] 失败：{exc}", file=sys.stderr)
+            return 1
+        finally:
+            await db.close()
+
+    return asyncio.run(_run())
+
+
+def _cmd_restore_backup(args: argparse.Namespace) -> int:
+    """恢复一个备份批次（§21.4）：校验 manifest/checksum 后写入目标。"""
+    from backend.memory.backup import BackupError, restore_backup
+
+    settings = get_settings()
+
+    async def _run() -> int:
+        db = Database(settings)
+        try:
+            replay_ids = await restore_backup(
+                settings, db.session_factory, batch_id=args.batch_id, force=args.force
+            )
+            print(f"[restore-backup] 成功：batch_id={args.batch_id}")
+            if replay_ids:
+                print(
+                    "[restore-backup] 警告：以下账号删除 manifest 必须重新应用（§21.4）：\n"
+                    + "\n".join(f"  - {rid}" for rid in replay_ids)
+                    + "\n服务启动后对每个 account_deletion_id 调用 "
+                    "POST /internal/account-memory/purge 重放。"
+                )
+            return 0
+        except BackupError as exc:
+            print(f"[restore-backup] 失败：{exc}", file=sys.stderr)
+            return 1
+        finally:
+            await db.close()
+
+    return asyncio.run(_run())
 
 
 def _cmd_create_break_glass_grant(args: argparse.Namespace) -> int:
@@ -329,6 +399,14 @@ def build_parser() -> argparse.ArgumentParser:
     verify = sub.add_parser("verify-backup-restore")
     verify.add_argument("--batch-id", required=True, type=UUID)
     verify.set_defaults(func=_cmd_verify_backup_restore)
+
+    backup = sub.add_parser("create-backup")
+    backup.set_defaults(func=_cmd_create_backup)
+
+    restore = sub.add_parser("restore-backup")
+    restore.add_argument("--batch-id", required=True, type=UUID)
+    restore.add_argument("--force", action="store_true", help="覆盖非空目标（危险）")
+    restore.set_defaults(func=_cmd_restore_backup)
 
     bg_create = sub.add_parser("create-break-glass-grant")
     bg_create.add_argument("--admin-user-id", required=True, type=UUID)
