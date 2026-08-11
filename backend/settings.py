@@ -63,6 +63,7 @@ class Settings(BaseSettings):
 
     # OpenAI（§9.1）
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    openai_base_url: str | None = Field(default=None, alias="OPENAI_BASE_URL")
     openai_memory_model: str = Field(default="gpt-5.6-luna", alias="OPENAI_MEMORY_MODEL")
     openai_reasoning_effort: str = Field(default="none", alias="OPENAI_REASONING_EFFORT")
     openai_memory_timeout_seconds: float = Field(

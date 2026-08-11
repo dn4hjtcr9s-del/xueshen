@@ -42,8 +42,10 @@ async def search_candidates(
                    similarity(search_text, :query) AS similarity
             FROM memory_index_entries
             WHERE user_id = :user_id
-              AND (cardinality(:topic_keys) = 0 OR topic_key = ANY(:topic_keys))
-              AND (cardinality(:memory_types) = 0 OR memory_type = ANY(:memory_types))
+              AND (cardinality(CAST(:topic_keys AS text[])) = 0
+                   OR topic_key = ANY(CAST(:topic_keys AS text[])))
+              AND (cardinality(CAST(:memory_types AS text[])) = 0
+                   OR memory_type = ANY(CAST(:memory_types AS text[])))
               AND (
                     similarity(search_text, :query) >= :min_similarity
                     OR topic_key = :query

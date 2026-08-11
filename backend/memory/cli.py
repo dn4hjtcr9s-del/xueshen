@@ -145,6 +145,7 @@ def _cmd_validate_openai(_args: argparse.Namespace) -> int:
 
         client = AsyncOpenAI(
             api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url or None,
             timeout=settings.openai_memory_timeout_seconds,
         )
         try:

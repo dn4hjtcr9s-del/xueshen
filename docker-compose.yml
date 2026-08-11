@@ -29,8 +29,12 @@ services:
       DEV_AUTH_ENABLED: "true"
       DEV_AUTH_ALLOW_SCOPE_OVERRIDE: "false"
       MEMORY_ALLOWED_ORIGINS: '["http://localhost:5173"]'
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-${DEEPSEEK_API_KEY:-}}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-${DEEPSEEK_BASE_URL:-}}
+      OPENAI_MEMORY_MODEL: ${OPENAI_MEMORY_MODEL:-${DEEPSEEK_MODEL:-gpt-5.6-luna}}
+      OPENAI_REASONING_EFFORT: ${OPENAI_REASONING_EFFORT:-none}
     ports:
-      - "8000:8000"
+      - "8001:8000"
     volumes:
       - memory-data:/data/memory
       - ./knowledge_graph:/app/knowledge_graph:ro
@@ -49,6 +53,10 @@ services:
       KNOWLEDGE_GRAPH_ROOT: /app/knowledge_graph
       BACKUP_ROOT: /backups
       DEV_AUTH_ENABLED: "true"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-${DEEPSEEK_API_KEY:-}}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-${DEEPSEEK_BASE_URL:-}}
+      OPENAI_MEMORY_MODEL: ${OPENAI_MEMORY_MODEL:-${DEEPSEEK_MODEL:-gpt-5.6-luna}}
+      OPENAI_REASONING_EFFORT: ${OPENAI_REASONING_EFFORT:-none}
     volumes:
       - memory-data:/data/memory
       - ./knowledge_graph:/app/knowledge_graph:ro

@@ -68,6 +68,7 @@ class RealMemoryLLMClient:
         self._settings = settings
         self._client = AsyncOpenAI(
             api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url or None,
             timeout=settings.openai_memory_timeout_seconds,
         )
 

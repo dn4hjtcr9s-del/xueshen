@@ -69,8 +69,11 @@ async def list_notifications(
             WHERE user_id = :user_id
               AND (:unread_only = false OR read_at IS NULL)
               AND (
-                    :cursor_created_at IS NULL
-                    OR (created_at, notification_id) < (:cursor_created_at, :cursor_id)
+                    CAST(:cursor_created_at AS timestamptz) IS NULL
+                    OR (created_at, notification_id) < (
+                        CAST(:cursor_created_at AS timestamptz),
+                        CAST(:cursor_id AS uuid)
+                    )
                   )
             ORDER BY created_at DESC, notification_id DESC
             LIMIT :limit
