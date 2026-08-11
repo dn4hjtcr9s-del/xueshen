@@ -282,7 +282,7 @@ async def deactivate_graph_links(
             UPDATE memory_graph_links
             SET active = false, updated_at = now()
             WHERE user_id = :user_id AND memory_id = :memory_id
-              AND (:except_node_id IS NULL OR node_id != :except_node_id)
+              AND (CAST(:except_node_id AS varchar) IS NULL OR node_id != :except_node_id)
             """
         ),
         {"user_id": user_id, "memory_id": memory_id, "except_node_id": except_node_id},

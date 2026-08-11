@@ -162,6 +162,30 @@ class LocalMarkdownStore:
 
         await asyncio.to_thread(_move)
 
+    async def read_quarantined_version(
+        self, *, user_id: UUID, memory_id: str, version: int, checksum: str
+    ) -> bytes:
+        _validate_memory_id(memory_id)
+        import hashlib
+
+        memory_hash = hashlib.sha256(memory_id.encode()).hexdigest()[:16]
+        base = self._abs(user_id, f"quarantine/{memory_hash}")
+        prefix = f"v{version:08d}-"
+        suffix = f"-{checksum[:12]}.md"
+
+        def _read() -> bytes:
+            if not base.exists():
+                raise FileNotFoundError(f"quarantine/{memory_hash}")
+            for delete_dir in sorted(base.glob("delete-*"), reverse=True):
+                if not delete_dir.is_dir():
+                    continue
+                for file in delete_dir.iterdir():
+                    if file.name.startswith(prefix) and file.name.endswith(suffix):
+                        return file.read_bytes()
+            raise FileNotFoundError(f"{memory_id} v{version} 不在隔离区")
+
+        return await asyncio.to_thread(_read)
+
     async def purge_quarantined(self, *, user_id: UUID, memory_id: str) -> None:
         import hashlib
         import shutil

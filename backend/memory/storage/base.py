@@ -86,6 +86,12 @@ class MarkdownStore(Protocol):
         """tombstone 期间把可恢复正文标记/移动到 quarantine/（§8.3）。"""
         ...
 
+    async def read_quarantined_version(
+        self, *, user_id: UUID, memory_id: str, version: int, checksum: str
+    ) -> bytes:
+        """从 quarantine/ 读取被隔离版本正文（恢复路径兜底，§8.7.3）。"""
+        ...
+
     async def purge_quarantined(self, *, user_id: UUID, memory_id: str) -> None:
         """30 天到期后物理清理隔离正文（§2.3）。"""
         ...
