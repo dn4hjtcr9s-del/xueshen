@@ -19,7 +19,7 @@ from backend.memory.graph.llm_schemas import (
     MutationPlanDraft,
     MutationPlanResult,
 )
-from backend.memory.graph.openai_client import FakeMemoryLLMClient
+from backend.memory.graph.openai_client import FakeMemoryLLMClient, _parse_lenient
 from backend.memory.graph.policies import (
     LLM_MAX_CALLS_PER_ATTEMPT,
     LLM_MAX_CALLS_PER_OPERATION,
@@ -148,6 +148,19 @@ def test_prompt_files_loadable_and_versioned() -> None:
         load_prompt("nonexistent_v99")
     with pytest.raises(ValueError, match="非法"):
         load_prompt("../etc/passwd")
+
+
+def test_parse_lenient_strips_markdown_fences() -> None:
+    """DeepSeek 等兼容端点偶发 Markdown 围栏时的兜底解析（§9.1 鲁棒性）。"""
+    payload = {"candidates": [], "ignored_reason_codes": ["NO_LONG_TERM_VALUE"]}
+    fenced = "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
+    result = _parse_lenient(CandidateExtractionResult, fenced)
+    assert result.candidates == []
+    assert result.ignored_reason_codes == ["NO_LONG_TERM_VALUE"]
+    plain = _parse_lenient(CandidateExtractionResult, json.dumps(payload, ensure_ascii=False))
+    assert plain.candidates == []
+    with pytest.raises(OpenAISchemaInvalidError):
+        _parse_lenient(CandidateExtractionResult, "not json at all")
 
 
 # ---------------------------------------------------------------------------

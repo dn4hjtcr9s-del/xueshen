@@ -8,9 +8,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from openai.types.responses import ResponseFormatTextJSONSchemaConfigParam
 
 from backend.memory.contracts.errors import (
     OpenAIRateLimitedError,
@@ -87,13 +90,16 @@ class RealMemoryLLMClient:
 
         budget.consume()
         try:
-            response = await self._client.responses.parse(
+            # 用 create + 显式 text format 而非 SDK parse()：后者会在 post-parser 中
+            # 急切校验 JSON，DeepSeek 等兼容端点偶发 Markdown 围栏时直接抛错，
+            # 应用层拿不到原始文本无法兜底。create 只负责传输，解析由 _parse_lenient 完成。
+            response = await self._client.responses.create(
                 model=self._settings.openai_memory_model,
                 input=[
                     {"role": "system", "content": load_prompt(prompt_version)},
                     {"role": "user", "content": user_payload},
                 ],
-                text_format=text_format,
+                text={"format": _json_schema_format(text_format)},
                 max_output_tokens=max_output_tokens,
                 reasoning=Reasoning(
                     effort=cast(ReasoningEffort, self._settings.openai_reasoning_effort)
@@ -101,9 +107,7 @@ class RealMemoryLLMClient:
             )
         except Exception as exc:
             raise _map_openai_error(exc) from exc
-        parsed = response.output_parsed
-        if parsed is None:
-            raise OpenAISchemaInvalidError("模型输出无法解析为结构化 Schema")
+        parsed = _parse_lenient(text_format, response.output_text or "")
         record = LLMCallRecord(
             prompt_version=prompt_version,
             model_name=self._settings.openai_memory_model,
@@ -134,6 +138,37 @@ class RealMemoryLLMClient:
             max_output_tokens=PLAN_MAX_OUTPUT_TOKENS,
             budget=budget,
         )
+
+
+def _json_schema_format(
+    text_format: type[BaseModel],
+) -> ResponseFormatTextJSONSchemaConfigParam:
+    """构造 Responses API 的 json_schema text format（等价 SDK parse 的请求侧行为）。"""
+    from openai.lib._pydantic import to_strict_json_schema
+
+    return {
+        "type": "json_schema",
+        "name": text_format.__name__,
+        "schema": to_strict_json_schema(text_format),
+        "strict": True,
+    }
+
+
+def _parse_lenient[T: BaseModel](text_format: type[T], raw: str) -> T:
+    """兜底解析：剥离 Markdown 代码围栏后按 Schema 校验（DeepSeek 等兼容端点偶发）。"""
+    text = raw.strip()
+    lines = text.splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    try:
+        return text_format.model_validate_json(text)
+    except Exception as exc:
+        raise OpenAISchemaInvalidError(
+            f"模型输出无法解析为结构化 Schema: {str(exc)[:200]}"
+        ) from exc
 
 
 def _map_openai_error(exc: Exception) -> Exception:

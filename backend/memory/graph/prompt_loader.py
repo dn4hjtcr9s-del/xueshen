@@ -11,7 +11,7 @@ from pathlib import Path
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
-EXTRACT_CANDIDATES_PROMPT_VERSION = "extract_candidates_v1"
+EXTRACT_CANDIDATES_PROMPT_VERSION = "extract_candidates_v2"
 BUILD_MUTATION_PLAN_PROMPT_VERSION = "build_mutation_plan_v1"
 
 

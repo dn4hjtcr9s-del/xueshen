@@ -62,7 +62,9 @@ def _judge(sample: dict[str, Any], result: Any) -> list[str]:
     ]
 
     expected_candidates = expected.get("candidates", [])
-    if not expected_candidates and actual_candidates:
+    # 仅当样例显式声明 "candidates": [] 时才要求无候选；
+    # 未声明 candidates 键表示该样例不约束候选数量（如 privacy_filtered）。
+    if "candidates" in expected and not expected_candidates and actual_candidates:
         failures.append(f"期望无候选，实际产生 {len(actual_candidates)} 个: {actual_candidates}")
     for exp in expected_candidates:
         matches = [
@@ -110,7 +112,11 @@ async def _run() -> int:
         print("[eval] 未配置 OPENAI_API_KEY", file=sys.stderr)
         return 2
     client = RealMemoryLLMClient(settings=settings)
-    samples = [json.loads(line) for line in SAMPLES.read_text(encoding="utf-8").splitlines() if line.strip()]
+    samples = [
+        json.loads(line)
+        for line in SAMPLES.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
     report: dict[str, Any] = {
         "model": settings.openai_memory_model,
