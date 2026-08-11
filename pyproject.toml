@@ -45,7 +45,7 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 # 代码注释与 docstring 使用中文全角标点属于有意为之，关闭歧义字符检查
-ignore = ["RUF002", "RUF003"]
+ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.13"
