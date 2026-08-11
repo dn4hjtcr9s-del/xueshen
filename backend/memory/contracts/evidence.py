@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ConversationEvidence(BaseModel):
@@ -68,6 +68,22 @@ class SourceItem(BaseModel):
     content: str = Field(max_length=SOURCE_ITEM_CONTENT_MAX)
     occurred_at: datetime
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("metadata")
+    @classmethod
+    def validate_metadata_limits(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """单项 metadata 最多 4096 bytes、最多 50 个 key（§17.4）。"""
+        if len(value) > SOURCE_ITEM_METADATA_MAX_KEYS:
+            raise ValueError(f"metadata 超过 {SOURCE_ITEM_METADATA_MAX_KEYS} 个 key")
+        from backend.memory.contracts.common import canonical_json
+
+        try:
+            size = len(canonical_json(value).encode("utf-8"))
+        except TypeError as exc:
+            raise ValueError("metadata 必须为 JSON 可序列化结构") from exc
+        if size > SOURCE_ITEM_METADATA_MAX_BYTES:
+            raise ValueError(f"metadata 超过 {SOURCE_ITEM_METADATA_MAX_BYTES} bytes")
+        return value
 
 
 class SourceBundle(BaseModel):
