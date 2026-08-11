@@ -1,0 +1,57 @@
+[project]
+name = "gewu-math-memory"
+version = "0.1.0"
+description = "MemoryManagerGraph: 长期记忆与知识图谱状态服务"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fastapi>=0.116,<1.0",
+    "uvicorn>=0.47,<0.48",
+    "pydantic>=2.13,<3.0",
+    "pydantic-settings>=2.10,<3.0",
+    "sqlalchemy>=2.0.49,<2.1",
+    "alembic>=1.16,<2.0",
+    "psycopg[binary,pool]>=3.2,<4.0",
+    "langgraph==1.2.1",
+    "langgraph-checkpoint==4.1.0",
+    "langgraph-checkpoint-postgres==3.0.4",
+    "openai>=2.38,<3",
+    "prometheus-client>=0.22,<1",
+    "pyjwt[crypto]>=2.10,<3.0",
+    "httpx>=0.28,<1.0",
+]
+
+[project.optional-dependencies]
+ocr = ["pypdf>=6,<7"]
+dev = [
+    "pytest>=9.0,<10.0",
+    "pytest-asyncio>=1.1,<2.0",
+    "ruff>=0.12,<1.0",
+    "mypy>=1.17,<2.0",
+    "testcontainers[postgres]>=4.10,<5.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+# 代码注释与 docstring 使用中文全角标点属于有意为之，关闭歧义字符检查
+ignore = ["RUF002", "RUF003"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+mypy_path = "."
+
+[[tool.mypy.overrides]]
+module = ["langgraph.*", "langgraph_checkpoint.*", "testcontainers.*"]
+ignore_missing_imports = true
