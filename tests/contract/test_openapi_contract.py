@@ -52,6 +52,8 @@ def test_openapi_contains_spec_routes() -> None:
         "/api/v1/memory/mastery/{topic_key}",
         "/api/v1/memory/memories/{memory_id}",
         "/api/v1/memory/deleted",
+        "/api/v1/memory/search",
+        "/api/v1/memory/context",
         "/api/v1/memory/review-candidates",
         "/api/v1/memory/notifications",
         "/api/v1/memory/notifications/{notification_id}/read",
@@ -60,6 +62,7 @@ def test_openapi_contains_spec_routes() -> None:
         "/api/v1/knowledge-graph/me/nodes/{node_id}",
         "/api/v1/knowledge-graph/me/nodes/{node_id}/state",
         "/api/v1/knowledge-graph/me/nodes/{node_id}/explanation",
+        "/api/v1/knowledge-graph/recommendations",
         "/api/v1/internal/account-memory/purge",
         "/health/live",
         "/health/ready",
@@ -67,6 +70,3 @@ def test_openapi_contains_spec_routes() -> None:
         "/metrics",
     }
     assert expected_paths <= set(spec["paths"])
-    # 第 12 步范围界限：检索/推荐/上下文路由本步骤不存在
-    assert "/api/v1/memory/search" not in spec["paths"]
-    assert "/api/v1/knowledge-graph/recommendations" not in spec["paths"]

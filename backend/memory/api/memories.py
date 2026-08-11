@@ -1,4 +1,4 @@
-"""学习证据、用户记忆命令与总结记忆查询（规格 §19.1 / §19.2 / §19.4）。
+"""学习证据、用户记忆命令与总结记忆查询（规格 §19.1 / §19.2 / §19.4 / §12）。
 
 - 写请求只接受公开字段；user_id/actor_type/priority/graph_thread_id 由
   Gateway 注入，客户端传入一律被 extra="forbid" 拒绝（422 REQUEST_EXTRA_FIELD）。
@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Query, Response
 from pydantic import Field
 
 from backend.auth.context import (
+    SCOPE_MEMORY_CONTEXT,
     SCOPE_MEMORY_CORRECT,
     SCOPE_MEMORY_DELETE,
     SCOPE_MEMORY_READ,
@@ -44,6 +45,7 @@ from backend.memory.contracts.commands import (
     RestoreMemoryCommand,
 )
 from backend.memory.contracts.common import TopicKeyError, validate_existing_topic_key
+from backend.memory.contracts.context import LearningContext, LearningContextRequest
 from backend.memory.contracts.errors import InvalidPayloadError, MemoryNotFoundError
 from backend.memory.contracts.evidence import ActivityEvidence, ConversationEvidence
 from backend.memory.contracts.operations import MemoryOperationResult
@@ -54,8 +56,12 @@ from backend.memory.contracts.results import (
     MasteryMemoryView,
     MemoryIndexEntryView,
     MemoryIndexView,
+    MemorySearchHit,
+    MemorySearchRequest,
 )
 from backend.memory.persistence import documents as docs_repo
+from backend.memory.services.context_service import LearningContextService
+from backend.memory.services.search_service import SearchService, normalize_search_query
 from backend.memory.storage.markdown_schema import LearnerDocument, MasteryDocument
 from backend.settings import Settings
 
@@ -63,6 +69,8 @@ router = APIRouter(prefix="/api/v1/memory", tags=["memory"])
 
 _USER_ONLY = frozenset({"user"})
 _EVIDENCE_ACTORS = frozenset({"user", "conversation_agent", "activity_agent"})
+#: 检索/上下文：用户与带 delegated user 的内部 Agent（§18.3/§19.8）
+_READ_AGENT_ACTORS = frozenset({"user", "conversation_agent", "activity_agent"})
 
 #: POST /events 公开请求体：ConversationEvidence 或 ActivityEvidence 的公开字段（§19.1）
 MemoryEventRequest = Annotated[
@@ -405,3 +413,72 @@ async def list_deleted(
             sort_key=[last["deleted_at"].isoformat(), str(last["memory_id"])],
         )
     return CursorPage(items=items, next_cursor=next_cursor, has_more=has_more)
+
+
+# ---------------------------------------------------------------------------
+# 检索与上下文组装（§12 / §19.4；/context 形状见 contracts/context.py 注释）
+# ---------------------------------------------------------------------------
+
+
+@router.post("/search", response_model=CursorPage[MemorySearchHit])
+async def search_memories(
+    request: MemorySearchRequest,
+    auth: AuthContext = Depends(require(actors=_READ_AGENT_ACTORS, scope=SCOPE_MEMORY_READ)),
+    runtime: ApiRuntime = Depends(get_runtime),
+    settings: Settings = Depends(get_settings),
+    _rate: None = Depends(rate_limit("search")),
+) -> CursorPage[MemorySearchHit]:
+    """pg_trgm 混合检索（§12.1/§12.2）；限流 60/min（§18.5）；cursor 绑定筛选。"""
+    route = "memory.search"
+    filters: dict[str, Any] = {
+        "query": normalize_search_query(request.query),
+        "topic_keys": sorted(request.topic_keys),
+        "memory_types": sorted(request.memory_types),
+        "limit": request.limit,
+    }
+    cursor_sort_key: list[Any] | None = None
+    if request.cursor is not None:
+        payload = resolve_cursor(
+            settings, request.cursor, route=route, user_id=auth.user_id, filters=filters
+        )
+        sort_key = payload.get("sort_key")
+        if (
+            not isinstance(sort_key, list)
+            or len(sort_key) != 4
+            or not isinstance(sort_key[0], int | float)
+            or not isinstance(sort_key[1], str)
+            or not isinstance(sort_key[2], str)
+            or not isinstance(sort_key[3], int | float)
+        ):
+            raise InvalidPayloadError("cursor sort_key 非法", field="cursor")
+        cursor_sort_key = sort_key
+    service = SearchService(settings=settings, session_factory=runtime.session_factory)
+    hits, next_sort_key, has_more = await service.search(
+        user_id=auth.user_id, request=request, cursor_sort_key=cursor_sort_key
+    )
+    next_cursor: str | None = None
+    if has_more and next_sort_key is not None:
+        next_cursor = issue_cursor(
+            settings,
+            route=route,
+            user_id=auth.user_id,
+            filters=filters,
+            sort_key=next_sort_key,
+        )
+    return CursorPage(items=hits, next_cursor=next_cursor, has_more=has_more)
+
+
+@router.post("/context", response_model=LearningContext)
+async def build_learning_context(
+    request: LearningContextRequest,
+    auth: AuthContext = Depends(require(actors=_READ_AGENT_ACTORS, scope=SCOPE_MEMORY_CONTEXT)),
+    runtime: ApiRuntime = Depends(get_runtime),
+    settings: Settings = Depends(get_settings),
+) -> LearningContext:
+    """学习上下文组装（§12.4/§12.5）；scope memory:context（§18.2）。"""
+    service = LearningContextService(
+        settings=settings,
+        session_factory=runtime.session_factory,
+        memory_service=runtime.memory_service,
+    )
+    return await service.build(user_id=auth.user_id, request=request)

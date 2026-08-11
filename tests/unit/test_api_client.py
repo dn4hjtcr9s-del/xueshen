@@ -141,3 +141,129 @@ async def test_error_mapping_raises_client_error() -> None:
 def test_client_requires_token() -> None:
     with pytest.raises(ValueError):
         MemoryClient("http://memory-api")
+
+
+def _search_hit_payload(memory_id: str = "mastery:topic-a") -> dict[str, Any]:
+    return {
+        "memory_id": memory_id,
+        "memory_type": "mastery",
+        "topic_key": "topic-a",
+        "title": "一次函数",
+        "summary": "掌握一次函数的图象与性质",
+        "matched_excerpt": None,
+        "evidence_refs": ["conv:t1:m1"],
+        "version": 3,
+        "updated_at": "2026-08-10T08:00:00Z",
+        "confidence": 0.9,
+        "score": 123.4,
+    }
+
+
+def _learning_context_payload() -> dict[str, Any]:
+    return {
+        "user_id": str(uuid4()),
+        "query": "一致收敛",
+        "learner": None,
+        "mastery": [],
+        "graph_states": [],
+        "recommendations": [],
+        "token_usage": {"budget": 3000, "estimated": 0, "remaining": 3000},
+        "truncated": False,
+    }
+
+
+def _recommendation_payload(node_id: str = "n001") -> dict[str, Any]:
+    return {
+        "node_id": node_id,
+        "title": "一次函数",
+        "status": "learning",
+        "reason_codes": ["CONTINUE_LEARNING"],
+        "prerequisite_node_ids": [],
+        "related_memory_ids": ["mastery:topic-a"],
+        "updated_at": "2026-08-10T08:00:00Z",
+    }
+
+
+async def test_search_summary() -> None:
+    recorded: list[httpx.Request] = []
+    transport = _mock_transport(
+        recorded,
+        httpx.Response(
+            200,
+            json={
+                "items": [_search_hit_payload()],
+                "next_cursor": None,
+                "has_more": False,
+            },
+        ),
+    )
+    async with MemoryClient(
+        "http://memory-api",
+        token="jwt",
+        http=httpx.AsyncClient(transport=transport, base_url="http://memory-api"),
+    ) as client:
+        hits = await client.search_summary(query="函数", topic_keys=["函数"], limit=10)
+    assert len(hits) == 1
+    assert hits[0].memory_id == "mastery:topic-a"
+    assert hits[0].version == 3
+    request = recorded[0]
+    assert request.method == "POST"
+    assert request.url.path == "/api/v1/memory/search"
+    body = json.loads(request.content)
+    assert body == {
+        "query": "函数",
+        "topic_keys": ["函数"],
+        "memory_types": [],
+        "cursor": None,
+        "limit": 10,
+    }
+
+
+async def test_build_learning_context() -> None:
+    recorded: list[httpx.Request] = []
+    transport = _mock_transport(
+        recorded,
+        httpx.Response(200, json=_learning_context_payload()),
+    )
+    async with MemoryClient(
+        "http://memory-api",
+        token="jwt",
+        http=httpx.AsyncClient(transport=transport, base_url="http://memory-api"),
+    ) as client:
+        context = await client.build_learning_context(query="一致收敛", token_budget=1500)
+    assert context.query == "一致收敛"
+    assert context.token_usage.budget == 3000
+    request = recorded[0]
+    assert request.method == "POST"
+    assert request.url.path == "/api/v1/memory/context"
+    body = json.loads(request.content)
+    assert body == {"query": "一致收敛", "topic_keys": [], "token_budget": 1500}
+
+
+async def test_get_graph_recommendations_with_cursor() -> None:
+    recorded: list[httpx.Request] = []
+    transport = _mock_transport(
+        recorded,
+        httpx.Response(
+            200,
+            json={
+                "items": [_recommendation_payload()],
+                "next_cursor": "opaque",
+                "has_more": True,
+            },
+        ),
+    )
+    async with MemoryClient(
+        "http://memory-api",
+        token="jwt",
+        http=httpx.AsyncClient(transport=transport, base_url="http://memory-api"),
+    ) as client:
+        recommendations = await client.get_graph_recommendations(cursor="opaque", limit=20)
+    assert len(recommendations) == 1
+    assert recommendations[0].node_id == "n001"
+    assert recommendations[0].reason_codes == ["CONTINUE_LEARNING"]
+    request = recorded[0]
+    assert request.method == "GET"
+    assert request.url.path == "/api/v1/knowledge-graph/recommendations"
+    assert request.url.params["cursor"] == "opaque"
+    assert request.url.params["limit"] == "20"

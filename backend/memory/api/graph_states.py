@@ -22,11 +22,14 @@ from backend.auth.context import (
 from backend.memory.api.dependencies import (
     ApiRuntime,
     get_runtime,
+    get_settings,
     get_trace_id,
+    issue_cursor,
     operation_result_from_row,
     rate_limit,
     require,
     require_idempotency_key,
+    resolve_cursor,
     status_code_for_row,
     submit_operation,
 )
@@ -42,12 +45,16 @@ from backend.memory.contracts.graph_state import (
     GraphNodeDetailView,
     GraphNodeView,
     GraphOverlayView,
+    GraphRecommendation,
     GraphStateExplanation,
     KnowledgeGraphSnapshot,
 )
 from backend.memory.contracts.operations import MemoryOperationResult
+from backend.memory.contracts.results import CursorPage
 from backend.memory.knowledge_graph.registry import KnowledgeGraphRegistry
 from backend.memory.persistence import graph_states as graph_repo
+from backend.memory.services.recommendation_service import RecommendationService
+from backend.settings import Settings
 
 router = APIRouter(prefix="/api/v1/knowledge-graph", tags=["knowledge-graph"])
 
@@ -202,6 +209,61 @@ async def get_node_explanation(
         source_memory_version=overlay.get("source_memory_version") if overlay else None,
         evidence_refs=list(audit.get("evidence_refs") or [])[:10] if audit else [],
         changed_at=audit.get("created_at") if audit else None,
+    )
+
+
+@router.get("/recommendations", response_model=CursorPage[GraphRecommendation])
+async def get_graph_recommendations(
+    cursor: str | None = Query(default=None, max_length=1000),
+    limit: int = Query(default=20, ge=1, le=50),
+    auth: AuthContext = Depends(require(actors=_READ_ACTORS, scope=SCOPE_MEMORY_READ)),
+    runtime: ApiRuntime = Depends(get_runtime),
+    settings: Settings = Depends(get_settings),
+) -> CursorPage[GraphRecommendation]:
+    """确定性推荐（§16.5）：不调模型；默认 20、最大 50；cursor 绑定筛选。"""
+    route = "knowledge_graph.recommendations"
+    filters: dict[str, Any] = {"limit": limit}
+    cursor_sort_key: list[Any] | None = None
+    if cursor is not None:
+        payload = resolve_cursor(
+            settings, cursor, route=route, user_id=auth.user_id, filters=filters
+        )
+        sort_key = payload.get("sort_key")
+        if (
+            not isinstance(sort_key, list)
+            or len(sort_key) != 4
+            or not all(isinstance(v, int | float) for v in sort_key[:3])
+            or not isinstance(sort_key[3], str)
+        ):
+            raise InvalidPayloadError("cursor sort_key 非法", field="cursor")
+        cursor_sort_key = sort_key
+    service = RecommendationService(
+        settings=settings,
+        session_factory=runtime.session_factory,
+        memory_service=runtime.memory_service,
+    )
+    ranked = await service.recommend(user_id=auth.user_id)
+    if cursor_sort_key is not None:
+        boundary = (
+            float(cursor_sort_key[0]),
+            float(cursor_sort_key[1]),
+            float(cursor_sort_key[2]),
+            str(cursor_sort_key[3]),
+        )
+        ranked = [item for item in ranked if tuple(item[1]) > boundary]
+    page = ranked[:limit]
+    has_more = len(ranked) > limit
+    next_cursor: str | None = None
+    if has_more and page:
+        next_cursor = issue_cursor(
+            settings,
+            route=route,
+            user_id=auth.user_id,
+            filters=filters,
+            sort_key=page[-1][1],
+        )
+    return CursorPage(
+        items=[item for item, _key in page], next_cursor=next_cursor, has_more=has_more
     )
 
 

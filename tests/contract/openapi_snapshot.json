@@ -410,6 +410,72 @@
         "title": "CursorPage[DeletedMemoryItem]",
         "type": "object"
       },
+      "CursorPage_GraphRecommendation_": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/GraphRecommendation"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "has_more"
+        ],
+        "title": "CursorPage[GraphRecommendation]",
+        "type": "object"
+      },
+      "CursorPage_MemorySearchHit_": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MemorySearchHit"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "has_more"
+        ],
+        "title": "CursorPage[MemorySearchHit]",
+        "type": "object"
+      },
       "CursorPage_ReviewCandidateView_": {
         "properties": {
           "has_more": {
@@ -702,6 +768,86 @@
           "updated_at"
         ],
         "title": "GraphOverlayView",
+        "type": "object"
+      },
+      "GraphRecommendation": {
+        "properties": {
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "prerequisite_node_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Prerequisite Node Ids",
+            "type": "array"
+          },
+          "reason_codes": {
+            "items": {
+              "enum": [
+                "CONTINUE_LEARNING",
+                "PREREQUISITE_GAP",
+                "NEXT_GRAPH_NODE",
+                "REVIEW_AFTER_CONFLICT",
+                "SUMMARY_MEMORY_SIGNAL",
+                "STALE_PROFICIENCY"
+              ],
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "related_memory_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Related Memory Ids",
+            "type": "array"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "learning",
+                  "proficient",
+                  "expert"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "node_id",
+          "title",
+          "status",
+          "reason_codes",
+          "prerequisite_node_ids",
+          "related_memory_ids",
+          "updated_at"
+        ],
+        "title": "GraphRecommendation",
         "type": "object"
       },
       "GraphStateChangeView": {
@@ -1081,6 +1227,300 @@
           }
         },
         "title": "LearnerReplacement",
+        "type": "object"
+      },
+      "LearningContext": {
+        "properties": {
+          "graph_states": {
+            "items": {
+              "$ref": "#/components/schemas/LearningContextGraphState"
+            },
+            "title": "Graph States",
+            "type": "array"
+          },
+          "learner": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LearningContextLearner"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mastery": {
+            "items": {
+              "$ref": "#/components/schemas/LearningContextMastery"
+            },
+            "title": "Mastery",
+            "type": "array"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          },
+          "recommendations": {
+            "items": {
+              "$ref": "#/components/schemas/GraphRecommendation"
+            },
+            "title": "Recommendations",
+            "type": "array"
+          },
+          "token_usage": {
+            "$ref": "#/components/schemas/LearningContextTokenUsage"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "query",
+          "learner",
+          "mastery",
+          "graph_states",
+          "recommendations",
+          "token_usage",
+          "truncated"
+        ],
+        "title": "LearningContext",
+        "type": "object"
+      },
+      "LearningContextGraphState": {
+        "properties": {
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "learning",
+                  "proficient",
+                  "expert"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node_id",
+          "title",
+          "status",
+          "reason_codes"
+        ],
+        "title": "LearningContextGraphState",
+        "type": "object"
+      },
+      "LearningContextLearner": {
+        "properties": {
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "goals": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Goals",
+            "type": "array"
+          },
+          "plans": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Plans",
+            "type": "array"
+          },
+          "preferences": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Preferences",
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "preferences",
+          "goals",
+          "plans",
+          "version",
+          "updated_at",
+          "evidence_refs"
+        ],
+        "title": "LearningContextLearner",
+        "type": "object"
+      },
+      "LearningContextMastery": {
+        "properties": {
+          "difficulties": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Difficulties",
+            "type": "array"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "memory_id": {
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "overview": {
+            "title": "Overview",
+            "type": "string"
+          },
+          "review_advice": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Review Advice",
+            "type": "array"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "topic_key": {
+            "title": "Topic Key",
+            "type": "string"
+          },
+          "understood": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Understood",
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "memory_id",
+          "topic_key",
+          "title",
+          "overview",
+          "understood",
+          "difficulties",
+          "review_advice",
+          "version",
+          "updated_at",
+          "evidence_refs"
+        ],
+        "title": "LearningContextMastery",
+        "type": "object"
+      },
+      "LearningContextRequest": {
+        "additionalProperties": false,
+        "description": "POST /memory/context 请求体。\n\n§19 未显式列出该路由；形状按 §12.4/§12.5 与 §18.2 memory:context 推导：\nquery 必填，topic_keys 限定主题范围，token_budget 省略时用\nsettings.memory_context_token_budget（默认 3000，范围 500–8000）。",
+        "properties": {
+          "query": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          },
+          "token_budget": {
+            "anyOf": [
+              {
+                "maximum": 8000.0,
+                "minimum": 500.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Budget"
+          },
+          "topic_keys": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Topic Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "LearningContextRequest",
+        "type": "object"
+      },
+      "LearningContextTokenUsage": {
+        "properties": {
+          "budget": {
+            "minimum": 0.0,
+            "title": "Budget",
+            "type": "integer"
+          },
+          "estimated": {
+            "minimum": 0.0,
+            "title": "Estimated",
+            "type": "integer"
+          },
+          "remaining": {
+            "minimum": 0.0,
+            "title": "Remaining",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "budget",
+          "estimated",
+          "remaining"
+        ],
+        "title": "LearningContextTokenUsage",
         "type": "object"
       },
       "MasteryMemoryView": {
@@ -1550,6 +1990,153 @@
           "updated_at"
         ],
         "title": "MemoryOperationResult",
+        "type": "object"
+      },
+      "MemorySearchHit": {
+        "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "matched_excerpt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matched Excerpt"
+          },
+          "memory_id": {
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "memory_type": {
+            "enum": [
+              "learner",
+              "mastery"
+            ],
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "topic_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic Key"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "memory_id",
+          "memory_type",
+          "topic_key",
+          "title",
+          "summary",
+          "matched_excerpt",
+          "evidence_refs",
+          "version",
+          "updated_at",
+          "confidence",
+          "score"
+        ],
+        "title": "MemorySearchHit",
+        "type": "object"
+      },
+      "MemorySearchRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cursor"
+          },
+          "limit": {
+            "default": 10,
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "memory_types": {
+            "items": {
+              "enum": [
+                "learner",
+                "mastery"
+              ],
+              "type": "string"
+            },
+            "title": "Memory Types",
+            "type": "array"
+          },
+          "query": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          },
+          "topic_keys": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Topic Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "MemorySearchRequest",
         "type": "object"
       },
       "MutationResult": {
@@ -2366,6 +2953,69 @@
         ]
       }
     },
+    "/api/v1/knowledge-graph/recommendations": {
+      "get": {
+        "description": "确定性推荐（§16.5）：不调模型；默认 20、最大 50；cursor 绑定筛选。",
+        "operationId": "get_graph_recommendations_api_v1_knowledge_graph_recommendations_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 1000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CursorPage_GraphRecommendation_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Graph Recommendations",
+        "tags": [
+          "knowledge-graph"
+        ]
+      }
+    },
     "/api/v1/memory/commands/correct": {
       "post": {
         "operationId": "correct_memory_api_v1_memory_commands_correct_post",
@@ -2484,6 +3134,48 @@
           }
         },
         "summary": "Restore Memory",
+        "tags": [
+          "memory"
+        ]
+      }
+    },
+    "/api/v1/memory/context": {
+      "post": {
+        "description": "学习上下文组装（§12.4/§12.5）；scope memory:context（§18.2）。",
+        "operationId": "build_learning_context_api_v1_memory_context_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LearningContextRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningContext"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Build Learning Context",
         "tags": [
           "memory"
         ]
@@ -3123,6 +3815,48 @@
         "summary": "Decide Review Candidate",
         "tags": [
           "memory-review-candidates"
+        ]
+      }
+    },
+    "/api/v1/memory/search": {
+      "post": {
+        "description": "pg_trgm 混合检索（§12.1/§12.2）；限流 60/min（§18.5）；cursor 绑定筛选。",
+        "operationId": "search_memories_api_v1_memory_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemorySearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CursorPage_MemorySearchHit_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Search Memories",
+        "tags": [
+          "memory"
         ]
       }
     },

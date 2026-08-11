@@ -6,9 +6,24 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.memory.contracts.graph_state import GraphRecommendation
+
+
+class LearningContextRequest(BaseModel):
+    """POST /memory/context 请求体。
+
+    §19 未显式列出该路由；形状按 §12.4/§12.5 与 §18.2 memory:context 推导：
+    query 必填，topic_keys 限定主题范围，token_budget 省略时用
+    settings.memory_context_token_budget（默认 3000，范围 500–8000）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=500)
+    topic_keys: list[str] = Field(default_factory=list, max_length=20)
+    token_budget: int | None = Field(default=None, ge=500, le=8000)
 
 
 class LearningContextLearner(BaseModel):

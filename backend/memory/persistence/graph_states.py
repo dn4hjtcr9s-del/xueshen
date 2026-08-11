@@ -350,6 +350,27 @@ async def list_active_links_for_memory(
     return [dict(r) for r in result.mappings().all()]
 
 
+async def list_current_active_links(
+    session: AsyncSession, *, user_id: UUID
+) -> list[dict[str, Any]]:
+    """推荐接口用：全部 active=true 且版本等于当前活动 mastery 版本的 link（§16.5）。"""
+    result = await session.execute(
+        text(
+            """
+            SELECT l.* FROM memory_graph_links l
+            JOIN memory_documents d
+              ON d.user_id = l.user_id AND d.memory_id = l.memory_id
+            WHERE l.user_id = :user_id
+              AND l.active = true AND l.memory_version = d.active_version
+              AND d.deleted_at IS NULL
+            ORDER BY l.node_id, l.memory_id
+            """
+        ),
+        {"user_id": user_id},
+    )
+    return [dict(r) for r in result.mappings().all()]
+
+
 async def list_active_links_for_node(
     session: AsyncSession, *, user_id: UUID, node_id: str
 ) -> list[dict[str, Any]]:

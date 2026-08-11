@@ -39,10 +39,13 @@ class ManifestTests(unittest.TestCase):
             save_manifest_atomic(output_dir / "manifest.json", first)
             second = build_manifest(math_dir, output_dir, max_pages=180)
 
-        self.assertEqual([book["book_id"] for book in first["books"]], [
-            "01_A书",
-            "02_B书",
-        ])
+        self.assertEqual(
+            [book["book_id"] for book in first["books"]],
+            [
+                "01_A书",
+                "02_B书",
+            ],
+        )
         self.assertEqual(
             [book["book_id"] for book in second["books"]],
             [book["book_id"] for book in first["books"]],
@@ -68,7 +71,9 @@ class ManifestTests(unittest.TestCase):
 
             self.assertEqual([len(PdfReader(str(path)).pages) for path in chunk_paths], [2, 1])
             self.assertTrue(all(item["sha256"] for item in updated["books"][0]["chunks"]))
-            self.assertTrue(all(item["status"] == "prepared" for item in updated["books"][0]["chunks"]))
+            self.assertTrue(
+                all(item["status"] == "prepared" for item in updated["books"][0]["chunks"])
+            )
             self.assertTrue(all(path.is_file() for path in chunk_paths))
 
     def test_atomic_save_writes_valid_json(self) -> None:

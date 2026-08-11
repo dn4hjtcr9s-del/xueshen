@@ -66,7 +66,9 @@ class MinerUClientTest(unittest.TestCase):
             client = MinerUClient("secret-token")
             client.upload_presigned_file("https://example.invalid/upload?Signature=x", pdf)
 
-        header_names = [call.args[0].lower() for call in connection_class.return_value.putheader.call_args_list]
+        header_names = [
+            call.args[0].lower() for call in connection_class.return_value.putheader.call_args_list
+        ]
         self.assertNotIn("content-type", header_names)
         self.assertIn("content-length", header_names)
 

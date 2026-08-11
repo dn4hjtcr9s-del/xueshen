@@ -20,7 +20,14 @@ class FakeClient:
     def submit_batch(self, chunks):
         ids = [chunk["data_id"] for chunk in chunks]
         self.submitted.append(ids)
-        return {"batch_id": "batch-1", "state": "created", "data_ids": ids, "file_urls": [f"https://upload/{item}" for item in ids], "request": {}, "last_results": []}
+        return {
+            "batch_id": "batch-1",
+            "state": "created",
+            "data_ids": ids,
+            "file_urls": [f"https://upload/{item}" for item in ids],
+            "request": {},
+            "last_results": [],
+        }
 
     def persist_batch(self, path, batch):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -32,7 +39,10 @@ class FakeClient:
                 on_uploaded(chunk)
 
     def poll_batch(self, batch_id, interval_seconds=0, timeout_seconds=1, on_poll=None):
-        results = [{"data_id": data_id, "state": "done", "full_zip_url": "https://result"} for data_id in self.submitted[-1]]
+        results = [
+            {"data_id": data_id, "state": "done", "full_zip_url": "https://result"}
+            for data_id in self.submitted[-1]
+        ]
         if on_poll:
             on_poll(results)
         return results
@@ -41,20 +51,32 @@ class FakeClient:
 def make_manifest(statuses: list[str]) -> dict:
     chunks = []
     for index, status in enumerate(statuses, start=1):
-        chunks.append({
-            "chunk_id": f"c{index}",
-            "data_id": f"book__{index:04d}",
-            "pdf_path": f"/tmp/c{index}.pdf",
-            "chunk_dir": f"/tmp/c{index}",
-            "page_start": index,
-            "page_end": index,
-            "page_count": 1,
-            "status": status,
-            "batch_id": None,
-            "attempt_count": 0,
-            "error": None,
-        })
-    return {"books": [{"book_id": "book", "book_name": "书", "source_filename": "book.pdf", "page_count": len(chunks), "chunks": chunks}]}
+        chunks.append(
+            {
+                "chunk_id": f"c{index}",
+                "data_id": f"book__{index:04d}",
+                "pdf_path": f"/tmp/c{index}.pdf",
+                "chunk_dir": f"/tmp/c{index}",
+                "page_start": index,
+                "page_end": index,
+                "page_count": 1,
+                "status": status,
+                "batch_id": None,
+                "attempt_count": 0,
+                "error": None,
+            }
+        )
+    return {
+        "books": [
+            {
+                "book_id": "book",
+                "book_name": "书",
+                "source_filename": "book.pdf",
+                "page_count": len(chunks),
+                "chunks": chunks,
+            }
+        ]
+    }
 
 
 class RunnerTest(unittest.TestCase):
@@ -77,7 +99,9 @@ class RunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp)
             manifest = make_manifest(["prepared", "downloaded"])
-            runner = OCRRunner(output, manifest, FakeClient(), poll_interval_seconds=0, poll_timeout_seconds=1)
+            runner = OCRRunner(
+                output, manifest, FakeClient(), poll_interval_seconds=0, poll_timeout_seconds=1
+            )
             count = runner.run_next_batch(batch_size=40)
             self.assertEqual(count, 1)
             self.assertEqual(manifest["books"][0]["chunks"][0]["status"], "downloaded")
@@ -100,12 +124,16 @@ class RunnerTest(unittest.TestCase):
                 "data_ids": [chunk["data_id"]],
                 "file_urls": ["https://expired"],
                 "uploaded_data_ids": [chunk["data_id"]],
-                "last_results": [{"data_id": chunk["data_id"], "state": "done", "full_zip_url": "https://result"}],
+                "last_results": [
+                    {"data_id": chunk["data_id"], "state": "done", "full_zip_url": "https://result"}
+                ],
             }
             (output / "_jobs").mkdir(parents=True)
             (output / "_jobs" / "old-batch.json").write_text(json.dumps(job), encoding="utf-8")
             client = FakeClient()
-            runner = OCRRunner(output, manifest, client, poll_interval_seconds=0, poll_timeout_seconds=1)
+            runner = OCRRunner(
+                output, manifest, client, poll_interval_seconds=0, poll_timeout_seconds=1
+            )
             runner.resume_jobs()
             self.assertEqual(chunk["status"], "downloaded")
             self.assertEqual(client.submitted, [])
@@ -120,11 +148,17 @@ class RunnerTest(unittest.TestCase):
             manifest = make_manifest(["retry"])
             chunk = manifest["books"][0]["chunks"][0]
             chunk["attempt_count"] = 2
-            runner = OCRRunner(output, manifest, UploadFailClient(), poll_interval_seconds=0, poll_timeout_seconds=1, max_attempts=3)
+            runner = OCRRunner(
+                output,
+                manifest,
+                UploadFailClient(),
+                poll_interval_seconds=0,
+                poll_timeout_seconds=1,
+                max_attempts=3,
+            )
             runner.run_next_batch(batch_size=40)
             self.assertEqual(chunk["status"], "error")
             self.assertEqual(select_runnable_chunks(manifest), [])
-
 
 
 if __name__ == "__main__":

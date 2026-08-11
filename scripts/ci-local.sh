@@ -16,9 +16,13 @@ run_backend_lint() {
 }
 
 run_backend_unit() {
-  echo "== backend-unit: pytest unit/graph + 现有 OCR 测试 =="
+  echo "== backend-unit: pytest unit（+ graph 目录存在时）与现有 OCR 测试 =="
   uv sync --extra dev --extra ocr
-  uv run pytest tests/unit tests/graph tests/test_mineru_ocr_client.py \
+  GRAPH_TESTS=()
+  if [[ -d tests/graph ]]; then
+    GRAPH_TESTS=(tests/graph)
+  fi
+  uv run pytest tests/unit ${GRAPH_TESTS[@]+"${GRAPH_TESTS[@]}"} tests/test_mineru_ocr_client.py \
     tests/test_mineru_ocr_manifest.py tests/test_mineru_ocr_merge.py \
     tests/test_mineru_ocr_runner.py tests/test_run_mineru_ocr_cli.py
 }
@@ -27,7 +31,11 @@ run_backend_integration() {
   echo "== backend-integration: 本地 PostgreSQL 容器 + integration/failure tests =="
   docker compose up -d postgres
   uv run alembic upgrade head
-  uv run pytest tests/integration tests/failure_recovery
+  FAILURE_TESTS=()
+  if [[ -d tests/failure_recovery ]]; then
+    FAILURE_TESTS=(tests/failure_recovery)
+  fi
+  uv run pytest tests/integration ${FAILURE_TESTS[@]+"${FAILURE_TESTS[@]}"}
 }
 
 run_frontend() {

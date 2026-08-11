@@ -1,8 +1,8 @@
 """MemoryClient：供内部 Agent 使用的 HTTP 客户端（规格 §19.8）。
 
 第一版使用带服务 JWT 的 HTTP 实现，不提供 MCP。Agent 不依赖 HTTP 路由细节。
-本步骤只实现已有路由支撑的方法；search_summary / build_learning_context /
-get_graph_recommendations 依赖检索与推荐服务，属实施顺序第 12 步。
+search_summary / build_learning_context / get_graph_recommendations 分别承载于
+POST /memory/search、POST /memory/context、GET /knowledge-graph/recommendations。
 """
 
 from __future__ import annotations
@@ -14,8 +14,11 @@ from uuid import UUID
 
 import httpx
 
+from backend.memory.contracts.context import LearningContext, LearningContextRequest
 from backend.memory.contracts.evidence import ActivityEvidence, ConversationEvidence
+from backend.memory.contracts.graph_state import GraphRecommendation
 from backend.memory.contracts.operations import MemoryOperationResult
+from backend.memory.contracts.results import MemorySearchHit, MemorySearchRequest
 
 
 class MemoryClientError(Exception):
@@ -73,12 +76,15 @@ class MemoryClient:
         path: str,
         *,
         json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
     ) -> Any:
         headers = {"Authorization": self._authorization()}
         if idempotency_key is not None:
             headers["Idempotency-Key"] = idempotency_key
-        response = await self._http.request(method, path, json=json_body, headers=headers)
+        response = await self._http.request(
+            method, path, json=json_body, params=params, headers=headers
+        )
         if response.status_code >= 400:
             try:
                 error = response.json().get("error", {})
@@ -182,3 +188,49 @@ class MemoryClient:
             idempotency_key=idempotency_key,
         )
         return MemoryOperationResult.model_validate(data)
+
+    async def search_summary(
+        self,
+        *,
+        query: str,
+        topic_keys: list[str] | None = None,
+        memory_types: list[Literal["learner", "mastery"]] | None = None,
+        limit: int = 10,
+    ) -> list[MemorySearchHit]:
+        """检索总结记忆（§12.2/§19.4）；返回首页命中（limit ≤ 50）。"""
+        body = MemorySearchRequest(
+            query=query,
+            topic_keys=topic_keys or [],
+            memory_types=memory_types or [],
+            limit=limit,
+        )
+        data = await self._request(
+            "POST", "/api/v1/memory/search", json_body=body.model_dump(mode="json")
+        )
+        return [MemorySearchHit.model_validate(item) for item in data["items"]]
+
+    async def build_learning_context(
+        self,
+        *,
+        query: str,
+        topic_keys: list[str] | None = None,
+        token_budget: int | None = None,
+    ) -> LearningContext:
+        """组装学习上下文（§12.4/§12.5）；token_budget 省略时服务端默认 3000。"""
+        body = LearningContextRequest(
+            query=query, topic_keys=topic_keys or [], token_budget=token_budget
+        )
+        data = await self._request(
+            "POST", "/api/v1/memory/context", json_body=body.model_dump(mode="json")
+        )
+        return LearningContext.model_validate(data)
+
+    async def get_graph_recommendations(
+        self, *, cursor: str | None = None, limit: int = 20
+    ) -> list[GraphRecommendation]:
+        """图谱推荐（§16.5）；返回一页（默认 20、最大 50），翻页传 cursor。"""
+        params: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        data = await self._request("GET", "/api/v1/knowledge-graph/recommendations", params=params)
+        return [GraphRecommendation.model_validate(item) for item in data["items"]]
