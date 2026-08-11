@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # 数据库
     database_url: str = Field(
-        default="postgresql+psycopg://memory:memory@127.0.0.1:5432/memory",
+        default="postgresql+psycopg://memory:memory@127.0.0.1:55432/memory",
         alias="DATABASE_URL",
     )
     database_statement_timeout_ms: int = Field(
