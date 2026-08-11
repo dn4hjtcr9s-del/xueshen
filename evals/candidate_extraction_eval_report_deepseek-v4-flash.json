@@ -1,0 +1,316 @@
+{
+  "model": "deepseek-v4-flash",
+  "base_url": "https://api.deepseek.com",
+  "run_at": "2026-08-11T13:50:44.510734+00:00",
+  "samples": [
+    {
+      "name": "user_solution_mastery",
+      "description": "用户独立解出题目，应提取 understanding 掌握事实",
+      "pass": true,
+      "failures": [],
+      "actual": {
+        "candidates": [
+          {
+            "memory_type": "mastery",
+            "topic_title": "配方法解一元二次方程",
+            "category": "understanding",
+            "summary": "用户能够正确使用配方法解一元二次方程，包括正确配方和求解根。",
+            "long_term_value": "save",
+            "confidence": 0.9,
+            "evidence": [
+              {
+                "evidence_ref": "m1",
+                "evidence_type": "user_solution",
+                "summary": "用户展示完整的配方法解题过程，结果正确",
+                "strength": 1.0
+              }
+            ],
+            "graph_node_candidates": []
+          }
+        ],
+        "ignored_reason_codes": [
+          "ASSISTANT_STATEMENT_ONLY"
+        ]
+      }
+    },
+    {
+      "name": "assistant_statement_excluded",
+      "description": "只有助手讲解时不得提取用户掌握事实",
+      "pass": true,
+      "failures": [],
+      "actual": {
+        "candidates": [],
+        "ignored_reason_codes": [
+          "ASSISTANT_STATEMENT_ONLY",
+          "NO_LONG_TERM_VALUE"
+        ]
+      }
+    },
+    {
+      "name": "privacy_filtered",
+      "description": "含个人联系方式的内容必须过滤",
+      "pass": false,
+      "failures": [
+        "期望无候选，实际产生 1 个: [{'memory_type': 'learner', 'category': 'difficulty', 'long_term_value': 'review', 'refs': ['m2']}]"
+      ],
+      "actual": {
+        "candidates": [
+          {
+            "memory_type": "learner",
+            "topic_title": null,
+            "category": "difficulty",
+            "summary": "用户表示不会做一道三角函数题",
+            "long_term_value": "review",
+            "confidence": 0.6,
+            "evidence": [
+              {
+                "evidence_ref": "m2",
+                "evidence_type": "explicit_user_statement",
+                "summary": "用户明确表示一道三角函数题不会做",
+                "strength": 0.6
+              }
+            ],
+            "graph_node_candidates": []
+          }
+        ],
+        "ignored_reason_codes": [
+          "PRIVACY_FILTERED"
+        ]
+      }
+    },
+    {
+      "name": "goal_and_plan",
+      "description": "用户明确目标与计划应提取为 learner 候选",
+      "pass": true,
+      "failures": [],
+      "actual": {
+        "candidates": [
+          {
+            "memory_type": "learner",
+            "topic_title": null,
+            "category": "goal",
+            "summary": "用户明确表示期中考试数学目标为90分以上",
+            "long_term_value": "save",
+            "confidence": 0.9,
+            "evidence": [
+              {
+                "evidence_ref": "m1",
+                "evidence_type": "goal_statement",
+                "summary": "用户说'我期中考试数学想上 90 分'",
+                "strength": 0.9
+              }
+            ],
+            "graph_node_candidates": []
+          },
+          {
+            "memory_type": "learner",
+            "topic_title": null,
+            "category": "plan",
+            "summary": "用户计划每天晚上做20道函数题以备考",
+            "long_term_value": "save",
+            "confidence": 0.9,
+            "evidence": [
+              {
+                "evidence_ref": "m1",
+                "evidence_type": "plan_statement",
+                "summary": "用户说'打算每天晚上做 20 道函数题'",
+                "strength": 0.9
+              }
+            ],
+            "graph_node_candidates": []
+          }
+        ],
+        "ignored_reason_codes": []
+      }
+    },
+    {
+      "name": "single_page_view_no_mastery",
+      "description": "单次页面浏览不能形成掌握结论",
+      "pass": true,
+      "failures": [],
+      "actual": {
+        "candidates": [],
+        "ignored_reason_codes": [
+          "NO_LONG_TERM_VALUE"
+        ]
+      }
+    },
+    {
+      "name": "repeated_error_difficulty",
+      "description": "反复出错应提取 difficulty",
+      "pass": false,
+      "failures": [
+        "缺少候选 mastery/difficulty（实际: [{'memory_type': 'learner', 'category': 'difficulty', 'long_term_value': 'save', 'refs': ['m1', 'm2']}, {'memory_type': 'learner', 'category': 'misconception', 'long_term_value': 'save', 'refs': ['m1', 'm2']}, {'memory_type': 'learner', 'category': 'review_advice', 'long_term_value': 'review', 'refs': ['m1', 'm2']}]）"
+      ],
+      "actual": {
+        "candidates": [
+          {
+            "memory_type": "learner",
+            "topic_title": "移项变号",
+            "category": "difficulty",
+            "summary": "用户在解方程移项时反复出现符号错误，-2x+6 移项被写成 -2x-6，且自述这是第三次犯类似错误，说明移项变号规则掌握不牢固。",
+            "long_term_value": "save",
+            "confidence": 0.9,
+            "evidence": [
+              {
+                "evidence_ref": "m1",
+                "evidence_type": "repeated_error",
+                "summary": "用户报告在 -2x+6 移项时写成 -2x-6，符号处理出错。",
+                "strength": 0.9
+              },
+              {
+                "evidence_ref": "m2",
+                "evidence_type": "explicit_user_statement",
+                "summary": "用户自述第三次犯同样的移项变号错误，总是忘记变号。",
+                "strength": 0.95
+              }
+            ],
+            "graph_node_candidates": []
+          },
+          {
+            "memory_type": "learner",
+            "topic_title": "移项变号",
+            "category": "misconception",
+            "summary": "用户存在“移项时忘记变号”的错误概念，表现为将 +6 移到等号另一边后仍保持 -6 而不变为 -6 的错误（实际是忘记符号翻转），需要针对性训练。",
+            "long_term_value": "save",
+            "confidence": 0.8,
+            "evidence": [
+              {
+                "evidence_ref": "m1",
+                "evidence_type": "repeated_error",
+                "summary": "移项时符号未按要求变化，出现 -2x-6 的错误写法。",
+                "strength": 0.8
+              },
+              {
+                "evidence_ref": "m2",
+                "evidence_type": "explicit_user_statement",
+                "summary": "用户承认总是忘记移项变号，形成固定错误模式。",
+                "strength": 0.8
+              }
+            ],
+            "graph_node_candidates": []
+          },
+          {
+            "memory_type": "learner",
+            "topic_title": "移项变号",
+            "category": "review_advice",
+            "summary": "建议针对移项变号设计专项练习题，强调每步移项时检查符号翻转，可使用口诀或可视化标记减少同类错误。",
+            "long_term_value": "review",
+            "confidence": 0.7,
+            "evidence": [
+              {
+                "evidence_ref": "m1",
+                "evidence_type": "repeated_error",
+                "summary": "观察到具体符号错误实例，为针对性复习提供依据。",
+                "strength": 0.7
+              },
+              {
+                "evidence_ref": "m2",
+                "evidence_type": "explicit_user_statement",
+                "summary": "用户承认反复出错，需要强化练习。",
+                "strength": 0.7
+              }
+            ],
+            "graph_node_candidates": []
+          }
+        ],
+        "ignored_reason_codes": []
+      }
+    },
+    {
+      "name": "preference_statement",
+      "description": "学习偏好应提取为 preference",
+      "pass": true,
+      "failures": [],
+      "actual": {
+        "candidates": [
+          {
+            "memory_type": "learner",
+            "topic_title": null,
+            "category": "preference",
+            "summary": "用户偏好先画图再列式的解题方式，纯代数推导易晕。",
+            "long_term_value": "save",
+            "confidence": 0.9,
+            "evidence": [
+              {
+                "evidence_ref": "m1",
+                "evidence_type": "preference_statement",
+                "summary": "用户明确表示更喜欢先画图再列式，纯代数推导容易晕。",
+                "strength": 0.9
+              }
+            ],
+            "graph_node_candidates": []
+          }
+        ],
+        "ignored_reason_codes": []
+      }
+    },
+    {
+      "name": "off_topic_ignore",
+      "description": "与数学学习无关的闲聊应忽略",
+      "pass": true,
+      "failures": [],
+      "actual": {
+        "candidates": [],
+        "ignored_reason_codes": [
+          "NO_LONG_TERM_VALUE"
+        ]
+      }
+    },
+    {
+      "name": "uncertain_evidence_review",
+      "description": "证据不足时进入 review 而非自动保存",
+      "pass": false,
+      "failures": [
+        "缺少候选 mastery/difficulty（实际: []）"
+      ],
+      "actual": {
+        "candidates": [],
+        "ignored_reason_codes": [
+          "NO_LONG_TERM_VALUE"
+        ]
+      }
+    },
+    {
+      "name": "misconception_needs_strong_evidence",
+      "description": "明确概念误解可提取 misconception，需具体证据",
+      "pass": false,
+      "failures": [
+        "缺少候选 mastery/misconception（实际: [{'memory_type': 'learner', 'category': 'misconception', 'long_term_value': 'review', 'refs': ['m1', 'm2']}]）"
+      ],
+      "actual": {
+        "candidates": [
+          {
+            "memory_type": "learner",
+            "topic_title": null,
+            "category": "misconception",
+            "summary": "用户曾认为 (a+b)²=a²+b²，但通过代入具体数值（a=1,b=1）验证后发现该展开公式有误，表明用户正在纠正该常见误解。",
+            "long_term_value": "review",
+            "confidence": 0.85,
+            "evidence": [
+              {
+                "evidence_ref": "m1",
+                "evidence_type": "explicit_user_statement",
+                "summary": "用户陈述认为 (a+b)²=a²+b²",
+                "strength": 1.0
+              },
+              {
+                "evidence_ref": "m2",
+                "evidence_type": "explicit_user_statement",
+                "summary": "用户代入具体值后发现结果不符，承认搞错了",
+                "strength": 0.9
+              }
+            ],
+            "graph_node_candidates": []
+          }
+        ],
+        "ignored_reason_codes": []
+      }
+    }
+  ],
+  "summary": {
+    "total": 10,
+    "passed": 6,
+    "pass_rate": 0.6
+  }
+}
