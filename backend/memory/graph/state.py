@@ -20,6 +20,7 @@ from backend.memory.knowledge_graph.registry import KnowledgeGraphRegistry
 from backend.memory.readers.base import ActivityReader, ConversationReader
 from backend.memory.services.graph_state_service import KnowledgeGraphStateService
 from backend.memory.services.memory_service import MemoryService
+from backend.memory.worker.checkpoint import CheckpointCleanupAdapter
 from backend.settings import Settings
 
 
@@ -73,6 +74,9 @@ class MemoryRuntimeContext:
     - openai_client 为 MemoryLLMClient 边界（Real 内部包装 AsyncOpenAI），
       使节点可用 fake Runtime Context 测试（§23.2）。
     - context_service（LearningContextService）属步骤 12，届时补充字段。
+
+    checkpoint_cleanup 为步骤 10 接入的 Checkpoint 清理适配器（§11.4），
+    仅 cleanup_checkpoints 维护分支使用；未配置时该分支明确报错而非空转。
     """
 
     settings: Settings
@@ -86,6 +90,7 @@ class MemoryRuntimeContext:
     clock: Clock
     id_generator: IdGenerator
     logger: logging.Logger
+    checkpoint_cleanup: CheckpointCleanupAdapter | None = None
 
 
 class RegistryFactory(Protocol):

@@ -1,8 +1,9 @@
 """Maintenance 分支（§10.7）：有界 batch + cursor，不长时间持锁。
 
 步骤 9 实现 rebuild_index / purge_tombstones / cleanup_orphan_versions；
-verify_checksums（步骤 15）、cleanup_checkpoints（步骤 10）、
-purge_account_memory（步骤 15）在对应步骤接入，此处明确拒绝而非空转。
+步骤 10 接入 cleanup_checkpoints（CheckpointCleanupAdapter，§11.4）；
+verify_checksums（步骤 15）、purge_account_memory（步骤 15）在对应步骤接入，
+此处明确拒绝而非空转。
 """
 
 from __future__ import annotations
@@ -18,9 +19,10 @@ from backend.memory.contracts.errors import InvalidPayloadError
 from backend.memory.contracts.operations import MemoryOperation
 from backend.memory.graph.state import MemoryManagerState, MemoryRuntimeContext
 from backend.memory.persistence import documents as docs_repo
+from backend.memory.persistence import maintenance as maintenance_repo
 from backend.memory.persistence.database import exec_rowcount
 
-_NOT_IMPLEMENTED = {"verify_checksums", "cleanup_checkpoints", "purge_account_memory"}
+_NOT_IMPLEMENTED = {"verify_checksums", "purge_account_memory"}
 
 
 async def run_maintenance(
@@ -43,14 +45,34 @@ async def run_maintenance(
             {"name": f"maintenance:{kind}"},
         )
         acquired = bool(result.scalar_one())
+        # 结束 autobegin 事务；session 级 advisory lock 不受 commit 影响
+        await session.commit()
         if not acquired:
+            detail = {"kind": kind, "status": "busy"}
+            # busy 也回写 run（保持 running），由 Scheduler 稍后重排同 cursor 批次
+            async with session.begin():
+                await maintenance_repo.update_run_by_operation(
+                    session,
+                    operation_id=operation.operation_id,
+                    status="running",
+                    cursor=payload.cursor,
+                    result=detail,
+                )
             return {
-                "graph_state_result": {"maintenance": {"kind": kind, "status": "busy"}},
+                "graph_state_result": {"maintenance": detail},
                 "warnings": [*state.get("warnings", []), f"维护任务 {kind} 正在其他实例运行"],
             }
         try:
             async with session.begin():
                 detail = await _execute_batch(ctx, operation, payload, session)
+                # persist_cursor_or_finish：回写 maintenance run（§10.7 / §14.3）
+                await maintenance_repo.update_run_by_operation(
+                    session,
+                    operation_id=operation.operation_id,
+                    status="running" if detail.get("status") == "continue" else "succeeded",
+                    cursor=detail.get("next_cursor"),
+                    result=detail,
+                )
         finally:
             await session.execute(
                 text("SELECT pg_advisory_unlock(hashtext(:name))"),
@@ -74,6 +96,33 @@ async def _execute_batch(
             user_id=target, operation_id=operation.operation_id
         )
         return {"kind": kind, "status": "done", "result": result}
+
+    if kind == "cleanup_checkpoints":
+        from backend.memory.worker.checkpoint import list_expired_checkpoint_threads
+
+        if ctx.checkpoint_cleanup is None:
+            raise InvalidPayloadError(
+                "cleanup_checkpoints 需要 Runtime Context 配置 CheckpointCleanupAdapter"
+            )
+        rows = await list_expired_checkpoint_threads(
+            session, now=now, batch_size=payload.batch_size, cursor=payload.cursor
+        )
+        deleted = 0
+        next_cursor = None
+        for row in rows:
+            next_cursor = row["cursor"]
+            if payload.dry_run:
+                continue
+            deleted += await ctx.checkpoint_cleanup.delete_threads([row["thread_id"]])
+        finished = len(rows) < payload.batch_size
+        return {
+            "kind": kind,
+            "status": "done" if finished else "continue",
+            "scanned": len(rows),
+            "threads_deleted": deleted,
+            "dry_run": payload.dry_run,
+            "next_cursor": None if finished else next_cursor,
+        }
 
     if kind == "purge_tombstones":
         rows = await docs_repo.list_expired_tombstones(

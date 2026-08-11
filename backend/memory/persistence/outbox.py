@@ -207,6 +207,15 @@ async def finalize_outbox(session: AsyncSession, *, outbox_id: UUID) -> None:
     )
 
 
+async def get_status(session: AsyncSession, *, outbox_id: UUID) -> str | None:
+    result = await session.execute(
+        text("SELECT status FROM memory_outbox WHERE outbox_id = :outbox_id"),
+        {"outbox_id": outbox_id},
+    )
+    value = result.scalar_one_or_none()
+    return str(value) if value is not None else None
+
+
 async def reschedule_outbox(
     session: AsyncSession, *, outbox_id: UUID, next_run_at: datetime
 ) -> None:

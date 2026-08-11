@@ -149,7 +149,12 @@ class LocalLangGraphRunner:
     async def run(self, operation: MemoryOperation) -> MemoryOperationResult:
         from langchain_core.runnables import RunnableConfig
 
-        config = RunnableConfig(configurable={"thread_id": operation.graph_thread_id})
+        from backend.memory.worker.checkpoint import thread_id_for_operation
+
+        # Graph thread 固定为 memory-op:{operation_id}（§11.4）
+        config = RunnableConfig(
+            configurable={"thread_id": thread_id_for_operation(operation.operation_id)}
+        )
         final_state = await self._graph.ainvoke(
             {"operation": operation.model_dump(mode="json")},
             config=config,
