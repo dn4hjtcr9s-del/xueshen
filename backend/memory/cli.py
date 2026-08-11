@@ -39,6 +39,11 @@ def _cmd_sync_knowledge_graph(args: argparse.Namespace) -> int:
         print(f"[sync-knowledge-graph] 解析失败：{exc}", file=sys.stderr)
         return 2
 
+    if parsed.skipped_dashed_edges:
+        print(
+            f"[sync-knowledge-graph] 警告：按裁决 A 跳过 {len(parsed.skipped_dashed_edges)} "
+            "条虚线边（教材顺序提示边，不入库）"
+        )
     print(
         f"[sync-knowledge-graph] 解析成功：{len(parsed.nodes)} 节点, "
         f"{len(parsed.edges)} 边, manifest={parsed.manifest_checksum[:12]}…"

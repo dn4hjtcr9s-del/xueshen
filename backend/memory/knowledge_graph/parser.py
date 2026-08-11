@@ -1,8 +1,10 @@
 """固定知识图谱 Mermaid 解析器（规格 §16.1）。
 
 权威来源：knowledge_graph/数学知识科技树关系图.md（节点 ID、标题、分组、有向边）。
-校验失败规则：重复 node ID、缺失节点、悬空边、非法 ID、同一 ID 标题变化、
-虚线边 `-.->` 一律使同步失败（第一版不解析虚线边）。
+校验失败规则：重复 node ID、缺失节点、悬空边、非法 ID、同一 ID 标题变化
+一律使同步失败。
+虚线边 `-.->`（教材顺序提示边）按 2026-08-11 裁决 A 处理：跳过并记录警告，
+不阻断同步，不入库；6 个无细目专题节点照常入库。
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ class ParsedEdge:
 class ParsedGraph:
     nodes: list[ParsedNode] = field(default_factory=list)
     edges: list[ParsedEdge] = field(default_factory=list)
+    skipped_dashed_edges: list[str] = field(default_factory=list)
     graph_checksum: str = ""
     catalog_checksum: str = ""
     manifest_checksum: str = ""
@@ -143,10 +146,6 @@ def parse_graph_file(graph_path: Path, catalog_path: Path) -> ParsedGraph:
             continue
         raise KnowledgeGraphParseError(f"无法识别的行 (line {line_no}): {stripped}")
 
-    if dashed:
-        raise KnowledgeGraphParseError(
-            "源文件出现虚线边 `-.->`，第一版不解析；请补充裁决：\n" + "\n".join(dashed)
-        )
     if not titles:
         raise KnowledgeGraphParseError("未解析到任何节点")
 
@@ -183,6 +182,7 @@ def parse_graph_file(graph_path: Path, catalog_path: Path) -> ParsedGraph:
     return ParsedGraph(
         nodes=nodes,
         edges=unique_edges,
+        skipped_dashed_edges=dashed,
         graph_checksum=graph_checksum,
         catalog_checksum=catalog_checksum,
         manifest_checksum=compute_manifest_checksum(

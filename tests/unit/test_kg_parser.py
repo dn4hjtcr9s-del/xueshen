@@ -60,15 +60,15 @@ def test_parse_valid_graph(tmp_path: Path) -> None:
     assert len(parsed.manifest_checksum) == 64
 
 
-def test_dashed_edge_fails(tmp_path: Path) -> None:
-    g, c = _write(tmp_path, VALID_GRAPH + "    n001 -. 教材顺序 .-> n009\n")
-    # 注意：虚线边在 mermaid 代码块外追加不会被解析；改为注入块内
+def test_dashed_edge_skipped_with_warning(tmp_path: Path) -> None:
+    """裁决 A（2026-08-11）：虚线边跳过不入库，同步不失败。"""
     graph = VALID_GRAPH.replace(
         "    n001 --> n002", "    n001 --> n002\n    n001 -. 教材顺序 .-> n009"
     )
-    g.write_text(graph, encoding="utf-8")
-    with pytest.raises(KnowledgeGraphParseError, match="虚线边"):
-        parse_graph_file(g, c)
+    g, c = _write(tmp_path, graph)
+    parsed = parse_graph_file(g, c)
+    assert len(parsed.skipped_dashed_edges) == 1
+    assert all(e.to_node_id != "n009" for e in parsed.edges)  # 虚线边不入库
 
 
 def test_dangling_edge_fails(tmp_path: Path) -> None:
