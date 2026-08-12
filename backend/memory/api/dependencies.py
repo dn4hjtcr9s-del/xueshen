@@ -45,9 +45,11 @@ from backend.memory.contracts.common import (
     new_trace_id,
     sign_cursor,
     user_log_hash,
+    user_privacy_hash,
     verify_cursor,
 )
 from backend.memory.contracts.errors import (
+    AccountPurgeInProgressError,
     CursorExpiredError,
     CursorInvalidError,
     DatabaseUnavailableError,
@@ -370,6 +372,12 @@ async def submit_operation(
     payload_hash = idempotency_payload_hash(public_hash_input)
     async with runtime.session_factory() as session:
         async with session.begin():
+            # §21.3 步骤 1：账号删除 manifest 存在（任意状态）时阻止新 operation
+            from backend.memory.persistence import account_deletion as deletion_repo
+
+            user_hash = user_privacy_hash(runtime.settings.privacy_hmac_key, str(auth.user_id))
+            if await deletion_repo.get_manifest_by_user_hash(session, user_hash=user_hash):
+                raise AccountPurgeInProgressError("账号删除进行中，已阻止新 operation")
             inserted = await ops_repo.insert_operation(
                 session, operation, idempotency_payload_hash=payload_hash
             )

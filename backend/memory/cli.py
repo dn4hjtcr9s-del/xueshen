@@ -239,10 +239,9 @@ def _cmd_restore_backup(args: argparse.Namespace) -> int:
             print(f"[restore-backup] 成功：batch_id={args.batch_id}")
             if replay_ids:
                 print(
-                    "[restore-backup] 警告：以下账号删除 manifest 必须重新应用（§21.4）：\n"
+                    "[restore-backup] 已自动重放账号删除（§21.4 / 评审 P0-2）：\n"
                     + "\n".join(f"  - {rid}" for rid in replay_ids)
-                    + "\n服务启动后对每个 account_deletion_id 调用 "
-                    "POST /internal/account-memory/purge 重放。"
+                    + "\n上述用户的恢复数据已重新物理删除，完成证明见 ops.account_deletion_ledger。"
                 )
             return 0
         except BackupError as exc:

@@ -402,3 +402,94 @@ async def test_account_purge_roundtrip(
     )
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "IDENTITY_MAPPING_NOT_FOUND"
+
+
+async def test_account_purge_blocks_new_operations(
+    api_client: httpx.AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """§21.3 步骤 1（评审 P0-1）：manifest 存在时阻止该用户创建新 operation。"""
+    target_user = uuid4()
+    async with session_factory() as session:
+        async with session.begin():
+            await IdentityMappingRepository(session).create(
+                internal_user_id=target_user,
+                issuer="https://accounts.example",
+                external_subject="ext-blocked-1",
+            )
+    service_headers = _auth(
+        uuid4(), **{"X-Dev-Actor-Type": "system", "X-Dev-Scopes": "memory:maintenance"}
+    )
+    purge_body = {
+        "account_deletion_id": str(uuid4()),
+        "issuer": "https://accounts.example",
+        "external_subject": "ext-blocked-1",
+        "requested_at": "2026-08-12T00:00:00Z",
+        "reason": "用户注销",
+    }
+    created = await api_client.post(
+        "/api/v1/internal/account-memory/purge", json=purge_body, headers=service_headers
+    )
+    assert created.status_code == 202
+
+    blocked = await api_client.post(
+        "/api/v1/memory/events",
+        json=EVENT_BODY,
+        headers={"Idempotency-Key": f"blocked-{uuid4().hex[:8]}", **_auth(target_user)},
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "ACCOUNT_PURGE_IN_PROGRESS"
+
+
+async def test_account_purge_replay_after_completion(
+    api_client: httpx.AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    runner: LocalLangGraphRunner,
+) -> None:
+    """§13.16 / §7.1（评审 P0-1）：purge 完成后自身 operation 行已物理删除，
+    幂等重放应返回合成的 succeeded 终态结果而不是报错。"""
+    target_user = uuid4()
+    async with session_factory() as session:
+        async with session.begin():
+            await IdentityMappingRepository(session).create(
+                internal_user_id=target_user,
+                issuer="https://accounts.example",
+                external_subject="ext-replay-1",
+            )
+    service_headers = _auth(
+        uuid4(), **{"X-Dev-Actor-Type": "system", "X-Dev-Scopes": "memory:maintenance"}
+    )
+    purge_body = {
+        "account_deletion_id": str(uuid4()),
+        "issuer": "https://accounts.example",
+        "external_subject": "ext-replay-1",
+        "requested_at": "2026-08-12T00:00:00Z",
+        "reason": "用户注销",
+    }
+    created = await api_client.post(
+        "/api/v1/internal/account-memory/purge", json=purge_body, headers=service_headers
+    )
+    assert created.status_code == 202
+    operation_id = UUID(created.json()["operation_id"])
+
+    # Worker 执行 purge（完成后 operation 行被物理删除）
+    async with session_factory() as session:
+        row = await ops_repo.get_operation(session, operation_id)
+    assert row is not None
+    operation = MemoryOperation.model_validate(
+        {k: row[k] for k in MemoryOperation.model_fields if k in row}
+    )
+    result = await runner.run(operation)
+    assert result.status == "succeeded"
+    async with session_factory() as session:
+        gone = await ops_repo.get_operation(session, operation_id)
+    assert gone is None  # 自身行已删除（§13.16）
+
+    # 幂等重放：合成 succeeded 结果
+    replay = await api_client.post(
+        "/api/v1/internal/account-memory/purge", json=purge_body, headers=service_headers
+    )
+    assert replay.status_code == 200
+    body = replay.json()
+    assert body["operation_id"] == str(operation_id)
+    assert body["status"] == "succeeded"
+    assert body["operation_type"] == "purge_account_memory"

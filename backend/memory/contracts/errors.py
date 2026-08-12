@@ -172,6 +172,13 @@ class AccountPurgeAlreadyRunningError(MemoryError):
     http_status = 409
 
 
+class AccountPurgeInProgressError(MemoryError):
+    """账号删除 manifest 存在（任意状态）：阻止该用户创建新 operation（§21.3 步骤 1）。"""
+
+    code = "ACCOUNT_PURGE_IN_PROGRESS"
+    http_status = 409
+
+
 class SourceTooLargeError(MemoryError):
     code = "SOURCE_TOO_LARGE"
     http_status = 422

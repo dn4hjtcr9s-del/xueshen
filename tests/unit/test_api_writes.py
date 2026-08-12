@@ -71,6 +71,22 @@ def test_submit_event_returns_202_and_persists(tmp_path: Any, monkeypatch: Any) 
     assert len(row["trace_id"]) == 32
 
 
+def test_account_purge_blocks_new_operation(tmp_path: Any, monkeypatch: Any) -> None:
+    """§21.3 步骤 1（评审 P0-1）：账号删除 manifest 存在时写路径返回 409。"""
+    from backend.memory.contracts.common import user_privacy_hash
+
+    settings = _settings(tmp_path)
+    app, store, _, _ = build_test_app(settings, monkeypatch=monkeypatch)
+    store.manifests[user_privacy_hash(settings.privacy_hmac_key, str(USER_ID))] = {
+        "status": "requested"
+    }
+    client = TestClient(app)
+    response = _post_event(client, "k-blocked")
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "ACCOUNT_PURGE_IN_PROGRESS"
+    assert store.rows == {}
+
+
 def test_missing_idempotency_key_rejected(tmp_path: Any, monkeypatch: Any) -> None:
     app, *_ = build_test_app(_settings(tmp_path), monkeypatch=monkeypatch)
     client = TestClient(app)

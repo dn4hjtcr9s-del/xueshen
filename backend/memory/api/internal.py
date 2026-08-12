@@ -8,7 +8,8 @@ scope 调用；目标用户只能经 account_identity_mappings 解析，调用�
 from __future__ import annotations
 
 from datetime import timedelta
-from uuid import uuid4
+from typing import Any
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fastapi import APIRouter, Depends, Response
 
@@ -53,6 +54,27 @@ def _purge_idempotency_key(request: AccountMemoryPurgeRequest) -> str:
     return f"account-purge:{request.account_deletion_id}"
 
 
+def _purge_operation_id(request: AccountMemoryPurgeRequest) -> UUID:
+    """确定性 operation_id：purge 完成后自身行被物理删除，幂等重放需可重建。"""
+    return uuid5(NAMESPACE_URL, f"memory:account-purge:{request.account_deletion_id}")
+
+
+def _completed_purge_result(
+    request: AccountMemoryPurgeRequest, manifest: dict[str, Any], response: Response
+) -> MemoryOperationResult:
+    """purge 完成后自身 operation 行已物理删除（§13.16）：合成终态结果。"""
+    completed_at = manifest["purge_completed_at"]
+    response.status_code = 200
+    return MemoryOperationResult(
+        operation_id=_purge_operation_id(request),
+        status="succeeded",
+        operation_type="purge_account_memory",
+        created_at=manifest["requested_at"],
+        updated_at=completed_at,
+        completed_at=completed_at,
+    )
+
+
 @router.post("/account-memory/purge", response_model=MemoryOperationResult)
 async def purge_account_memory(
     request: AccountMemoryPurgeRequest,
@@ -66,11 +88,17 @@ async def purge_account_memory(
     idempotency_key = _purge_idempotency_key(request)
     async with runtime.session_factory() as session:
         async with session.begin():
+            # purge 完成后身份映射已物理删除：先按 account_deletion_id 兜底定位
+            manifest_by_id = await deletion_repo.get_manifest_by_id(
+                session, account_deletion_id=request.account_deletion_id
+            )
             resolver = IdentityMappingRepository(session)
             user_id = await resolver.resolve(
                 issuer=request.issuer, external_subject=request.external_subject
             )
             if user_id is None:
+                if manifest_by_id is not None and manifest_by_id["status"] == "completed":
+                    return _completed_purge_result(request, manifest_by_id, response)
                 raise IdentityMappingNotFoundError("身份映射不存在")
 
             user_hash = user_privacy_hash(settings.privacy_hmac_key, str(user_id))
@@ -85,7 +113,9 @@ async def purge_account_memory(
                     actor_type="system",
                     idempotency_key=idempotency_key,
                 )
-                if row is None:  # pragma: no cover - manifest 与 operation 同事务创建
+                if row is None:
+                    if existing["status"] == "completed":
+                        return _completed_purge_result(request, existing, response)
                     raise DatabaseUnavailableError("manifest 存在但 purge operation 缺失")
                 result = operation_result_from_row(row)
                 response.status_code = status_code_for_row(row)
@@ -101,9 +131,18 @@ async def purge_account_memory(
             )
             if not inserted:  # pragma: no cover - 上面已检查；并发下唯一约束兜底
                 raise AccountPurgeAlreadyRunningError("该用户已存在账号删除 manifest")
+            # 写透 ops ledger（评审 P0-2）：恢复流程不 DROP ops schema
+            await deletion_repo.upsert_ledger_entry(
+                session,
+                account_deletion_id=request.account_deletion_id,
+                user_hash=user_hash,
+                user_hash_key_version=settings.privacy_hmac_key_version,
+                status="requested",
+                requested_at=request.requested_at,
+            )
 
             input_kind, priority = OPERATION_ROUTING["purge_account_memory"]
-            operation_id = uuid4()
+            operation_id = _purge_operation_id(request)
             operation = MemoryOperation(
                 operation_id=operation_id,
                 idempotency_key=idempotency_key,

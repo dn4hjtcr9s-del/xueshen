@@ -468,7 +468,9 @@ class TestMaintenanceGraphBranch:
         result = await runner.run(maint_op)
 
         assert result.status == "succeeded"
-        assert saver.deleted == [thread_id_for_operation(old.operation_id)]
+        # 共享测试库的 langgraph 表可能有其他运行遗留的孤儿线程（评审 P0-1 引入
+        # 孤儿清扫），断言目标线程被删除而非精确相等
+        assert thread_id_for_operation(old.operation_id) in saver.deleted
         async with session_factory() as session:
             run_row = await maintenance_repo.get_run_by_key(
                 session, idempotency_key="cleanup-checkpoints:integration-test"

@@ -2,8 +2,8 @@
 
 步骤 9 实现 rebuild_index / purge_tombstones / cleanup_orphan_versions；
 步骤 10 接入 cleanup_checkpoints（CheckpointCleanupAdapter，§11.4）；
-verify_checksums（步骤 15）、purge_account_memory（步骤 15）在对应步骤接入，
-此处明确拒绝而非空转。
+purge_account_memory 走 account_purge 服务（§13.16/§21.3，评审 P0-1 修复）；
+verify_checksums 在对应步骤接入，此处明确拒绝而非空转。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from backend.memory.persistence import documents as docs_repo
 from backend.memory.persistence import maintenance as maintenance_repo
 from backend.memory.persistence.database import exec_rowcount
 
-_NOT_IMPLEMENTED = {"verify_checksums", "purge_account_memory"}
+_NOT_IMPLEMENTED = {"verify_checksums"}
 
 
 async def run_maintenance(
@@ -98,7 +98,10 @@ async def _execute_batch(
         return {"kind": kind, "status": "done", "result": result}
 
     if kind == "cleanup_checkpoints":
-        from backend.memory.worker.checkpoint import list_expired_checkpoint_threads
+        from backend.memory.worker.checkpoint import (
+            list_expired_checkpoint_threads,
+            list_orphan_checkpoint_threads,
+        )
 
         if ctx.checkpoint_cleanup is None:
             raise InvalidPayloadError(
@@ -115,11 +118,20 @@ async def _execute_batch(
                 continue
             deleted += await ctx.checkpoint_cleanup.delete_threads([row["thread_id"]])
         finished = len(rows) < payload.batch_size
+        # 到期扫描完成后，用剩余配额清扫孤儿线程（账号删除自身线程等遗留）
+        orphans_deleted = 0
+        if finished and not payload.dry_run:
+            orphans = await list_orphan_checkpoint_threads(
+                session, batch_size=payload.batch_size - len(rows)
+            )
+            for thread_id in orphans:
+                orphans_deleted += await ctx.checkpoint_cleanup.delete_threads([thread_id])
         return {
             "kind": kind,
             "status": "done" if finished else "continue",
             "scanned": len(rows),
             "threads_deleted": deleted,
+            "orphan_threads_deleted": orphans_deleted,
             "dry_run": payload.dry_run,
             "next_cursor": None if finished else next_cursor,
         }
@@ -193,6 +205,51 @@ async def _execute_batch(
             "documents_scanned": min(len(docs), payload.batch_size),
             "orphans_removed": removed,
             "dry_run": payload.dry_run,
+        }
+
+    if kind == "purge_account_memory":
+        # §21.3 / §13.16：账号物理删除全流程（评审 P0-1 修复）。
+        # 注意：purge 会删除自身的 memory_operations/memory_maintenance_runs 行，
+        # 外层 update_run_by_operation 与 complete_operation 均为静默 no-op。
+        purge_target = payload.target_user_id
+        if purge_target is None:
+            raise InvalidPayloadError("purge_account_memory 需要 target_user_id")
+        from backend.memory.services.account_purge import (
+            AccountPurgeNotDrainedError,
+            drain_user_operations,
+            purge_user_account,
+        )
+
+        async with ctx.session_factory() as drain_session:
+            async with drain_session.begin():
+                running = await drain_user_operations(
+                    drain_session,
+                    user_id=purge_target,
+                    exclude_operation_id=operation.operation_id,
+                )
+        if running > 0:
+            # 可重试错误：执行层按退避重排，等待运行中任务退出（§21.3 步骤 3）
+            raise AccountPurgeNotDrainedError(f"账号删除等待 {running} 个运行中用户任务结束")
+        if payload.dry_run:
+            return {"kind": kind, "status": "done", "dry_run": True}
+        summary = await purge_user_account(
+            ctx.session_factory,
+            settings=ctx.settings,
+            store=ctx.memory_service.store,
+            checkpoint_cleanup=ctx.checkpoint_cleanup,
+            user_id=purge_target,
+            account_deletion_id=None,
+            now=now,
+            self_operation_id=operation.operation_id,
+        )
+        return {
+            "kind": kind,
+            "status": "done",
+            "purged_tables": summary.table_counts,
+            "checkpoint_threads_deleted": summary.checkpoint_threads_deleted,
+            "markdown_tree_deleted": summary.markdown_tree_deleted,
+            "break_glass_compressed": summary.break_glass_compressed,
+            "completion_proof_checksum": summary.completion_proof_checksum,
         }
 
     raise InvalidPayloadError(f"未知维护类型: {kind}")  # pragma: no cover

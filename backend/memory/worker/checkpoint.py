@@ -104,3 +104,35 @@ async def list_account_checkpoint_threads(session: AsyncSession, *, user_id: UUI
         {"user_id": user_id},
     )
     return [thread_id_for_operation(row.operation_id) for row in result.all()]
+
+
+async def list_orphan_checkpoint_threads(session: AsyncSession, *, batch_size: int) -> list[str]:
+    """无对应 memory_operations 行的 memory-op: 线程（账号删除自身线程等遗留）。
+
+    checkpoints 表由 langgraph 管理；表不存在（未启用 checkpointer 的环境）
+    时返回空列表。
+    """
+    exists = await session.execute(
+        text(
+            "SELECT COUNT(*) FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = 'checkpoints'"
+        )
+    )
+    if int(exists.scalar_one()) == 0:
+        return []
+    result = await session.execute(
+        text(
+            """
+            SELECT DISTINCT c.thread_id FROM checkpoints c
+            WHERE c.thread_id LIKE :prefix
+              AND NOT EXISTS (
+                  SELECT 1 FROM memory_operations o
+                  WHERE o.operation_id = CAST(substring(c.thread_id from 11) AS uuid)
+              )
+            ORDER BY c.thread_id
+            LIMIT :batch_size
+            """
+        ),
+        {"prefix": f"{THREAD_PREFIX}%", "batch_size": batch_size},
+    )
+    return [str(row[0]) for row in result.all()]

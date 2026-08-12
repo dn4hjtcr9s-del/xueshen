@@ -25,6 +25,7 @@ from backend.settings import Settings
 
 # 用户数据表（每测试清空）；图谱注册表 knowledge_graph_* 不在此列。
 USER_TABLES = (
+    "ops.account_deletion_ledger",
     "memory_privacy_audit_records",
     "account_deletion_manifest",
     "memory_break_glass_audit",

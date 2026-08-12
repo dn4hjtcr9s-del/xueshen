@@ -17,6 +17,7 @@ from backend.app import create_app
 from backend.memory.api.dependencies import ApiRuntime
 from backend.memory.contracts.errors import OperationCancelNotAllowedError
 from backend.memory.contracts.operations import MemoryOperation, MemoryOperationResult
+from backend.memory.persistence import account_deletion as deletion_repo
 from backend.memory.persistence import operations as ops_repo
 from backend.memory.worker.worker import Worker, WorkerConfig
 from backend.settings import Settings
@@ -24,10 +25,15 @@ from tests.unit.worker_fakes import make_session_factory
 
 
 class InMemoryOperationStore:
-    """memory_operations 的内存实现，语义对齐 persistence/operations.py。"""
+    """memory_operations 的内存实现，语义对齐 persistence/operations.py。
+
+    manifests 模拟 account_deletion_manifest（按 user_hash 存取），
+    默认空——submit_operation 的账号删除阻断检查依赖它。
+    """
 
     def __init__(self) -> None:
         self.rows: dict[UUID, dict[str, Any]] = {}
+        self.manifests: dict[str, dict[str, Any]] = {}
 
     def _row_from_operation(self, operation: MemoryOperation, payload_hash: str) -> dict[str, Any]:
         now = datetime.now(UTC)
@@ -183,6 +189,9 @@ class InMemoryOperationStore:
         self.rows[operation_id]["status"] = status
         self.rows[operation_id]["commit_started_at"] = None
 
+    async def get_manifest_by_user_hash(self, session: Any, *, user_hash: str) -> Any:
+        return self.manifests.get(user_hash)
+
     def install(self, monkeypatch: Any) -> None:
         for name in (
             "insert_operation",
@@ -199,6 +208,9 @@ class InMemoryOperationStore:
             "clear_commit_started",
         ):
             monkeypatch.setattr(ops_repo, name, getattr(self, name))
+        monkeypatch.setattr(
+            deletion_repo, "get_manifest_by_user_hash", self.get_manifest_by_user_hash
+        )
 
 
 class FakeRunner:

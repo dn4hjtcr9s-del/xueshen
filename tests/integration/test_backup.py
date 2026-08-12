@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -22,6 +23,7 @@ from backend.memory import backup as backup_module
 from backend.memory.backup import (
     BackupError,
     create_backup,
+    restore_backup,
     verify_backup_restore,
 )
 from backend.memory.persistence import backup_runs as backup_repo
@@ -168,3 +170,133 @@ async def test_verify_rejects_unknown_batch(
     backup_settings = _backup_settings(settings, tmp_path, age_keypair)
     with pytest.raises(BackupError, match="backup_runs 不存在"):
         await verify_backup_restore(backup_settings, session_factory, batch_id=uuid4())
+
+
+async def test_restore_replays_completed_account_deletion(
+    settings: Settings,
+    tmp_path: Path,
+    age_keypair: tuple[str, str],
+) -> None:
+    """评审 P0-2 灾难恢复演练：T0 备份 → T1 完成账号删除 → T2 恢复 T0。
+
+    全程在独立临时数据库中进行（不动开发库）；ops.account_deletion_ledger
+    不被恢复重置，恢复后必须自动重放 purge 并再次物理删除该用户数据。
+    """
+    from urllib.parse import urlparse
+
+    from backend.memory.contracts.common import user_privacy_hash
+    from backend.memory.persistence import account_deletion as deletion_repo
+    from backend.memory.persistence.database import create_engine, create_session_factory
+    from backend.memory.persistence.identity import IdentityMappingRepository
+    from backend.memory.services.account_purge import purge_user_account
+    from backend.memory.storage.local_markdown import LocalMarkdownStore
+
+    parsed = urlparse(settings.database_url)
+    db_user = parsed.username or "memory"
+    temp_db = f"memory_restore_{uuid4().hex[:8]}"
+    temp_url = settings.database_url.rsplit("/", 1)[0] + f"/{temp_db}"
+
+    await asyncio.to_thread(
+        subprocess.run,
+        ["docker", "compose", "exec", "-T", "postgres", "createdb", "-U", db_user, temp_db],
+        check=True,
+        capture_output=True,
+    )
+    try:
+        env = {**__import__("os").environ, "DATABASE_URL": temp_url}
+        await asyncio.to_thread(
+            subprocess.run,
+            ["uv", "run", "alembic", "upgrade", "head"],
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+        backup_settings = _backup_settings(settings, tmp_path, age_keypair, database_url=temp_url)
+        engine = create_engine(backup_settings)
+        sf = create_session_factory(engine)
+        store = LocalMarkdownStore(backup_settings.memory_storage_root)
+        user = uuid4()
+        try:
+            # T0 前：播种用户数据与 Markdown
+            async with sf() as session:
+                async with session.begin():
+                    await IdentityMappingRepository(session).create(
+                        internal_user_id=user,
+                        issuer="https://accounts.example",
+                        external_subject="ext-restore-1",
+                    )
+                    await session.execute(
+                        text(
+                            "INSERT INTO memory_documents (user_id, memory_id, memory_type, "
+                            "logical_path, active_version, active_storage_key, active_checksum) "
+                            "VALUES (:u, 'learner', 'learner', 'learner.md', 1, 'k1', :ck)"
+                        ),
+                        {"u": user, "ck": "ab" * 32},
+                    )
+            user_dir = (
+                Path(backup_settings.memory_storage_root) / "users" / str(user)[:2] / str(user)
+            )
+            user_dir.mkdir(parents=True)
+            (user_dir / "learner.md").write_text("v1", encoding="utf-8")
+
+            batch_id = await create_backup(backup_settings, sf)
+
+            # T1：完成账号删除（ledger 写入 temp 库的 ops schema）
+            user_hash = user_privacy_hash(backup_settings.privacy_hmac_key, str(user))
+            async with sf() as session:
+                async with session.begin():
+                    await deletion_repo.insert_manifest(
+                        session,
+                        account_deletion_id=uuid4(),
+                        user_hash=user_hash,
+                        user_hash_key_version=backup_settings.privacy_hmac_key_version,
+                        requested_at=datetime.now(UTC),
+                        backup_retention_until=datetime.now(UTC),
+                    )
+            summary = await purge_user_account(
+                sf,
+                settings=backup_settings,
+                store=store,
+                checkpoint_cleanup=None,
+                user_id=user,
+                account_deletion_id=None,
+                now=datetime.now(UTC),
+            )
+            assert summary.markdown_tree_deleted
+            assert not user_dir.exists()
+
+            # T2：恢复 T0 备份（--force：temp 库已有 ops ledger 等非空状态）
+            replayed = await restore_backup(backup_settings, sf, batch_id=batch_id, force=True)
+
+            assert len(replayed) == 1
+            async with sf() as session:
+                docs = await session.execute(
+                    text("SELECT COUNT(*) FROM memory_documents WHERE user_id = :u"),
+                    {"u": user},
+                )
+                assert int(docs.scalar_one()) == 0, "恢复后用户数据必须被重放 purge 清除"
+                mappings = await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM account_identity_mappings WHERE internal_user_id = :u"
+                    ),
+                    {"u": user},
+                )
+                assert int(mappings.scalar_one()) == 0
+                manifest = await deletion_repo.get_manifest_by_user_hash(
+                    session, user_hash=user_hash
+                )
+                assert manifest is not None
+                assert manifest["status"] == "completed"
+                ledger = await deletion_repo.list_ledger_entries(session)
+                assert len(ledger) == 1
+                assert ledger[0]["status"] == "completed"
+            assert not user_dir.exists(), "恢复重建的 Markdown 必须被重放 purge 删除"
+        finally:
+            await engine.dispose()
+    finally:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["docker", "compose", "exec", "-T", "postgres", "dropdb", "-U", db_user, temp_db],
+            check=False,
+            capture_output=True,
+        )
