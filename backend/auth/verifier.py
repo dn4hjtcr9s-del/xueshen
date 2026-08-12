@@ -10,7 +10,7 @@ from __future__ import annotations
 import ipaddress
 import time
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 import jwt
@@ -163,7 +163,10 @@ class ProductionJwtAuthAdapter:
                 algorithms=["RS256", "ES256"],
                 audience=self.settings.auth_audience,
                 issuer=self.settings.auth_issuer,
-                options={"require": ["iss", "aud", "sub", "iat", "exp", "jti"]},
+                # 评审二轮 #4：actor_type/scopes 同为必需 claims，缺失即拒
+                options={
+                    "require": ["iss", "aud", "sub", "iat", "exp", "jti", "actor_type", "scopes"]
+                },
             )
         except jwt.PyJWTError as exc:
             raise AuthError("AUTH_REQUIRED", f"JWT 校验失败: {type(exc).__name__}") from exc
@@ -175,8 +178,10 @@ class ProductionJwtAuthAdapter:
         if exp < time.time():
             raise AuthError("AUTH_REQUIRED", "token 已过期")
 
-        actor_raw = claims.get("actor_type", "user")
-        if actor_raw not in (
+        # 严格 claims schema（评审二轮 #4）：类型错误或未知值整体拒绝 token，
+        # 不静默修正、不静默过滤
+        actor_raw = claims["actor_type"]
+        if not isinstance(actor_raw, str) or actor_raw not in (
             "user",
             "conversation_agent",
             "activity_agent",
@@ -185,16 +190,22 @@ class ProductionJwtAuthAdapter:
             "system",
             "admin",
         ):
-            raise AuthError("AUTH_FORBIDDEN", "非法 actor_type", forbidden=True)
-        scopes_raw = claims.get("scopes", [])
-        scopes = frozenset(s for s in scopes_raw if s in ALL_SCOPES)
+            raise AuthError("AUTH_REQUIRED", "actor_type claim 非法")
+        actor = cast(ActorType, actor_raw)
+        scopes_raw = claims["scopes"]
+        if not isinstance(scopes_raw, list) or not all(isinstance(s, str) for s in scopes_raw):
+            raise AuthError("AUTH_REQUIRED", "scopes claim 必须是字符串数组")
+        unknown_scopes = set(scopes_raw) - ALL_SCOPES
+        if unknown_scopes:
+            raise AuthError("AUTH_REQUIRED", f"未知 scope: {sorted(unknown_scopes)}")
+        scopes = frozenset(scopes_raw)
 
         issuer = str(claims["iss"])
         subject = str(claims["sub"])
-        if actor_raw in AGENT_ACTOR_TYPES:
+        delegated_sub = claims.get("delegated_sub")
+        if actor in AGENT_ACTOR_TYPES:
             # Agent 委托契约（§18.4，评审 #15）：必须带 delegated_sub 指向委托用户，
             # scope 不得超过 Agent 允许集；actor_principal 保留服务主体 sub。
-            delegated_sub = claims.get("delegated_sub")
             if not delegated_sub or not isinstance(delegated_sub, str):
                 raise AuthError("AUTH_REQUIRED", "Agent token 缺少 delegated_sub claim")
             overreach = scopes - AGENT_ALLOWED_SCOPES
@@ -211,18 +222,21 @@ class ProductionJwtAuthAdapter:
                 raise AuthError("AUTH_REQUIRED", "身份映射不存在")
             return AuthContext(
                 user_id=user_id,
-                actor_type=actor_raw,
+                actor_type=actor,
                 scopes=scopes,
                 issuer=issuer,
                 external_subject=delegated_sub,
                 actor_principal=subject,
             )
+        if delegated_sub is not None:
+            # 评审二轮 #4：非 Agent token 携带委托 claim 一律拒绝（防混淆代理）
+            raise AuthError("AUTH_REQUIRED", "非 Agent token 不允许携带 delegated_sub")
         user_id = await self.identity_resolver.resolve(issuer=issuer, external_subject=subject)
         if user_id is None:
             raise AuthError("AUTH_REQUIRED", "身份映射不存在")
         return AuthContext(
             user_id=user_id,
-            actor_type=actor_raw,
+            actor_type=actor,
             scopes=scopes,
             issuer=issuer,
             external_subject=subject,

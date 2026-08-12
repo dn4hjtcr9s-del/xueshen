@@ -182,23 +182,83 @@ async def heartbeat(
     return rowcount == 1
 
 
-async def mark_commit_started(session: AsyncSession, *, operation_id: UUID) -> None:
-    """进入 commit 副作用前打标记（§11.6 取消仲裁）；仅对 running 行生效。
+async def mark_commit_started(
+    session: AsyncSession,
+    *,
+    operation_id: UUID,
+    expected_worker: str | None = None,
+    expected_generation: int | None = None,
+) -> bool:
+    """进入 commit 副作用前打标记（§11.6 取消仲裁 + 评审二轮 #3 fencing CAS）。
 
+    携带 fencing token 时按 (operation_id, locked_by, lease_generation,
+    status='running') CAS：Lease 易主后旧持有者的标记必然失败（返回 False），
+    调用方必须终止执行、不得进入 commit_plans 的业务提交路径。
     必须在独立短事务中调用，与提交事务分离：进程在 commit 中崩溃时标记残留，
-    由 Lease 回收后执行层在下次开始执行时清除（clear_commit_started）。
+    由 Lease 回收后新持有者在执行开始时清除（clear_commit_started）。
     """
-    await session.execute(
+    if expected_worker is not None and expected_generation is not None:
+        rowcount = await exec_rowcount(
+            session,
+            text(
+                """
+                UPDATE memory_operations SET commit_started_at = now(), updated_at = now()
+                WHERE operation_id = :operation_id AND locked_by = :expected_worker
+                  AND lease_generation = :expected_generation AND status = 'running'
+                """
+            ),
+            {
+                "operation_id": operation_id,
+                "expected_worker": expected_worker,
+                "expected_generation": expected_generation,
+            },
+        )
+        return rowcount == 1
+    # 无 fencing 的直调路径（测试/内部维护）：保持 §11.6 原语义
+    rowcount = await exec_rowcount(
+        session,
         text(
             "UPDATE memory_operations SET commit_started_at = now(), updated_at = now() "
             "WHERE operation_id = :operation_id AND status = 'running'"
         ),
         {"operation_id": operation_id},
     )
+    return rowcount == 1
 
 
-async def clear_commit_started(session: AsyncSession, *, operation_id: UUID) -> None:
-    """清除 commit 标记：提交事务结束后、或执行开始时清理崩溃残留（§11.6）。"""
+async def clear_commit_started(
+    session: AsyncSession,
+    *,
+    operation_id: UUID,
+    expected_worker: str | None = None,
+    expected_generation: int | None = None,
+) -> bool:
+    """清除 commit 标记（§11.6 + 评审二轮 #3 fencing CAS）。
+
+    携带 fencing token 时按 (operation_id, locked_by, lease_generation,
+    status='running') CAS：不论标记是否存在，只要仍是当前持有者即返回 True；
+    Lease 易主后旧持有者的迟到清除必然失败（返回 False），不得覆盖新持有者
+    刚设置的标记。无 fencing 的直调路径保持原语义（仅在有标记时清除）。
+    """
+    if expected_worker is not None and expected_generation is not None:
+        # 单条 CAS：持有 Lease 即匹配（无论标记是否存在，rowcount 按匹配行计数）；
+        # Lease 易主后旧持有者的迟到清除必然 rowcount=0
+        rowcount = await exec_rowcount(
+            session,
+            text(
+                """
+                UPDATE memory_operations SET commit_started_at = NULL, updated_at = now()
+                WHERE operation_id = :operation_id AND locked_by = :expected_worker
+                  AND lease_generation = :expected_generation AND status = 'running'
+                """
+            ),
+            {
+                "operation_id": operation_id,
+                "expected_worker": expected_worker,
+                "expected_generation": expected_generation,
+            },
+        )
+        return rowcount == 1
     await session.execute(
         text(
             "UPDATE memory_operations SET commit_started_at = NULL, updated_at = now() "
@@ -206,6 +266,7 @@ async def clear_commit_started(session: AsyncSession, *, operation_id: UUID) -> 
         ),
         {"operation_id": operation_id},
     )
+    return True
 
 
 async def complete_operation(

@@ -712,6 +712,8 @@ async def commit_summary_memories(
         }
     if not entries:
         return {"commit_result": {"mutations": [], "replayed": False}}
+    # 评审二轮 #3：Lease fencing token 传入 commit 入口做 CAS
+    fencing = state.get("fencing") or {}
     outcome = await ctx.memory_service.commit_plans(
         operation_id=operation.operation_id,
         user_id=operation.user_id,
@@ -728,6 +730,8 @@ async def commit_summary_memories(
             (float(e["graph_nodes"][0]["confidence"]) if e["graph_nodes"] else None)
             for e in entries
         ],
+        expected_worker=fencing.get("worker_id"),
+        expected_generation=fencing.get("generation"),
     )
     return {
         "commit_result": {

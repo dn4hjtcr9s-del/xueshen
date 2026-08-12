@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from backend.memory.contracts.errors import MemoryError
+from backend.memory.contracts.errors import LeaseFencedError, MemoryError
 from backend.memory.contracts.operations import MemoryOperation, MemoryOperationResult
 from backend.memory.graph.runner import MemoryGraphRunner
 from backend.memory.persistence import operations as ops_repo
@@ -119,6 +119,7 @@ class Worker:
         # fencing token（评审 #7）：claim 时递增的 lease_generation，
         # 本任务的 heartbeat/完成/重排写回全部按 (id, worker, generation) CAS
         generation = int(row.get("lease_generation") or 0)
+        fencing = {"worker_id": self.worker_id, "generation": generation}
         # DB 行含状态/Lease 等额外列，只取契约字段（extra="forbid"）
         operation = MemoryOperation.model_validate(
             {k: row[k] for k in MemoryOperation.model_fields if k in row}
@@ -126,10 +127,22 @@ class Worker:
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(operation_id, generation))
         try:
             # §11.6（裁决 2026-08-11）：进程在 commit 中崩溃会残留 commit_started_at；
-            #  Lease 回收后重新执行时先清除残留标记，再检查协作取消
+            #  Lease 回收后重新执行时先清除残留标记，再检查协作取消。
+            #  评审二轮 #3：清除带 fencing CAS，失败说明 Lease 已再次易主，放弃执行
             async with self.session_factory() as session:
                 async with session.begin():
-                    await ops_repo.clear_commit_started(session, operation_id=operation_id)
+                    still_owner = await ops_repo.clear_commit_started(
+                        session,
+                        operation_id=operation_id,
+                        expected_worker=self.worker_id,
+                        expected_generation=generation,
+                    )
+            if not still_owner:
+                self.logger.warning(
+                    "operation %s 执行前 fencing 校验失败（Lease 已易主），放弃执行",
+                    operation_id,
+                )
+                return
             # cancel 在 commit 前生效（§23.2）
             async with self.session_factory() as session:
                 cancelled = await ops_repo.get_cancel_requested(session, operation_id=operation_id)
@@ -143,7 +156,7 @@ class Worker:
                 )
                 return
 
-            result = await self._run_with_timeouts(operation)
+            result = await self._run_with_timeouts(operation, fencing)
             await self._complete(
                 operation_id,
                 generation=generation,
@@ -151,13 +164,22 @@ class Worker:
                 result=result.model_dump(mode="json"),
                 public_error=(result.error.model_dump(mode="json") if result.error else None),
             )
+        except LeaseFencedError:
+            # 评审二轮 #3：commit 入口 CAS 失败，Lease 已易主——立即终止旧执行者，
+            # 不做任何写回（终态写回同样会被 fencing 拒绝），由新持有者完成
+            self.logger.warning(
+                "operation %s commit 入口被 fencing 拒绝（Lease 已易主），终止旧执行者",
+                operation_id,
+            )
         except Exception as exc:
             await self._handle_failure(row, exc)
         finally:
             heartbeat_task.cancel()
             await asyncio.gather(heartbeat_task, return_exceptions=True)
 
-    async def _run_with_timeouts(self, operation: MemoryOperation) -> MemoryOperationResult:
+    async def _run_with_timeouts(
+        self, operation: MemoryOperation, fencing: dict[str, Any]
+    ) -> MemoryOperationResult:
         soft = self.config.soft_timeout_seconds
         hard = self.config.hard_timeout_seconds
 
@@ -171,7 +193,7 @@ class Worker:
 
         watchdog = asyncio.create_task(_soft_watchdog())
         try:
-            return await asyncio.wait_for(self.runner.run(operation), timeout=hard)
+            return await asyncio.wait_for(self.runner.run(operation, fencing=fencing), timeout=hard)
         finally:
             watchdog.cancel()
             await asyncio.gather(watchdog, return_exceptions=True)

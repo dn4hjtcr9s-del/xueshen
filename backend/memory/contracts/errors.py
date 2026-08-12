@@ -252,3 +252,11 @@ class RateLimitedError(MemoryError):
     code = "RATE_LIMITED"
     http_status = 429
     retryable = True
+
+
+class LeaseFencedError(Exception):
+    """Lease fencing 拒绝（评审二轮 #3）：commit marker CAS 失败，说明 Lease 已易主。
+
+    内部执行信号，不对应公开错误码：执行层必须立即终止旧执行者且不做任何
+    写回（终态写回同样会被 fencing CAS 拒绝），由新 Lease 持有者完成该 operation。
+    """

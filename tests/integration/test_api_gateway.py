@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
@@ -200,8 +201,15 @@ async def test_cancel_running_in_commit_returns_409(
                 session, worker_id="it-commit", lease_seconds=300
             )
         assert [r["operation_id"] for r in claimed] == [operation_id]
+        generation = int(claimed[0]["lease_generation"])
         async with session.begin():
-            await ops_repo.mark_commit_started(session, operation_id=operation_id)
+            marked = await ops_repo.mark_commit_started(
+                session,
+                operation_id=operation_id,
+                expected_worker="it-commit",
+                expected_generation=generation,
+            )
+            assert marked
 
     response = await api_client.post(
         f"/api/v1/memory/operations/{operation_id}/cancel",
@@ -230,7 +238,13 @@ async def test_cancel_running_in_commit_returns_409(
     # 标记清除后同一 operation 可协作取消
     async with session_factory() as session:
         async with session.begin():
-            await ops_repo.clear_commit_started(session, operation_id=operation_id)
+            cleared = await ops_repo.clear_commit_started(
+                session,
+                operation_id=operation_id,
+                expected_worker="it-commit",
+                expected_generation=generation,
+            )
+            assert cleared
     retry = await api_client.post(
         f"/api/v1/memory/operations/{operation_id}/cancel",
         headers={"Idempotency-Key": "it-k-commit-cancel-2", **_auth()},
@@ -245,7 +259,9 @@ class _BlockingRunner:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def run(self, operation: MemoryOperation) -> MemoryOperationResult:
+    async def run(
+        self, operation: MemoryOperation, *, fencing: dict[str, Any] | None = None
+    ) -> MemoryOperationResult:
         self.started.set()
         await self.release.wait()
         now = datetime.now(UTC)
@@ -280,7 +296,13 @@ async def test_stale_commit_marker_cleared_on_execute_then_cooperative_cancel(
         assert [r["operation_id"] for r in claimed] == [operation_id]
         async with session.begin():
             # 模拟崩溃残留：running + commit_started_at 置位
-            await ops_repo.mark_commit_started(session, operation_id=operation_id)
+            marked = await ops_repo.mark_commit_started(
+                session,
+                operation_id=operation_id,
+                expected_worker="it-stale",
+                expected_generation=int(claimed[0]["lease_generation"]),
+            )
+            assert marked
 
     runner = _BlockingRunner()
     worker = Worker(

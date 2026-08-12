@@ -32,8 +32,14 @@ from backend.memory.graph.state import MemoryManagerState, MemoryRuntimeContext
 
 
 class MemoryGraphRunner(Protocol):
-    async def run(self, operation: MemoryOperation) -> MemoryOperationResult:
-        """执行已经成功领取的记忆操作并返回结构化结果。"""
+    async def run(
+        self, operation: MemoryOperation, *, fencing: dict[str, Any] | None = None
+    ) -> MemoryOperationResult:
+        """执行已经成功领取的记忆操作并返回结构化结果。
+
+        fencing（评审二轮 #3）：{"worker_id", "generation"}，经 Graph state
+        传到 commit 入口做 CAS；直调路径（测试/维护）可为 None。
+        """
         ...
 
 
@@ -146,7 +152,9 @@ class LocalLangGraphRunner:
         self._context = context
         self._graph = build_memory_manager_graph(checkpointer)
 
-    async def run(self, operation: MemoryOperation) -> MemoryOperationResult:
+    async def run(
+        self, operation: MemoryOperation, *, fencing: dict[str, Any] | None = None
+    ) -> MemoryOperationResult:
         from langchain_core.runnables import RunnableConfig
 
         from backend.memory.worker.checkpoint import thread_id_for_operation
@@ -156,7 +164,7 @@ class LocalLangGraphRunner:
             configurable={"thread_id": thread_id_for_operation(operation.operation_id)}
         )
         final_state = await self._graph.ainvoke(
-            {"operation": operation.model_dump(mode="json")},
+            {"operation": operation.model_dump(mode="json"), "fencing": fencing},
             config=config,
             context=self._context,
         )

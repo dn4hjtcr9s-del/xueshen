@@ -30,6 +30,7 @@ from backend.memory.contracts.commands import (
 from backend.memory.contracts.common import evidence_ref_hash
 from backend.memory.contracts.errors import (
     InvalidPayloadError,
+    LeaseFencedError,
     MemoryDeletedError,
     MemoryNotFoundError,
     MemoryRestoreExpiredError,
@@ -322,17 +323,48 @@ class MemoryService:
 
     # ---------------- 原子提交 ----------------
 
-    async def _mark_commit_started(self, operation_id: UUID) -> None:
-        """§11.6：独立短事务打 commit 标记（仅 status='running' 生效）。"""
-        async with self._session_factory() as session:
-            async with session.begin():
-                await ops_repo.mark_commit_started(session, operation_id=operation_id)
+    async def _mark_commit_started(
+        self,
+        operation_id: UUID,
+        *,
+        expected_worker: str | None = None,
+        expected_generation: int | None = None,
+    ) -> None:
+        """§11.6 + 评审二轮 #3：独立短事务打 commit 标记（fencing CAS）。
 
-    async def _clear_commit_started(self, operation_id: UUID) -> None:
-        """§11.6：独立短事务清除 commit 标记（提交事务结束后调用）。"""
+        携带 fencing token 且 CAS 失败说明 Lease 已易主：抛 LeaseFencedError，
+        调用方（执行层）必须终止该旧执行者，不得进入业务提交路径。
+        """
         async with self._session_factory() as session:
             async with session.begin():
-                await ops_repo.clear_commit_started(session, operation_id=operation_id)
+                ok = await ops_repo.mark_commit_started(
+                    session,
+                    operation_id=operation_id,
+                    expected_worker=expected_worker,
+                    expected_generation=expected_generation,
+                )
+        if not ok and expected_worker is not None:
+            raise LeaseFencedError(f"operation {operation_id} commit 标记 CAS 失败（Lease 已易主）")
+
+    async def _clear_commit_started(
+        self,
+        operation_id: UUID,
+        *,
+        expected_worker: str | None = None,
+        expected_generation: int | None = None,
+    ) -> None:
+        """§11.6：独立短事务清除 commit 标记（提交事务结束后调用）。
+
+        fencing CAS 失败仅说明 Lease 已易主：标记由新持有者负责，静默忽略。
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                await ops_repo.clear_commit_started(
+                    session,
+                    operation_id=operation_id,
+                    expected_worker=expected_worker,
+                    expected_generation=expected_generation,
+                )
 
     async def commit_plans(
         self,
@@ -347,8 +379,15 @@ class MemoryService:
         graph_node_ids_by_plan: list[list[str]] | None = None,
         mapping_methods_by_plan: list[str | None] | None = None,
         mapping_confidences_by_plan: list[float | None] | None = None,
+        expected_worker: str | None = None,
+        expected_generation: int | None = None,
     ) -> CommitOutcome:
-        """多文档原子提交（§8.6）。任何校验失败整个事务回滚。"""
+        """多文档原子提交（§8.6）。任何校验失败整个事务回滚。
+
+        评审二轮 #3：经 Lease 领取的执行路径必须携带 expected_worker /
+        expected_generation（fencing token）；CAS 失败抛 LeaseFencedError，
+        业务副作用不发生。直调路径（测试/内部维护）可不携带，保持原语义。
+        """
         if len(plans) > MAX_PLANS_PER_OPERATION:
             raise ValueError(f"一个 operation 最多 {MAX_PLANS_PER_OPERATION} 个 CommitMutationPlan")
         now = _now()
@@ -413,7 +452,11 @@ class MemoryService:
         # 2. 数据库事务
         # §11.6（裁决 2026-08-11）：进入 commit 副作用前用独立短事务打标记，
         # 取消仲裁据此返回 409；事务结束（含回滚）后清除，崩溃残留由执行层清理。
-        await self._mark_commit_started(operation_id)
+        await self._mark_commit_started(
+            operation_id,
+            expected_worker=expected_worker,
+            expected_generation=expected_generation,
+        )
         try:
             async with self._session_factory() as session:
                 async with session.begin():
@@ -610,7 +653,11 @@ class MemoryService:
                         )
 
         finally:
-            await self._clear_commit_started(operation_id)
+            await self._clear_commit_started(
+                operation_id,
+                expected_worker=expected_worker,
+                expected_generation=expected_generation,
+            )
 
         # 按原 plans 顺序汇总（replay 命中与新提交混排时保持返回顺序稳定）
         outcome.mutations = [results_by_index[i] for i in range(len(plans))]

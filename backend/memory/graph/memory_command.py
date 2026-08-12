@@ -32,6 +32,17 @@ def _operation(state: MemoryManagerState) -> MemoryOperation:
     return MemoryOperation.model_validate(state["operation"])
 
 
+def _fencing_kwargs(state: MemoryManagerState) -> dict[str, Any]:
+    """评审二轮 #3：从 state 取 Lease fencing token，传给 commit 入口做 CAS。"""
+    fencing = state.get("fencing")
+    if not fencing:
+        return {}
+    return {
+        "expected_worker": fencing.get("worker_id"),
+        "expected_generation": fencing.get("generation"),
+    }
+
+
 async def run_memory_command(
     state: MemoryManagerState, runtime: Runtime[MemoryRuntimeContext]
 ) -> dict[str, Any]:
@@ -44,7 +55,7 @@ async def run_memory_command(
     elif isinstance(payload, RestoreMemoryCommand):
         outcome = await _run_restore(runtime, operation, payload)
     elif isinstance(payload, ReviewCandidateCommand):
-        outcome = await _run_review(runtime, operation, payload)
+        outcome = await _run_review(state, runtime, operation, payload)
     else:  # pragma: no cover - 路由保证不会到达
         raise ValueError(f"非命令分支 payload: {type(payload).__name__}")
     return {"commit_result": outcome}
@@ -95,6 +106,7 @@ async def _run_replace_command(
         user_id=operation.user_id,
         actor_type=operation.actor_type,
         plans=[plan],
+        **_fencing_kwargs(state),
     )
     return {
         "mutations": [m.model_dump(mode="json") for m in outcome.mutations],
@@ -142,6 +154,7 @@ async def _run_restore(
 
 
 async def _run_review(
+    state: MemoryManagerState,
     runtime: Runtime[MemoryRuntimeContext],
     operation: MemoryOperation,
     payload: ReviewCandidateCommand,
@@ -199,6 +212,7 @@ async def _run_review(
                 user_id=operation.user_id,
                 actor_type=operation.actor_type,
                 plans=[plan],
+                **_fencing_kwargs(state),
             )
             mutations.extend(outcome.mutations)
             target_memory_id = target_memory_id or plan.memory_id

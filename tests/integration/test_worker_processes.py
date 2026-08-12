@@ -18,14 +18,23 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from backend.memory.contracts.commands import MaintenanceCommand
+from backend.memory.contracts.commands import (
+    CommitMutationPlan,
+    LearnerPatch,
+    MaintenanceCommand,
+)
 from backend.memory.contracts.common import SYSTEM_MAINTENANCE_USER_ID
+from backend.memory.contracts.errors import (
+    LeaseFencedError,
+    OperationCancelNotAllowedError,
+)
 from backend.memory.graph.runner import LocalLangGraphRunner
 from backend.memory.graph.state import MemoryRuntimeContext
 from backend.memory.persistence import maintenance as maintenance_repo
 from backend.memory.persistence import notifications as notifications_repo
 from backend.memory.persistence import operations as ops_repo
 from backend.memory.persistence import outbox as outbox_repo
+from backend.memory.services.memory_service import MemoryService
 from backend.memory.worker.checkpoint import (
     CheckpointCleanupAdapter,
     list_expired_checkpoint_threads,
@@ -701,3 +710,205 @@ class TestLeaseFencing:
                     )
                     is True
                 )
+
+
+class TestCommitMarkerFencing:
+    """评审二轮 #3：commit marker 使用 lease fencing token——Lease 易主后，
+    旧持有者不得设置/清除新持有者的 marker，也不得进入业务提交路径。"""
+
+    async def _make_and_claim(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        worker_id: str,
+        lease_seconds: int = 120,
+    ) -> tuple[UUID, dict[str, Any]]:
+        operation = make_operation(
+            user_id=USER,
+            actor_type="system",
+            input_kind="maintenance",
+            operation_type="purge_tombstones",
+            priority=0,
+            payload=MaintenanceCommand(kind="purge_tombstones"),
+        )
+        await persist_operation(session_factory, operation)
+        async with session_factory() as session:
+            async with session.begin():
+                claimed = await ops_repo.claim_operation(
+                    session, worker_id=worker_id, lease_seconds=lease_seconds
+                )
+        assert [r["operation_id"] for r in claimed] == [operation.operation_id]
+        return operation.operation_id, claimed[0]
+
+    async def _reclaim(
+        self, session_factory: async_sessionmaker[AsyncSession], operation_id: UUID
+    ) -> dict[str, Any]:
+        """旧 Lease 过期 → Scheduler 回收 → worker-b 重新领取。"""
+        async with session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    text(
+                        "UPDATE memory_operations "
+                        "SET lease_expires_at = now() - interval '1 second' "
+                        "WHERE operation_id = :id"
+                    ),
+                    {"id": operation_id},
+                )
+        async with session_factory() as session:
+            async with session.begin():
+                assert await ops_repo.recover_expired_leases(session) == 1
+        async with session_factory() as session:
+            async with session.begin():
+                reclaimed = await ops_repo.claim_operation(
+                    session, worker_id="worker-b", lease_seconds=120
+                )
+        return reclaimed[0]
+
+    async def test_stale_worker_cannot_clear_or_mark_after_reclaim(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """B mark 后 A clear → 失败且 marker 保留；B 持有时 A mark → 失败。"""
+        operation_id, row_a = await self._make_and_claim(session_factory, worker_id="worker-a")
+        gen_a = int(row_a["lease_generation"])
+
+        row_b = await self._reclaim(session_factory, operation_id)
+        gen_b = int(row_b["lease_generation"])
+        assert gen_b > gen_a
+
+        # 新持有者 B 设置 marker 成功
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await ops_repo.mark_commit_started(
+                        session,
+                        operation_id=operation_id,
+                        expected_worker="worker-b",
+                        expected_generation=gen_b,
+                    )
+                    is True
+                )
+        # 旧持有者 A 的迟到 clear 被 fencing 拒绝，B 的 marker 保留
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await ops_repo.clear_commit_started(
+                        session,
+                        operation_id=operation_id,
+                        expected_worker="worker-a",
+                        expected_generation=gen_a,
+                    )
+                    is False
+                )
+        async with session_factory() as session:
+            row = await ops_repo.get_operation(session, operation_id)
+        assert row is not None
+        assert row["commit_started_at"] is not None
+        assert row["locked_by"] == "worker-b"
+
+        # B 持有 Lease 时 A 设置 marker 同样被拒
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await ops_repo.mark_commit_started(
+                        session,
+                        operation_id=operation_id,
+                        expected_worker="worker-a",
+                        expected_generation=gen_a,
+                    )
+                    is False
+                )
+
+        # 新持有者 B 的 clear 成功
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await ops_repo.clear_commit_started(
+                        session,
+                        operation_id=operation_id,
+                        expected_worker="worker-b",
+                        expected_generation=gen_b,
+                    )
+                    is True
+                )
+        async with session_factory() as session:
+            row = await ops_repo.get_operation(session, operation_id)
+        assert row is not None and row["commit_started_at"] is None
+
+    async def test_fenced_commit_plans_raises_before_business_effects(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        memory_service: MemoryService,
+    ) -> None:
+        """marker CAS 失败后旧 Worker 调 commit_plans → LeaseFencedError，
+        数据库业务副作用（commits/documents）不发生。"""
+        operation_id, row_a = await self._make_and_claim(session_factory, worker_id="worker-a")
+        gen_a = int(row_a["lease_generation"])
+        await self._reclaim(session_factory, operation_id)
+
+        plans = [
+            CommitMutationPlan(
+                mutation_id=uuid4(),
+                memory_id="learner",
+                target_memory_type="learner",
+                action="create",
+                learner_patch=LearnerPatch(goals_to_add=["不应落库的目标"]),
+            )
+        ]
+        with pytest.raises(LeaseFencedError):
+            await memory_service.commit_plans(
+                operation_id=operation_id,
+                user_id=USER,
+                actor_type="user",
+                plans=plans,
+                expected_worker="worker-a",
+                expected_generation=gen_a,
+            )
+        async with session_factory() as session:
+            for table in ("memory_commits", "memory_documents"):
+                result = await session.execute(text(f"SELECT count(*) FROM {table}"))
+                assert int(result.scalar_one()) == 0, f"{table} 不得有业务副作用"
+
+    async def test_recovered_lease_clears_stale_marker_then_cancel_allowed(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """§11.6 + 评审二轮 #3：A 崩溃残留 marker 时 cancel → 409；Lease 回收后
+        新持有者 B 在执行开始清掉残留 marker，此后 cancel 恢复协作受理。"""
+        operation_id, row_a = await self._make_and_claim(session_factory, worker_id="worker-a")
+        gen_a = int(row_a["lease_generation"])
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await ops_repo.mark_commit_started(
+                        session,
+                        operation_id=operation_id,
+                        expected_worker="worker-a",
+                        expected_generation=gen_a,
+                    )
+                    is True
+                )
+        # marker 在位：cancel 仲裁拒绝
+        async with session_factory() as session:
+            async with session.begin():
+                with pytest.raises(OperationCancelNotAllowedError):
+                    await ops_repo.request_cancel(session, operation_id=operation_id)
+
+        # A 崩溃 → Lease 过期回收 → B 领取；B 执行开始的 fencing clear 清掉残留
+        row_b = await self._reclaim(session_factory, operation_id)
+        gen_b = int(row_b["lease_generation"])
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await ops_repo.clear_commit_started(
+                        session,
+                        operation_id=operation_id,
+                        expected_worker="worker-b",
+                        expected_generation=gen_b,
+                    )
+                    is True
+                )
+        # marker 已清除：协作取消受理
+        async with session_factory() as session:
+            async with session.begin():
+                row = await ops_repo.request_cancel(session, operation_id=operation_id)
+        assert row is not None
+        assert row["cancel_requested_at"] is not None

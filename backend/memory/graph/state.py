@@ -28,6 +28,9 @@ class MemoryManagerState(TypedDict, total=False):
     """§10.1 原文（dict 具体化为 dict[str, Any] 以满足 mypy strict）。"""
 
     operation: dict[str, Any]
+    # 评审二轮 #3：Lease fencing token（{"worker_id": str, "generation": int}），
+    # 由 Worker 经 Runner 注入初始 state，commit 节点传给 MemoryService 做 CAS
+    fencing: dict[str, Any]
     route: str
     source_bundle: dict[str, Any]
     candidates: list[dict[str, Any]]

@@ -135,7 +135,7 @@ async def test_fail_after_version_write_before_transaction_leaves_only_orphans(
     """注入点 2：版本写入后、事务前失败 → 只留下孤立版本文件，DB 无指针。"""
     plans = _plans()
 
-    async def broken_mark(operation_id: UUID) -> None:
+    async def broken_mark(operation_id: UUID, **kwargs: Any) -> None:
         raise RuntimeError("injected: pre-transaction failure")
 
     monkeypatch.setattr(memory_service, "_mark_commit_started", broken_mark)

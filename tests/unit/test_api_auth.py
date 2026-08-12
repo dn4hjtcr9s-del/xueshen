@@ -440,6 +440,110 @@ async def test_user_token_without_delegation_unaffected(tmp_path: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 严格 claims schema（评审二轮 #4）：缺失/错型/未知值整体拒绝，不静默修正
+# ---------------------------------------------------------------------------
+
+
+def _prod_adapter(tmp_path: Any, public_pem: str) -> ProductionJwtAuthAdapter:
+    return ProductionJwtAuthAdapter(
+        settings=_prod_settings(tmp_path, public_pem),
+        identity_resolver=_MappingResolver({"external-subject-1": USER_ID}),
+    )
+
+
+async def _expect_rejected(
+    tmp_path: Any, private_pem: str, public_pem: str, **claims: Any
+) -> AuthError:
+    adapter = _prod_adapter(tmp_path, public_pem)
+    token = _make_token(private_pem, **claims)
+    with pytest.raises(AuthError) as exc_info:
+        await adapter.authenticate({"authorization": f"Bearer {token}"})
+    return exc_info.value
+
+
+async def test_missing_actor_type_rejected(tmp_path: Any) -> None:
+    private_pem, public_pem = _rsa_keys()
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            "iss": "https://auth.example",
+            "aud": "memory-api",
+            "sub": "external-subject-1",
+            "scopes": ["memory:read"],
+            "iat": now,
+            "exp": now + 240,
+            "jti": uuid4().hex,
+        },
+        private_pem,
+        algorithm="RS256",
+    )
+    adapter = _prod_adapter(tmp_path, public_pem)
+    with pytest.raises(AuthError) as exc_info:
+        await adapter.authenticate({"authorization": f"Bearer {token}"})
+    assert exc_info.value.code == "AUTH_REQUIRED"
+
+
+async def test_missing_scopes_rejected(tmp_path: Any) -> None:
+    private_pem, public_pem = _rsa_keys()
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            "iss": "https://auth.example",
+            "aud": "memory-api",
+            "sub": "external-subject-1",
+            "actor_type": "user",
+            "iat": now,
+            "exp": now + 240,
+            "jti": uuid4().hex,
+        },
+        private_pem,
+        algorithm="RS256",
+    )
+    adapter = _prod_adapter(tmp_path, public_pem)
+    with pytest.raises(AuthError) as exc_info:
+        await adapter.authenticate({"authorization": f"Bearer {token}"})
+    assert exc_info.value.code == "AUTH_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    "bad_scopes",
+    ["memory:read", {"scope": "memory:read"}, ["memory:read", 42], None],
+)
+async def test_malformed_scopes_rejected(tmp_path: Any, bad_scopes: Any) -> None:
+    """scopes 为字符串/对象/含非字符串/非数组时整体拒绝（不得按字符遍历或静默过滤）。"""
+    private_pem, public_pem = _rsa_keys()
+    exc = await _expect_rejected(tmp_path, private_pem, public_pem, scopes=bad_scopes)
+    assert exc.code == "AUTH_REQUIRED"
+
+
+async def test_unknown_scope_rejected_not_filtered(tmp_path: Any) -> None:
+    """未知 scope 拒绝整个 token，而不是静默丢弃后继续。"""
+    private_pem, public_pem = _rsa_keys()
+    exc = await _expect_rejected(
+        tmp_path, private_pem, public_pem, scopes=["memory:read", "god:mode"]
+    )
+    assert exc.code == "AUTH_REQUIRED"
+    assert "未知 scope" in str(exc)
+
+
+@pytest.mark.parametrize("actor", ["user", "system", "admin"])
+async def test_non_agent_token_with_delegated_sub_rejected(tmp_path: Any, actor: str) -> None:
+    """非 Agent token 携带 delegated_sub 一律拒绝（委托 claim 与 actor 必须匹配）。"""
+    private_pem, public_pem = _rsa_keys()
+    exc = await _expect_rejected(
+        tmp_path, private_pem, public_pem, actor_type=actor, delegated_sub="external-subject-1"
+    )
+    assert exc.code == "AUTH_REQUIRED"
+    assert "delegated_sub" in str(exc)
+
+
+async def test_unknown_actor_type_rejected(tmp_path: Any) -> None:
+    private_pem, public_pem = _rsa_keys()
+    exc = await _expect_rejected(tmp_path, private_pem, public_pem, actor_type="superuser")
+    assert exc.code == "AUTH_REQUIRED"
+
+
+# ---------------------------------------------------------------------------
 # DevelopmentAuthAdapter 细节（§18.1）
 # ---------------------------------------------------------------------------
 

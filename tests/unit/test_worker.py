@@ -65,7 +65,9 @@ class _FakeRunner:
         self.delay = delay
         self.calls: list[MemoryOperation] = []
 
-    async def run(self, operation: MemoryOperation) -> MemoryOperationResult:
+    async def run(
+        self, operation: MemoryOperation, *, fencing: dict[str, Any] | None = None
+    ) -> MemoryOperationResult:
         self.calls.append(operation)
         if self.delay:
             import asyncio
@@ -104,8 +106,9 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
     async def fake_cancel_requested(session: Any, operation_id: Any) -> bool:
         return rec.cancel_requested
 
-    async def fake_clear_commit_started(session: Any, *, operation_id: Any) -> None:
+    async def fake_clear_commit_started(session: Any, *, operation_id: Any, **kwargs: Any) -> bool:
         rec.cleared_commit_marker.append(operation_id)
+        return True
 
     monkeypatch.setattr(ops_repo, "complete_operation", fake_complete)
     monkeypatch.setattr(ops_repo, "reschedule_operation", fake_reschedule)

@@ -147,15 +147,31 @@ class InMemoryOperationStore:
         row["updated_at"] = datetime.now(UTC)
         return row
 
-    async def mark_commit_started(self, session: Any, *, operation_id: UUID) -> None:
+    async def mark_commit_started(
+        self,
+        session: Any,
+        *,
+        operation_id: UUID,
+        expected_worker: str | None = None,
+        expected_generation: int | None = None,
+    ) -> bool:
         row = self.rows.get(operation_id)
         if row is not None and row["status"] == "running":
             row["commit_started_at"] = datetime.now(UTC)
+        return True
 
-    async def clear_commit_started(self, session: Any, *, operation_id: UUID) -> None:
+    async def clear_commit_started(
+        self,
+        session: Any,
+        *,
+        operation_id: UUID,
+        expected_worker: str | None = None,
+        expected_generation: int | None = None,
+    ) -> bool:
         row = self.rows.get(operation_id)
         if row is not None:
             row["commit_started_at"] = None
+        return True
 
     async def get_cancel_requested(self, session: Any, operation_id: UUID) -> bool:
         row = self.rows.get(operation_id)
@@ -239,7 +255,9 @@ class FakeRunner:
         self.result_status = result_status
         self.calls: list[MemoryOperation] = []
 
-    async def run(self, operation: MemoryOperation) -> MemoryOperationResult:
+    async def run(
+        self, operation: MemoryOperation, *, fencing: dict[str, Any] | None = None
+    ) -> MemoryOperationResult:
         self.calls.append(operation)
         if self.delay:
             await asyncio.sleep(self.delay)
