@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import time
 from dataclasses import dataclass
 from typing import Protocol
@@ -39,11 +40,34 @@ class IdentityMappingResolver(Protocol):
 
 
 class AuthVerifier(Protocol):
-    async def authenticate(self, headers: dict[str, str]) -> AuthContext: ...
+    async def authenticate(
+        self, headers: dict[str, str], *, client_host: str | None = None
+    ) -> AuthContext: ...
 
 
 def _header(headers: dict[str, str], name: str) -> str | None:
     return headers.get(name.lower())
+
+
+# ASGI 测试客户端（httpx ASGITransport）的默认 client host；进程内测试视为可信
+_TESTCLIENT_HOST = "testclient"
+
+
+def _is_dev_auth_source_allowed(client_host: str | None) -> bool:
+    """Dev Auth 来源限制（§18.1 / 评审 #9）：仅 loopback 或 Compose/RFC1918 内网。
+
+    拿不到客户端地址时 fail-closed 拒绝；ASGI 进程内测试客户端显式放行。
+    """
+    if client_host is None:
+        return False
+    if client_host == _TESTCLIENT_HOST:
+        return True
+    try:
+        ip = ipaddress.ip_address(client_host)
+    except ValueError:
+        return False
+    # is_private 覆盖 RFC1918（含 Docker 网桥 172.16/12）与链路本地地址
+    return ip.is_loopback or ip.is_private
 
 
 @dataclass
@@ -52,9 +76,17 @@ class DevelopmentAuthAdapter:
 
     settings: Settings
 
-    async def authenticate(self, headers: dict[str, str]) -> AuthContext:
+    async def authenticate(
+        self, headers: dict[str, str], *, client_host: str | None = None
+    ) -> AuthContext:
         if not (self.settings.is_development and self.settings.dev_auth_enabled):
             raise AuthError("AUTH_REQUIRED", "开发身份适配器未启用")
+        if not _is_dev_auth_source_allowed(client_host):
+            raise AuthError(
+                "AUTH_FORBIDDEN",
+                "Dev Auth 仅允许 loopback / 内网来源",
+                forbidden=True,
+            )
         raw_user = _header(headers, "x-dev-user-id")
         if not raw_user:
             raise AuthError("AUTH_REQUIRED", "缺少 X-Dev-User-Id")
@@ -102,7 +134,10 @@ class ProductionJwtAuthAdapter:
     settings: Settings
     identity_resolver: IdentityMappingResolver
 
-    async def authenticate(self, headers: dict[str, str]) -> AuthContext:
+    async def authenticate(
+        self, headers: dict[str, str], *, client_host: str | None = None
+    ) -> AuthContext:
+        # client_host 仅用于 Dev Auth 来源限制，生产 JWT 不依赖来源地址
         authorization = _header(headers, "authorization")
         if not authorization or not authorization.startswith("Bearer "):
             raise AuthError("AUTH_REQUIRED", "缺少 Bearer token")
@@ -172,9 +207,11 @@ class CompositeAuthVerifier:
     dev_adapter: DevelopmentAuthAdapter
     prod_adapter: ProductionJwtAuthAdapter
 
-    async def authenticate(self, headers: dict[str, str]) -> AuthContext:
+    async def authenticate(
+        self, headers: dict[str, str], *, client_host: str | None = None
+    ) -> AuthContext:
         if self.settings.is_development and self.settings.dev_auth_enabled:
             if _header(headers, "authorization"):
-                return await self.prod_adapter.authenticate(headers)
-            return await self.dev_adapter.authenticate(headers)
-        return await self.prod_adapter.authenticate(headers)
+                return await self.prod_adapter.authenticate(headers, client_host=client_host)
+            return await self.dev_adapter.authenticate(headers, client_host=client_host)
+        return await self.prod_adapter.authenticate(headers, client_host=client_host)

@@ -148,6 +148,8 @@ async def get_auth_context(request: Request) -> AuthContext:
     settings = get_settings(request)
     runtime = get_runtime(request)
     headers = {k.lower(): v for k, v in request.headers.items()}
+    # Dev Auth 来源限制（§18.1 / 评审 #9）：把客户端地址传给认证适配器
+    client_host = request.client.host if request.client else None
     async with runtime.session_factory() as session:
         resolver = IdentityMappingRepository(session)
         verifier = CompositeAuthVerifier(
@@ -155,7 +157,7 @@ async def get_auth_context(request: Request) -> AuthContext:
             dev_adapter=DevelopmentAuthAdapter(settings),
             prod_adapter=ProductionJwtAuthAdapter(settings=settings, identity_resolver=resolver),
         )
-        auth = await verifier.authenticate(headers)
+        auth = await verifier.authenticate(headers, client_host=client_host)
         raw_grant = headers.get(BREAK_GLASS_HEADER)
         if raw_grant is None:
             return auth

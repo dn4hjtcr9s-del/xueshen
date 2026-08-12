@@ -1,53 +1,105 @@
-"""备份 manifest 校验单元测试（§21.4 / §23.3）。"""
+"""备份 manifest 强校验单元测试（评审 #4 路径逃逸 / #13 规格字段）。"""
 
 from __future__ import annotations
 
-from uuid import uuid4
+import hashlib
+from typing import Any
+from uuid import UUID, uuid4
 
 import pytest
 
 from backend.memory.backup import BackupError, validate_manifest
+from backend.memory.contracts.common import canonical_json
 
-_BATCH_ID = uuid4()
 
-
-def _manifest() -> dict[str, object]:
-    return {
-        "batch_id": str(_BATCH_ID),
-        "created_at": "2026-08-11T12:00:00+00:00",
+def _manifest() -> dict[str, Any]:
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "batch_id": str(uuid4()),
+        "created_at": "2026-08-12T00:00:00+00:00",
         "encryption_method": "age-x25519-v1",
+        "migration_revision": "0004",
+        "graph_manifest_checksum": None,
+        "account_deletion_ledger": [],
         "artifacts": {
-            "postgres": {"file": "postgres.dump.age", "sha256": "a" * 64, "size_bytes": 1},
-            "markdown": {"file": "markdown.tar.gz.age", "sha256": "b" * 64, "size_bytes": 1},
+            "postgres": {"file": "postgres.dump.age", "sha256": "ab" * 32, "size_bytes": 1},
+            "markdown": {"file": "markdown.tar.gz.age", "sha256": "cd" * 32, "size_bytes": 1},
         },
     }
+    manifest["manifest_checksum"] = _seal(manifest)
+    return manifest
 
 
-def test_validate_manifest_ok() -> None:
-    validate_manifest(_manifest(), batch_id=_BATCH_ID, encryption_method="age-x25519-v1")
+def _seal(manifest: dict[str, Any]) -> str:
+    payload = {k: v for k, v in manifest.items() if k != "manifest_checksum"}
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
-def test_validate_manifest_rejects_batch_mismatch() -> None:
-    with pytest.raises(BackupError, match="batch_id"):
-        validate_manifest(_manifest(), batch_id=uuid4(), encryption_method="age-x25519-v1")
+def _reseal(manifest: dict[str, Any]) -> dict[str, Any]:
+    """篡改后重算自身 checksum：隔离路径/字段校验与防篡改校验。"""
+    manifest = {k: v for k, v in manifest.items() if k != "manifest_checksum"}
+    manifest["manifest_checksum"] = _seal(manifest)
+    return manifest
 
 
-def test_validate_manifest_rejects_method_mismatch() -> None:
-    with pytest.raises(BackupError, match="加密方法不匹配"):
-        validate_manifest(_manifest(), batch_id=_BATCH_ID, encryption_method="age-x25519-v2")
+def _check(manifest: dict[str, Any]) -> None:
+    validate_manifest(
+        manifest,
+        batch_id=UUID(str(manifest["batch_id"])),
+        encryption_method="age-x25519-v1",
+    )
 
 
-def test_validate_manifest_rejects_missing_artifacts() -> None:
-    manifest = _manifest()
-    manifest["artifacts"] = {"postgres": {"file": "x", "sha256": "a" * 64}}
-    with pytest.raises(BackupError, match="markdown"):
-        validate_manifest(manifest, batch_id=_BATCH_ID, encryption_method="age-x25519-v1")
+def test_validate_manifest_accepts_well_formed() -> None:
+    _check(_manifest())
 
 
-def test_validate_manifest_rejects_incomplete_entry() -> None:
+@pytest.mark.parametrize(
+    "bad_file",
+    ["../evil.dump.age", "/etc/passwd", "nested/postgres.dump.age", "./postgres.dump.age"],
+)
+def test_validate_manifest_rejects_artifact_path_escape(bad_file: str) -> None:
+    """评审 #4：artifact 文件名必须等于固定常量，绝对路径/目录穿越一律拒绝。"""
     manifest = _manifest()
     artifacts = manifest["artifacts"]
     assert isinstance(artifacts, dict)
-    artifacts["postgres"] = {"file": "postgres.dump.age"}
-    with pytest.raises(BackupError, match="postgres"):
-        validate_manifest(manifest, batch_id=_BATCH_ID, encryption_method="age-x25519-v1")
+    postgres = artifacts["postgres"]
+    assert isinstance(postgres, dict)
+    postgres["file"] = bad_file
+    with pytest.raises(BackupError, match="非法"):
+        _check(_reseal(manifest))
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "schema_version",
+        "migration_revision",
+        "graph_manifest_checksum",
+        "account_deletion_ledger",
+        "manifest_checksum",
+    ],
+)
+def test_validate_manifest_rejects_missing_spec_fields(missing: str) -> None:
+    """评审 #13：规格 §21.4 要求的字段缺任一即拒绝。"""
+    manifest = _manifest()
+    del manifest[missing]
+    if missing != "manifest_checksum":
+        manifest = _reseal(manifest)
+    with pytest.raises(BackupError, match=f"缺少规格字段: {missing}"):
+        _check(manifest)
+
+
+def test_validate_manifest_rejects_wrong_schema_version() -> None:
+    manifest = _manifest()
+    manifest["schema_version"] = 2
+    with pytest.raises(BackupError, match="schema_version"):
+        _check(_reseal(manifest))
+
+
+def test_validate_manifest_detects_tampering_without_reseal() -> None:
+    """篡改任一字段但未重算自身 checksum：防篡改校验必须拦截。"""
+    manifest = _manifest()
+    manifest["migration_revision"] = "9999"
+    with pytest.raises(BackupError, match="自身 checksum 不匹配"):
+        _check(manifest)

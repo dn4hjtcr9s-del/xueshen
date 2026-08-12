@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ConversationEvidence(BaseModel):
@@ -93,24 +93,45 @@ class SourceBundle(BaseModel):
     deleted_refs: list[str] = Field(default_factory=list)
     total_utf8_bytes: int = Field(ge=0, le=SOURCE_BUNDLE_MAX_BYTES)
 
+    @model_validator(mode="after")
+    def recompute_total_utf8_bytes(self) -> SourceBundle:
+        """不信任声明值：按去重后内容重算 total_utf8_bytes（评审 #12）。
+
+        直接构造 / model_validate 传入的声明值必须与真实重算值一致，
+        防止伪报小值绕过 80KB 上限。真实大小超过上限时，声明值必然
+        与重算值不一致（声明值本身被 Field 限制在 cap 内），同样拒绝。
+        """
+        actual = _dedup_utf8_bytes(self.items)
+        if actual != self.total_utf8_bytes:
+            raise ValueError(
+                f"total_utf8_bytes 声明值 {self.total_utf8_bytes} 与重算值 {actual} 不一致"
+            )
+        return self
+
     @classmethod
     def from_items(
         cls, items: list[SourceItem], deleted_refs: list[str] | None = None
     ) -> SourceBundle:
         """按去重后内容真实计算 total_utf8_bytes（§17.4 裁决 21）。"""
-        seen: set[bytes] = set()
-        total = 0
-        for item in items:
-            encoded = item.content.encode("utf-8")
-            if encoded in seen:
-                continue
-            seen.add(encoded)
-            total += len(encoded)
+        total = _dedup_utf8_bytes(items)
         if total > SOURCE_BUNDLE_MAX_BYTES:
             from backend.memory.contracts.errors import SourceTooLargeError
 
             raise SourceTooLargeError(f"SourceBundle 超过 {SOURCE_BUNDLE_MAX_BYTES} bytes")
         return cls(items=items, deleted_refs=deleted_refs or [], total_utf8_bytes=total)
+
+
+def _dedup_utf8_bytes(items: list[SourceItem]) -> int:
+    """去重后 UTF-8 内容总字节数（§17.4 裁决 21）。"""
+    seen: set[bytes] = set()
+    total = 0
+    for item in items:
+        encoded = item.content.encode("utf-8")
+        if encoded in seen:
+            continue
+        seen.add(encoded)
+        total += len(encoded)
+    return total
 
 
 # ---------------------------------------------------------------------------

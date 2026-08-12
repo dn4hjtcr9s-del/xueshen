@@ -40,6 +40,16 @@ POSTGRES_DUMP_NAME = "postgres.dump"
 MARKDOWN_TAR_NAME = "markdown.tar.gz"
 MANIFEST_NAME = "manifest.json"
 
+# 备份 manifest 的格式版本（§21.4 manifest.schema_version）。
+BACKUP_MANIFEST_SCHEMA_VERSION = 1
+
+# manifest artifacts 条目只允许这两个固定相对文件名（评审 #4：路径不得逃逸 BACKUP_ROOT，
+# 从源头杜绝 manifest 携带绝对路径或 ../ 注入）。
+EXPECTED_ARTIFACT_FILES = {
+    "postgres": f"{POSTGRES_DUMP_NAME}.age",
+    "markdown": f"{MARKDOWN_TAR_NAME}.age",
+}
+
 
 class BackupError(Exception):
     """备份/恢复失败；message 写入 backup_runs.error_summary（受控摘要）。"""
@@ -89,11 +99,36 @@ async def _run_command(*args: str, stdout_path: Path | None = None) -> None:
 def validate_manifest(
     manifest: dict[str, object], *, batch_id: UUID, encryption_method: str
 ) -> None:
-    """恢复/验证前的 manifest 校验（§21.4）：批次、加密方法、产物条目。"""
+    """恢复/验证前的 manifest 校验（§21.4）：批次、加密方法、产物条目、规格字段。
+
+    规格 §21.4 要求 manifest 至少包含 schema_version / migration revision /
+    图谱 manifest checksum / 账号删除 watermark / manifest 自身 checksum 等字段；
+    缺任一字段即拒绝（评审 #13）。artifacts 条目文件名必须等于固定常量，
+    不得携带绝对路径或目录穿越（评审 #4）。
+    """
     if manifest.get("batch_id") != str(batch_id):
         raise BackupError("manifest batch_id 与 backup_runs 不一致")
     if manifest.get("encryption_method") != encryption_method:
         raise BackupError(f"加密方法不匹配: manifest={manifest.get('encryption_method')}")
+    for key in (
+        "schema_version",
+        "migration_revision",
+        "graph_manifest_checksum",
+        "account_deletion_ledger",
+        "manifest_checksum",
+    ):
+        if key not in manifest:
+            raise BackupError(f"manifest 缺少规格字段: {key}")
+    if manifest.get("schema_version") != BACKUP_MANIFEST_SCHEMA_VERSION:
+        raise BackupError(f"不支持的 manifest schema_version: {manifest.get('schema_version')}")
+    # manifest 自身 checksum：对其余字段的 canonical JSON 重算比对（防篡改）
+    declared = manifest.get("manifest_checksum")
+    from backend.memory.contracts.common import canonical_json
+
+    payload = {k: v for k, v in manifest.items() if k != "manifest_checksum"}
+    actual = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+    if declared != actual:
+        raise BackupError("manifest 自身 checksum 不匹配")
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         raise BackupError("manifest 缺少 artifacts")
@@ -101,6 +136,10 @@ def validate_manifest(
         entry = artifacts.get(key)
         if not isinstance(entry, dict) or not entry.get("sha256") or not entry.get("file"):
             raise BackupError(f"manifest artifacts.{key} 不完整")
+        if entry["file"] != EXPECTED_ARTIFACT_FILES[key]:
+            raise BackupError(
+                f"manifest artifacts.{key}.file 非法: {entry['file']}（仅允许固定相对文件名）"
+            )
 
 
 def _build_manifest(
@@ -109,28 +148,42 @@ def _build_manifest(
     settings: Settings,
     postgres_plain: Path,
     markdown_plain: Path,
+    migration_revision: str | None,
+    graph_manifest_checksum: str | None,
     deletion_ledger: list[dict[str, Any]] | None = None,
 ) -> dict[str, object]:
-    return {
+    from backend.memory.contracts.common import canonical_json
+
+    manifest: dict[str, object] = {
+        "schema_version": BACKUP_MANIFEST_SCHEMA_VERSION,
         "batch_id": str(batch_id),
         "created_at": datetime.now(UTC).isoformat(),
         "encryption_method": settings.backup_encryption_method,
+        # 应用 migration revision（§21.4）：备份时 alembic_version.version_num
+        "migration_revision": migration_revision,
+        # 图谱 manifest checksum（§21.4）：最近已应用的知识图谱同步 manifest checksum
+        "graph_manifest_checksum": graph_manifest_checksum,
         # 评审 P0-2/#13：内嵌账号删除 ledger 快照（只含 user_hash 与完成证明），
         # 全新环境灾难恢复时据此重建 ops ledger 并重放 purge。
         "account_deletion_ledger": deletion_ledger or [],
         "artifacts": {
             "postgres": {
-                "file": f"{POSTGRES_DUMP_NAME}.age",
+                "file": EXPECTED_ARTIFACT_FILES["postgres"],
                 "sha256": _sha256(postgres_plain),
                 "size_bytes": postgres_plain.stat().st_size,
             },
             "markdown": {
-                "file": f"{MARKDOWN_TAR_NAME}.age",
+                "file": EXPECTED_ARTIFACT_FILES["markdown"],
                 "sha256": _sha256(markdown_plain),
                 "size_bytes": markdown_plain.stat().st_size,
             },
         },
     }
+    # manifest 自身 checksum（§21.4）：对其余字段 canonical JSON 的 sha256
+    manifest["manifest_checksum"] = hashlib.sha256(
+        canonical_json(manifest).encode("utf-8")
+    ).hexdigest()
+    return manifest
 
 
 def _check_encryption_config(settings: Settings) -> None:
@@ -165,6 +218,61 @@ def _write_manifest_file(manifest_path: Path, manifest: dict[str, object]) -> No
 
 def _storage_non_empty(storage_root: Path) -> bool:
     return storage_root.exists() and any(storage_root.iterdir())
+
+
+async def _current_migration_revision(session: AsyncSession) -> str | None:
+    """备份时的 alembic migration revision（§21.4 manifest 字段）。"""
+    exists = await session.execute(
+        text(
+            "SELECT COUNT(*) FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = 'alembic_version'"
+        )
+    )
+    if int(exists.scalar_one()) == 0:
+        return None
+    row = await session.execute(text("SELECT version_num FROM alembic_version"))
+    return row.scalar_one_or_none()
+
+
+async def _latest_graph_manifest_checksum(session: AsyncSession) -> str | None:
+    """最近已应用的知识图谱同步 manifest checksum（§21.4 manifest 字段）。"""
+    exists = await session.execute(
+        text(
+            "SELECT COUNT(*) FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = 'knowledge_graph_sync_runs'"
+        )
+    )
+    if int(exists.scalar_one()) == 0:
+        return None
+    row = await session.execute(
+        text(
+            "SELECT manifest_checksum FROM knowledge_graph_sync_runs "
+            "WHERE applied = true ORDER BY applied_at DESC LIMIT 1"
+        )
+    )
+    return row.scalar_one_or_none()
+
+
+async def _non_empty_public_tables(session: AsyncSession) -> list[str]:
+    """public schema 中已有数据的表（评审 #3：恢复前非空检查覆盖全部表）。
+
+    alembic_version 只记录 migration 版本，不算用户数据；ops schema 是环境
+    本地状态（账号删除 ledger），不属于 public，不在检查范围内。
+    """
+    rows = await session.execute(
+        text(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name <> 'alembic_version' "
+            "ORDER BY table_name"
+        )
+    )
+    non_empty: list[str] = []
+    for (table_name,) in rows.all():
+        # 表名来自 information_schema，非外部输入；双引号包裹防注入
+        count = await session.execute(text(f'SELECT COUNT(*) FROM "{table_name}"'))
+        if int(count.scalar_one()) > 0:
+            non_empty.append(str(table_name))
+    return non_empty
 
 
 def _extract_markdown(markdown_plain: Path, storage_root: Path, force: bool, work: Path) -> None:
@@ -233,12 +341,16 @@ async def create_backup(
 
         async with session_factory() as session:
             ledger_snapshot = await deletion_repo.list_ledger_entries(session)
+            migration_revision = await _current_migration_revision(session)
+            graph_manifest_checksum = await _latest_graph_manifest_checksum(session)
         manifest = await asyncio.to_thread(
             _build_manifest,
             batch_id=batch_id,
             settings=settings,
             postgres_plain=postgres_plain,
             markdown_plain=markdown_plain,
+            migration_revision=migration_revision,
+            graph_manifest_checksum=graph_manifest_checksum,
             deletion_ledger=[
                 {
                     "account_deletion_id": str(entry["account_deletion_id"]),
@@ -416,23 +528,10 @@ async def restore_backup(
             pre_restore_ledger = await deletion_repo.list_ledger_entries(session)
 
     # 目标环境检查：数据库与存储目录必须为空，除非 --force
+    # 评审 #3：非空检查覆盖 public schema 全部表（不含 alembic_version），
+    # 防止只在两张表为空时误判为空目标而覆盖其他已有数据。
     async with session_factory() as session:
-        tables = await session.execute(
-            text(
-                "SELECT COUNT(*) FROM information_schema.tables "
-                "WHERE table_schema = 'public' AND table_name IN "
-                "('memory_documents', 'memory_operations')"
-            )
-        )
-        counts = {"docs": 0, "ops": 0}
-        if int(tables.scalar_one()) == 2:
-            row = await session.execute(
-                text(
-                    "SELECT (SELECT COUNT(*) FROM memory_documents) AS docs, "
-                    "(SELECT COUNT(*) FROM memory_operations) AS ops"
-                )
-            )
-            counts = dict(row.mappings().one())
+        non_empty_tables = await _non_empty_public_tables(session)
         # backup_runs 行存在时交叉校验（灾难恢复新库可能还没有该行）
         run: dict[str, Any] | None = None
         runs_table = await session.execute(
@@ -445,11 +544,10 @@ async def restore_backup(
             run = await backup_repo.get_run(session, batch_id)
     storage_root = Path(settings.memory_storage_root)
     if not force and (
-        counts["docs"] > 0
-        or counts["ops"] > 0
-        or await asyncio.to_thread(_storage_non_empty, storage_root)
+        non_empty_tables or await asyncio.to_thread(_storage_non_empty, storage_root)
     ):
-        raise BackupError("目标非空（数据库或存储目录已有数据）；覆盖现有环境必须显式 --force")
+        detail = f"非空表: {', '.join(non_empty_tables)}" if non_empty_tables else "存储目录非空"
+        raise BackupError(f"目标非空（{detail}）；覆盖现有环境必须显式 --force")
     if run is not None:
         if run["status"] != "succeeded":
             raise BackupError(f"批次状态非 succeeded: {run['status']}")
@@ -466,13 +564,19 @@ async def restore_backup(
         artifacts = manifest["artifacts"]
         assert isinstance(artifacts, dict)
         plain_paths: dict[str, Path] = {}
+        backup_root_resolved = backup_dir.resolve()
         for key in ("postgres", "markdown"):
             entry = artifacts[key]
             assert isinstance(entry, dict)
+            # 防御纵深（评审 #4）：validate_manifest 已强制固定文件名，
+            # 这里再确认解析后的绝对路径不逃逸批次目录
+            artifact_path = (backup_dir / str(entry["file"])).resolve()
+            if not artifact_path.is_relative_to(backup_root_resolved):
+                raise BackupError(f"artifact 路径逃逸 BACKUP_ROOT: {entry['file']}")
             decrypted = work / str(entry["file"]).removesuffix(".age")
             await _decrypt_and_check(
                 identity=identity,
-                artifact_path=backup_dir / str(entry["file"]),
+                artifact_path=artifact_path,
                 decrypted=decrypted,
                 expected_sha256=str(entry["sha256"]),
                 label=str(key),

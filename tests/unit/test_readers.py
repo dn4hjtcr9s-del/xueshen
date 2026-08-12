@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from backend.memory.contracts.errors import SourceDeletedError, SourceTooLargeError
 from backend.memory.contracts.evidence import (
+    SOURCE_BUNDLE_MAX_BYTES,
     SourceBundle,
     SourceDeletedEvent,
     SourceItem,
@@ -71,6 +72,34 @@ def test_source_bundle_too_large_raises() -> None:
     items = [item(f"r{i}", f"{i}" + "x" * 19_999) for i in range(5)]
     with pytest.raises(SourceTooLargeError):
         SourceBundle.from_items(items)
+
+
+def test_source_bundle_rejects_mismatched_declared_bytes() -> None:
+    # 评审 #12：直接构造/model_validate 不信任声明值，按去重内容重算
+    good = item("m1", "真实内容")
+    actual = len("真实内容".encode())
+    with pytest.raises(ValidationError, match="不一致"):
+        SourceBundle(items=[good], total_utf8_bytes=actual - 1)
+    with pytest.raises(ValidationError, match="不一致"):
+        SourceBundle(items=[good], total_utf8_bytes=actual + 1)
+    with pytest.raises(ValidationError, match="不一致"):
+        SourceBundle.model_validate(
+            {
+                "items": [good.model_dump(mode="json")],
+                "deleted_refs": [],
+                "total_utf8_bytes": 0,
+            }
+        )
+    ok = SourceBundle(items=[good], total_utf8_bytes=actual)
+    assert ok.total_utf8_bytes == actual
+
+
+def test_source_bundle_rejects_oversize_with_undersold_declaration() -> None:
+    # 评审 #12：伪报小值的大 bundle 被拒绝——声明值受 cap 约束，
+    # 真实字节数超限必然与声明值不一致
+    items = [item(f"r{i}", f"{i}" + "x" * 19_999) for i in range(5)]
+    with pytest.raises(ValidationError, match="不一致"):
+        SourceBundle(items=items, total_utf8_bytes=SOURCE_BUNDLE_MAX_BYTES)
 
 
 def test_source_item_metadata_limits() -> None:

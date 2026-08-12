@@ -34,7 +34,8 @@ services:
       OPENAI_MEMORY_MODEL: ${OPENAI_MEMORY_MODEL:-${DEEPSEEK_MODEL:-gpt-5.6-luna}}
       OPENAI_REASONING_EFFORT: ${OPENAI_REASONING_EFFORT:-none}
     ports:
-      - "8001:8000"
+      # 评审 #9：仅绑定 loopback，Dev Auth 不暴露到局域网
+      - "127.0.0.1:8001:8000"
     volumes:
       - memory-data:/data/memory
       - ./knowledge_graph:/app/knowledge_graph:ro
@@ -103,7 +104,8 @@ services:
     build:
       context: ./frontend
     ports:
-      - "4173:4173"
+      # 评审 #9：仅绑定 loopback
+      - "127.0.0.1:4173:4173"
     depends_on:
       - memory-api
 

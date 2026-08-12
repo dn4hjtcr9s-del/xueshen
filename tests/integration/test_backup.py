@@ -24,6 +24,7 @@ from backend.memory.backup import (
     BackupError,
     create_backup,
     restore_backup,
+    validate_manifest,
     verify_backup_restore,
 )
 from backend.memory.persistence import backup_runs as backup_repo
@@ -170,6 +171,62 @@ async def test_verify_rejects_unknown_batch(
     backup_settings = _backup_settings(settings, tmp_path, age_keypair)
     with pytest.raises(BackupError, match="backup_runs 不存在"):
         await verify_backup_restore(backup_settings, session_factory, batch_id=uuid4())
+
+
+async def test_restore_rejects_non_empty_target_without_force(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    age_keypair: tuple[str, str],
+) -> None:
+    """评审 #3：目标库任意 public 表非空（不止 memory_documents/operations）即拒绝。
+
+    create_backup 本身已写入 backup_runs 行——恢复检查必须把它也算作非空，
+    且在 DROP/写入任何数据之前失败。
+    """
+    backup_settings = _backup_settings(settings, tmp_path, age_keypair)
+    batch_id = await create_backup(backup_settings, session_factory)
+    with pytest.raises(BackupError, match="目标非空"):
+        await restore_backup(backup_settings, session_factory, batch_id=batch_id)
+
+
+async def test_manifest_contains_spec_fields(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    age_keypair: tuple[str, str],
+) -> None:
+    """评审 #13 / §21.4：manifest 包含 schema_version、migration revision、
+    图谱 manifest checksum、账号删除 watermark 与自身 checksum，且通过强校验。"""
+    import hashlib
+    import json
+
+    from backend.memory.contracts.common import canonical_json
+
+    backup_settings = _backup_settings(settings, tmp_path, age_keypair)
+    batch_id = await create_backup(backup_settings, session_factory)
+    manifest = json.loads(
+        (Path(backup_settings.backup_root) / str(batch_id) / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manifest["schema_version"] == 1
+    async with session_factory() as session:
+        revision = (
+            await session.execute(text("SELECT version_num FROM alembic_version"))
+        ).scalar_one()
+    assert manifest["migration_revision"] == revision
+    assert "graph_manifest_checksum" in manifest
+    assert isinstance(manifest["account_deletion_ledger"], list)
+    payload = {k: v for k, v in manifest.items() if k != "manifest_checksum"}
+    expected = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+    assert manifest["manifest_checksum"] == expected
+    # 强校验接受合法 manifest（恢复/验证共用同一入口）
+    validate_manifest(
+        manifest,
+        batch_id=batch_id,
+        encryption_method=backup_settings.backup_encryption_method,
+    )
 
 
 async def test_restore_replays_completed_account_deletion(

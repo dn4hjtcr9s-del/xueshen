@@ -345,11 +345,37 @@ async def test_dev_adapter_forces_user_actor_and_default_scopes(
     tmp_path: Any, monkeypatch: Any
 ) -> None:
     adapter = DevelopmentAuthAdapter(_settings(tmp_path))
-    context = await adapter.authenticate({"x-dev-user-id": str(USER_ID)})
+    context = await adapter.authenticate({"x-dev-user-id": str(USER_ID)}, client_host="127.0.0.1")
     assert context.actor_type == "user"
     assert context.has_scope("memory:read")
     assert not context.has_scope("memory:maintenance")
     assert not context.has_scope("memory:break_glass")
+
+
+# 评审 #9：Dev Auth 来源限制（§18.1 只能从 loopback/Compose 内网进入）
+
+
+@pytest.mark.parametrize(
+    "client_host",
+    ["127.0.0.1", "::1", "10.0.0.5", "172.18.0.2", "192.168.1.10", "testclient"],
+)
+async def test_dev_adapter_allows_loopback_and_private_sources(
+    tmp_path: Any, client_host: str
+) -> None:
+    adapter = DevelopmentAuthAdapter(_settings(tmp_path))
+    context = await adapter.authenticate({"x-dev-user-id": str(USER_ID)}, client_host=client_host)
+    assert context.user_id == USER_ID
+
+
+@pytest.mark.parametrize("client_host", [None, "8.8.8.8", "1.2.3.4", "not-an-ip"])
+async def test_dev_adapter_rejects_external_or_unknown_sources(
+    tmp_path: Any, client_host: Any
+) -> None:
+    adapter = DevelopmentAuthAdapter(_settings(tmp_path))
+    with pytest.raises(AuthError, match="loopback") as exc_info:
+        await adapter.authenticate({"x-dev-user-id": str(USER_ID)}, client_host=client_host)
+    assert exc_info.value.code == "AUTH_FORBIDDEN"
+    assert exc_info.value.forbidden is True
 
 
 async def test_dev_adapter_rejected_in_production(tmp_path: Any, monkeypatch: Any) -> None:
