@@ -233,10 +233,28 @@ async def list_expired_tombstones(
         text(
             "SELECT * FROM memory_documents "
             "WHERE deleted_at IS NOT NULL AND tombstone_until <= :now "
-            "AND (:cursor IS NULL OR (user_id::text || ':' || memory_id) > :cursor) "
+            "AND (CAST(:cursor AS text) IS NULL "
+            "OR (user_id::text || ':' || memory_id) > CAST(:cursor AS text)) "
             "ORDER BY user_id, memory_id LIMIT :batch_size"
         ),
         {"now": now, "batch_size": batch_size, "cursor": cursor},
+    )
+    return [dict(r) for r in result.mappings().all()]
+
+
+async def list_active_documents_page(
+    session: AsyncSession, *, batch_size: int, cursor: str | None = None
+) -> list[dict[str, Any]]:
+    """verify_checksums 的全局有界分页扫描：仅活动文档，cursor 为 "user_id:memory_id"。"""
+    result = await session.execute(
+        text(
+            "SELECT * FROM memory_documents "
+            "WHERE deleted_at IS NULL AND active_version IS NOT NULL "
+            "AND (CAST(:cursor AS text) IS NULL "
+            "OR (user_id::text || ':' || memory_id) > CAST(:cursor AS text)) "
+            "ORDER BY user_id, memory_id LIMIT :batch_size"
+        ),
+        {"batch_size": batch_size, "cursor": cursor},
     )
     return [dict(r) for r in result.mappings().all()]
 

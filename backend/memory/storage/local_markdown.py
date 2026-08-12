@@ -130,6 +130,13 @@ class LocalMarkdownStore:
         path = self._abs(user_id, f"current/{logical_path_for(memory_id)}")
         await asyncio.to_thread(self._atomic_write, path, content)
 
+    async def read_current(self, *, user_id: UUID, memory_id: str) -> bytes:
+        _validate_memory_id(memory_id)
+        path = self._abs(user_id, f"current/{logical_path_for(memory_id)}")
+        if not path.exists():
+            raise FileNotFoundError(f"current/{logical_path_for(memory_id)}")
+        return await asyncio.to_thread(path.read_bytes)
+
     async def remove_current(self, *, user_id: UUID, memory_id: str) -> None:
         _validate_memory_id(memory_id)
         path = self._abs(user_id, f"current/{logical_path_for(memory_id)}")

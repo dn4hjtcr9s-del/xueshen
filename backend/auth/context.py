@@ -48,6 +48,12 @@ ALL_SCOPES: frozenset[str] = frozenset(
     }
 )
 
+# Agent 委托契约（§18.4，评审 #15）：允许持有的 scope 上限
+AGENT_ALLOWED_SCOPES: frozenset[str] = frozenset(
+    {SCOPE_MEMORY_READ, SCOPE_MEMORY_SUBMIT_EVIDENCE, SCOPE_MEMORY_CONTEXT}
+)
+AGENT_ACTOR_TYPES: tuple[str, ...] = ("conversation_agent", "activity_agent")
+
 # 本地 dev 身份预设 scopes：普通用户能力（§18.1）
 DEV_USER_DEFAULT_SCOPES: frozenset[str] = frozenset(
     {
@@ -73,6 +79,8 @@ class AuthContext:
     scopes: frozenset[str] = field(default_factory=frozenset)
     issuer: str | None = None
     external_subject: str | None = None
+    # Agent 委托契约（§18.4，评审 #15）：服务主体 sub；此时 user_id 为委托用户
+    actor_principal: str | None = None
     break_glass_grant_id: UUID | None = None
 
     def has_scope(self, scope: str) -> bool:

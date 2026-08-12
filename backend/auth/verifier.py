@@ -16,6 +16,8 @@ from uuid import UUID
 import jwt
 
 from backend.auth.context import (
+    AGENT_ACTOR_TYPES,
+    AGENT_ALLOWED_SCOPES,
     ALL_SCOPES,
     DEV_USER_DEFAULT_SCOPES,
     ActorType,
@@ -129,6 +131,8 @@ class ProductionJwtAuthAdapter:
     - JWT 至少包含 iss/aud/sub/actor_type/scopes/iat/exp/jti。
     - token 最长有效期 5 分钟。
     - sub 通过身份映射解析为内部 UUID；映射不存在返回 401。
+    - Agent actor（conversation/activity）必须带 delegated_sub（§18.4，评审 #15）：
+      user_id 取委托用户，actor_principal 保留服务主体 sub，scope 不得越界。
     """
 
     settings: Settings
@@ -187,6 +191,32 @@ class ProductionJwtAuthAdapter:
 
         issuer = str(claims["iss"])
         subject = str(claims["sub"])
+        if actor_raw in AGENT_ACTOR_TYPES:
+            # Agent 委托契约（§18.4，评审 #15）：必须带 delegated_sub 指向委托用户，
+            # scope 不得超过 Agent 允许集；actor_principal 保留服务主体 sub。
+            delegated_sub = claims.get("delegated_sub")
+            if not delegated_sub or not isinstance(delegated_sub, str):
+                raise AuthError("AUTH_REQUIRED", "Agent token 缺少 delegated_sub claim")
+            overreach = scopes - AGENT_ALLOWED_SCOPES
+            if overreach:
+                raise AuthError(
+                    "AUTH_FORBIDDEN",
+                    f"Agent scope 越界: {sorted(overreach)}",
+                    forbidden=True,
+                )
+            user_id = await self.identity_resolver.resolve(
+                issuer=issuer, external_subject=delegated_sub
+            )
+            if user_id is None:
+                raise AuthError("AUTH_REQUIRED", "身份映射不存在")
+            return AuthContext(
+                user_id=user_id,
+                actor_type=actor_raw,
+                scopes=scopes,
+                issuer=issuer,
+                external_subject=delegated_sub,
+                actor_principal=subject,
+            )
         user_id = await self.identity_resolver.resolve(issuer=issuer, external_subject=subject)
         if user_id is None:
             raise AuthError("AUTH_REQUIRED", "身份映射不存在")

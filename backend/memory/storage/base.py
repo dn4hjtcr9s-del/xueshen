@@ -86,6 +86,10 @@ class MarkdownStore(Protocol):
         """tombstone 期间把可恢复正文标记/移动到 quarantine/（§8.3）。"""
         ...
 
+    async def read_current(self, *, user_id: UUID, memory_id: str) -> bytes:
+        """读取 current/ 物化副本（verify_checksums 校验用）；缺失抛 FileNotFoundError。"""
+        ...
+
     async def read_quarantined_version(
         self, *, user_id: UUID, memory_id: str, version: int, checksum: str
     ) -> bytes:

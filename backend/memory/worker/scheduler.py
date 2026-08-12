@@ -5,8 +5,8 @@
   （先创建或复用，带幂等键）；只有需要进入 MemoryManagerGraph 的 batch 才创建
   memory_operations 并通过 operation_id 关联。
 - 备份不是 Graph operation：Scheduler 只读 backup_runs，当天未成功则告警。
-- verify_checksums（每天 04:00）按 §10.7 maintenance.py docstring 属步骤 15，
-  本步不调度。
+- verify_checksums（每天 04:00）校验活动版本 checksum 与 current/ 物化副本
+  （§14.3，评审 #14 修复接入）。
 
 启动：python -m backend.memory.worker.scheduler
 """
@@ -74,7 +74,7 @@ class ScheduledTask:
     daily_at: time | None = None
 
 
-#: §14.3 任务表（verify_checksums 04:00 属步骤 15，本步不调度）
+#: §14.3 任务表
 TASKS: tuple[ScheduledTask, ...] = (
     ScheduledTask("recover_operation_leases", interval_seconds=30),
     ScheduledTask("recover_outbox_leases", interval_seconds=30),
@@ -84,6 +84,7 @@ TASKS: tuple[ScheduledTask, ...] = (
     ScheduledTask("purge_tombstones", daily_at=time(3, 0)),
     ScheduledTask("cleanup_checkpoints", daily_at=time(3, 30)),
     ScheduledTask("purge_notifications", daily_at=time(3, 45)),
+    ScheduledTask("verify_checksums", daily_at=time(4, 0)),
     ScheduledTask("check_backup_runs", daily_at=time(5, 0)),
 )
 
@@ -357,6 +358,43 @@ class Scheduler:
                         kind="cleanup_checkpoints",
                         cursor=cursor,
                         batch_size=self.config.batch_size,
+                    ),
+                )
+        return outcome != "done"
+
+    async def _task_verify_checksums(self, now: datetime) -> bool:
+        date = self._local_date(now)
+        key = f"verify-checksums:{date}"
+        outcome: Literal["scheduled", "waiting", "done"] = "done"
+        async with self.session_factory() as session:
+            async with session.begin():
+                run, _created = await maintenance_repo.create_or_reuse_run(
+                    session,
+                    run_id=uuid4(),
+                    maintenance_type="verify_checksums",
+                    idempotency_key=key,
+                )
+                if run["operation_id"] is None and run["status"] == "queued":
+                    rows = await docs_repo.list_active_documents_page(
+                        session, batch_size=1, cursor=run["cursor"]
+                    )
+                    if not rows:
+                        # 无工作：不创建空 operation，run 直接幂等成功
+                        await maintenance_repo.complete_run(
+                            session,
+                            run_id=run["run_id"],
+                            status="succeeded",
+                            cursor=None,
+                            result={"skipped": "no_active_documents"},
+                        )
+                        return False
+                outcome = await self._ensure_graph_batch(
+                    session,
+                    run=run,
+                    operation_type="verify_checksums",
+                    user_id=SYSTEM_USER_ID,
+                    payload_factory=lambda cursor: MaintenanceCommand(
+                        kind="verify_checksums", cursor=cursor, batch_size=self.config.batch_size
                     ),
                 )
         return outcome != "done"

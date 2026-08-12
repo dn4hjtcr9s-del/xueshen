@@ -41,6 +41,7 @@ class _SchedulerRecorder:
         self.dirty_indexes: list[dict[str, Any]] = []
         self.expired_tombstones: list[dict[str, Any]] = []
         self.expired_checkpoints: list[dict[str, Any]] = []
+        self.active_documents: list[dict[str, Any]] = []
         self.notification_purges: list[dict[str, Any]] = []
         self.notification_purge_result = 0
         self.backup_ok = True
@@ -110,6 +111,9 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _SchedulerRecorder:
     async def fake_tombstones(session: Any, **kwargs: Any) -> list[dict[str, Any]]:
         return rec.expired_tombstones
 
+    async def fake_active_documents(session: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return rec.active_documents
+
     async def fake_checkpoints(session: Any, **kwargs: Any) -> list[dict[str, Any]]:
         return rec.expired_checkpoints
 
@@ -135,6 +139,7 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _SchedulerRecorder:
     monkeypatch.setattr(outbox_repo, "recover_expired_leases", fake_recover_outbox)
     monkeypatch.setattr(docs_repo, "list_dirty_indexes", fake_dirty_indexes)
     monkeypatch.setattr(docs_repo, "list_expired_tombstones", fake_tombstones)
+    monkeypatch.setattr(docs_repo, "list_active_documents_page", fake_active_documents)
     monkeypatch.setattr(notifications_repo, "purge_older_than", fake_purge_notifications)
     monkeypatch.setattr(scheduler_mod, "list_expired_checkpoint_threads", fake_checkpoints)
     return rec
@@ -332,3 +337,35 @@ class TestIndexRebuildScheduling:
         await _scheduler().run_task("schedule_index_rebuilds", NOW)
         assert recorder.runs == {}
         assert recorder.inserted_operations == []
+
+
+class TestVerifyChecksumsScheduling:
+    """§14.3 / 评审 #14：verify_checksums 每天 04:00 进入 TASKS 并按幂等 run 调度。"""
+
+    def test_task_registered_at_0400(self) -> None:
+        task = next(t for t in scheduler_mod.TASKS if t.name == "verify_checksums")
+        assert task.daily_at == time(4, 0)
+        assert task.interval_seconds is None
+
+    async def test_no_active_documents_skips_operation(self, recorder: _SchedulerRecorder) -> None:
+        recorder.active_documents = []
+        has_more = await _scheduler().run_task("verify_checksums", NOW)
+        assert has_more is False
+        assert recorder.inserted_operations == []
+        run = recorder.runs["verify-checksums:2026-08-11"]
+        assert run["status"] == "succeeded"
+        assert recorder.completed_runs[0]["result"] == {"skipped": "no_active_documents"}
+
+    async def test_active_documents_create_graph_batch(self, recorder: _SchedulerRecorder) -> None:
+        recorder.active_documents = [{"user_id": uuid4(), "memory_id": "learner"}]
+        has_more = await _scheduler().run_task("verify_checksums", NOW)
+        assert has_more is True
+        assert len(recorder.inserted_operations) == 1
+        operation = recorder.inserted_operations[0]
+        assert operation.actor_type == "system"
+        assert operation.user_id == SYSTEM_USER
+        assert operation.input_kind == "maintenance"
+        assert operation.operation_type == "verify_checksums"
+        assert operation.payload.kind == "verify_checksums"
+        run = recorder.runs["verify-checksums:2026-08-11"]
+        assert run["operation_id"] == operation.operation_id

@@ -3,11 +3,13 @@
 步骤 9 实现 rebuild_index / purge_tombstones / cleanup_orphan_versions；
 步骤 10 接入 cleanup_checkpoints（CheckpointCleanupAdapter，§11.4）；
 purge_account_memory 走 account_purge 服务（§13.16/§21.3，评审 P0-1 修复）；
-verify_checksums 在对应步骤接入，此处明确拒绝而非空转。
+verify_checksums（§14.3，每天 04:00）：校验活动版本 checksum 与解析合法性、
+current/ 物化副本与活动版本一致性（漂移时重新物化），损坏项告警并记入 run detail。
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langgraph.runtime import Runtime
@@ -21,8 +23,10 @@ from backend.memory.graph.state import MemoryManagerState, MemoryRuntimeContext
 from backend.memory.persistence import documents as docs_repo
 from backend.memory.persistence import maintenance as maintenance_repo
 from backend.memory.persistence.database import exec_rowcount
+from backend.memory.storage.base import sha256_hex
+from backend.memory.storage.markdown_schema import MarkdownParseError, parse_learner, parse_mastery
 
-_NOT_IMPLEMENTED = {"verify_checksums"}
+logger = logging.getLogger("memory.maintenance")
 
 
 async def run_maintenance(
@@ -35,8 +39,6 @@ async def run_maintenance(
     payload = operation.payload
     assert isinstance(payload, MaintenanceCommand)
     kind = payload.kind
-    if kind in _NOT_IMPLEMENTED:
-        raise InvalidPayloadError(f"维护类型 {kind} 尚未实现（对应后续步骤接入）")
 
     # acquire_scheduler_lock：每类维护任务全局互斥（§14.3）
     async with ctx.session_factory() as session:
@@ -250,6 +252,82 @@ async def _execute_batch(
             "markdown_tree_deleted": summary.markdown_tree_deleted,
             "break_glass_compressed": summary.break_glass_compressed,
             "completion_proof_checksum": summary.completion_proof_checksum,
+        }
+
+    if kind == "verify_checksums":
+        # §14.3：校验活动版本 checksum/解析合法性，以及 current/ 物化副本一致性；
+        # 漂移副本按活动版本重新物化修复，损坏项告警并记入 detail。
+        rows = await docs_repo.list_active_documents_page(
+            session, batch_size=payload.batch_size, cursor=payload.cursor
+        )
+        checked = 0
+        rematerialized = 0
+        corrupted: list[dict[str, Any]] = []
+        next_cursor = None
+        for row in rows:
+            next_cursor = f"{row['user_id']}:{row['memory_id']}"
+            checked += 1
+            issue: dict[str, Any] = {
+                "user_id": str(row["user_id"]),
+                "memory_id": row["memory_id"],
+                "reasons": [],
+            }
+            try:
+                content = await store.read_version(
+                    user_id=row["user_id"], storage_key=row["active_storage_key"]
+                )
+            except FileNotFoundError:
+                issue["reasons"].append("active_version_missing")
+                content = None
+            trusted = content is not None
+            if content is not None:
+                if sha256_hex(content) != row["active_checksum"]:
+                    issue["reasons"].append("checksum_mismatch")
+                    trusted = False
+                if row["memory_type"] == "learner":
+                    try:
+                        parse_learner(content.decode("utf-8"))
+                    except (MarkdownParseError, UnicodeDecodeError):
+                        issue["reasons"].append("parse_failed")
+                elif row["memory_type"] == "mastery":
+                    try:
+                        parse_mastery(content.decode("utf-8"))
+                    except (MarkdownParseError, UnicodeDecodeError):
+                        issue["reasons"].append("parse_failed")
+            drift = False
+            try:
+                current = await store.read_current(
+                    user_id=row["user_id"], memory_id=row["memory_id"]
+                )
+                if content is not None and current != content:
+                    drift = True
+            except FileNotFoundError:
+                drift = True
+            if drift and content is not None:
+                issue["reasons"].append("current_drift")
+                # 仅在校验和可信时重新物化，避免把损坏内容传播到 current/
+                if trusted and not payload.dry_run:
+                    await store.materialize_current(
+                        user_id=row["user_id"], memory_id=row["memory_id"], content=content
+                    )
+                    rematerialized += 1
+            if issue["reasons"]:
+                corrupted.append(issue)
+                logger.error(
+                    "告警：verify_checksums 发现损坏 user_id=%s memory_id=%s reasons=%s",
+                    row["user_id"],
+                    row["memory_id"],
+                    ",".join(issue["reasons"]),
+                )
+        finished = len(rows) < payload.batch_size
+        return {
+            "kind": kind,
+            "status": "done" if finished else "continue",
+            "checked": checked,
+            "corrupted": corrupted,
+            "rematerialized": rematerialized,
+            "dry_run": payload.dry_run,
+            "next_cursor": None if finished else next_cursor,
         }
 
     raise InvalidPayloadError(f"未知维护类型: {kind}")  # pragma: no cover

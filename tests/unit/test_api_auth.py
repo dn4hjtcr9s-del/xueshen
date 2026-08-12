@@ -337,6 +337,109 @@ async def test_prod_jwt_missing_key_material_rejected(tmp_path: Any, monkeypatch
 
 
 # ---------------------------------------------------------------------------
+# Agent 委托契约（§18.4，评审 #15）
+# ---------------------------------------------------------------------------
+
+
+class _MappingResolver:
+    """按 external_subject 查表的身份映射 fake。"""
+
+    def __init__(self, mapping: dict[str, UUID]) -> None:
+        self.mapping = mapping
+
+    async def resolve(self, *, issuer: str, external_subject: str) -> UUID | None:
+        return self.mapping.get(external_subject)
+
+
+def _agent_token(private_pem: str, **claims: Any) -> str:
+    defaults: dict[str, Any] = {
+        "sub": "svc-conversation-agent",
+        "actor_type": "conversation_agent",
+        "scopes": ["memory:read", "memory:context"],
+        "delegated_sub": "external-subject-1",
+    }
+    defaults.update(claims)
+    return _make_token(private_pem, **defaults)
+
+
+async def test_agent_token_with_delegated_sub_resolves_delegated_user(tmp_path: Any) -> None:
+    private_pem, public_pem = _rsa_keys()
+    adapter = ProductionJwtAuthAdapter(
+        settings=_prod_settings(tmp_path, public_pem),
+        identity_resolver=_MappingResolver({"external-subject-1": USER_ID}),
+    )
+    context = await adapter.authenticate({"authorization": f"Bearer {_agent_token(private_pem)}"})
+    assert context.user_id == USER_ID
+    assert context.actor_type == "conversation_agent"
+    assert context.external_subject == "external-subject-1"
+    assert context.actor_principal == "svc-conversation-agent"
+    assert context.has_scope("memory:read")
+
+
+async def test_agent_token_missing_delegated_sub_rejected(tmp_path: Any) -> None:
+    private_pem, public_pem = _rsa_keys()
+    adapter = ProductionJwtAuthAdapter(
+        settings=_prod_settings(tmp_path, public_pem),
+        identity_resolver=_MappingResolver({"external-subject-1": USER_ID}),
+    )
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            "iss": "https://auth.example",
+            "aud": "memory-api",
+            "sub": "svc-activity-agent",
+            "actor_type": "activity_agent",
+            "scopes": ["memory:read"],
+            "iat": now,
+            "exp": now + 240,
+            "jti": uuid4().hex,
+        },
+        private_pem,
+        algorithm="RS256",
+    )
+    with pytest.raises(AuthError, match="delegated_sub") as exc_info:
+        await adapter.authenticate({"authorization": f"Bearer {token}"})
+    assert exc_info.value.code == "AUTH_REQUIRED"
+
+
+async def test_agent_token_unresolvable_delegated_sub_rejected(tmp_path: Any) -> None:
+    private_pem, public_pem = _rsa_keys()
+    adapter = ProductionJwtAuthAdapter(
+        settings=_prod_settings(tmp_path, public_pem),
+        identity_resolver=_MappingResolver({}),
+    )
+    with pytest.raises(AuthError, match="身份映射不存在") as exc_info:
+        await adapter.authenticate({"authorization": f"Bearer {_agent_token(private_pem)}"})
+    assert exc_info.value.code == "AUTH_REQUIRED"
+
+
+async def test_agent_token_scope_overreach_rejected(tmp_path: Any) -> None:
+    """Agent 不得持有委托契约之外的 scope（§18.3 矩阵：删除/纠正均为否）。"""
+    private_pem, public_pem = _rsa_keys()
+    adapter = ProductionJwtAuthAdapter(
+        settings=_prod_settings(tmp_path, public_pem),
+        identity_resolver=_MappingResolver({"external-subject-1": USER_ID}),
+    )
+    token = _agent_token(private_pem, scopes=["memory:read", "memory:delete"])
+    with pytest.raises(AuthError, match="越界") as exc_info:
+        await adapter.authenticate({"authorization": f"Bearer {token}"})
+    assert exc_info.value.code == "AUTH_FORBIDDEN"
+    assert exc_info.value.forbidden is True
+
+
+async def test_user_token_without_delegation_unaffected(tmp_path: Any) -> None:
+    """回归：普通 user token 不需要 delegated_sub，actor_principal 为空。"""
+    private_pem, public_pem = _rsa_keys()
+    adapter = ProductionJwtAuthAdapter(
+        settings=_prod_settings(tmp_path, public_pem),
+        identity_resolver=_MappingResolver({"external-subject-1": USER_ID}),
+    )
+    context = await adapter.authenticate({"authorization": f"Bearer {_make_token(private_pem)}"})
+    assert context.user_id == USER_ID
+    assert context.actor_principal is None
+
+
+# ---------------------------------------------------------------------------
 # DevelopmentAuthAdapter 细节（§18.1）
 # ---------------------------------------------------------------------------
 
