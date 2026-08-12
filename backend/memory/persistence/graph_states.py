@@ -181,6 +181,25 @@ async def latest_audit(
     return dict(row) if row else None
 
 
+async def get_audit_by_operation(
+    session: AsyncSession, *, operation_id: UUID
+) -> dict[str, Any] | None:
+    """按 operation_id 查图谱 mutation 审计（评审 #11 crash-window replay 记录）。
+
+    用户图谱命令的 Overlay/audit/Outbox 在同一事务提交；operation 终态未落库
+    而进程崩溃后，重放凭此记录重建首次结果，不再重复版本校验与状态写入。
+    """
+    result = await session.execute(
+        text(
+            "SELECT * FROM graph_state_audit "
+            "WHERE operation_id = :operation_id ORDER BY created_at ASC LIMIT 1"
+        ),
+        {"operation_id": operation_id},
+    )
+    row = result.mappings().first()
+    return dict(row) if row else None
+
+
 async def upsert_node_activity(
     session: AsyncSession,
     *,

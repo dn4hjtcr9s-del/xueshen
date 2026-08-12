@@ -183,6 +183,29 @@ class KnowledgeGraphStateService:
                 if not await registry.node_exists(node_id):
                     raise GraphNodeNotFoundError(node_id)
                 await acquire_user_lock(session, user_id)
+                # crash-window replay（评审 #11）：Overlay/audit/Outbox 事务已提交、
+                # operation 终态未落库时，凭 audit 记录重建首次结果直接返回，
+                # 不再对已推进的 Overlay 做版本校验
+                existing = await gs_repo.get_audit_by_operation(session, operation_id=operation_id)
+                if existing is not None:
+                    if str(existing["user_id"]) != str(user_id) or existing["node_id"] != node_id:
+                        from backend.memory.contracts.errors import InvalidPayloadError
+
+                        raise InvalidPayloadError(
+                            f"operation {operation_id} 的图谱审计与当前命令不一致: "
+                            f"audit user={existing['user_id']} node={existing['node_id']}，"
+                            f"当前 user={user_id} node={node_id}"
+                        )
+                    return GraphStateChangeView(
+                        node_id=node_id,
+                        before_status=existing["before_status"],
+                        after_status=existing["after_status"],
+                        before_version=existing["before_version"],
+                        after_version=existing["after_version"],
+                        source_type="user",
+                        reason_codes=[],
+                        changed_at=existing["created_at"],
+                    )
                 overlays = await gs_repo.lock_overlays(session, user_id=user_id, node_ids=[node_id])
                 overlay = overlays[0] if overlays else None
                 before_status: str | None = overlay["status"] if overlay else None

@@ -29,6 +29,7 @@ from backend.memory.contracts.commands import (
 )
 from backend.memory.contracts.common import evidence_ref_hash
 from backend.memory.contracts.errors import (
+    InvalidPayloadError,
     MemoryDeletedError,
     MemoryNotFoundError,
     MemoryRestoreExpiredError,
@@ -67,6 +68,24 @@ class CommitOutcome:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _validate_replay_consistency(
+    existing: dict[str, Any], *, user_id: UUID, memory_id: str, action: str
+) -> None:
+    """mutation replay 一致性校验（评审 #5/#6）：原 commit 必须属于当前
+    user/memory/action，否则是 mutation_id 误用，按非法 payload 拒绝。"""
+    if (
+        str(existing["user_id"]) != str(user_id)
+        or existing["memory_id"] != memory_id
+        or existing["action"] != action
+    ):
+        raise InvalidPayloadError(
+            f"mutation_id 与原 commit 不一致: 期望 "
+            f"user={user_id} memory={memory_id} action={action}，实际 "
+            f"user={existing['user_id']} memory={existing['memory_id']} "
+            f"action={existing['action']}"
+        )
 
 
 def _dedupe_keep_order(items: list[str]) -> list[str]:
@@ -335,26 +354,61 @@ class MemoryService:
         now = _now()
         outcome = CommitOutcome()
 
-        # 1. 事务外渲染内容并写不可变版本
+        # 0. mutation replay 预检（评审 #5）：渲染和任何存储副作用之前查询全部
+        #    mutation；命中则完全跳过文件写入，并验证原 commit 的 user/memory/action
+        replayed: dict[UUID, dict[str, Any]] = {}
+        async with self._session_factory() as session:
+            async with session.begin():
+                await acquire_user_lock(session, user_id)
+                for plan in plans:
+                    existing = await commits_repo.get_by_mutation_id(session, plan.mutation_id)
+                    if existing is not None:
+                        _validate_replay_consistency(
+                            existing,
+                            user_id=user_id,
+                            memory_id=plan.memory_id,
+                            action=plan.action,
+                        )
+                        replayed[plan.mutation_id] = existing
+        pending: list[tuple[int, CommitMutationPlan]] = [
+            (i, plan) for i, plan in enumerate(plans) if plan.mutation_id not in replayed
+        ]
+        results_by_index: dict[int, MutationResult] = {}
+        for i, plan in enumerate(plans):
+            existing = replayed.get(plan.mutation_id)
+            if existing is not None:
+                results_by_index[i] = MutationResult(
+                    mutation_id=plan.mutation_id,
+                    memory_id=plan.memory_id,
+                    action=existing["action"],
+                    before_version=existing["before_version"],
+                    after_version=existing["after_version"],
+                )
+        if replayed:
+            outcome.replayed = True
+
+        # 1. 事务外渲染内容并写不可变版本（仅未提交过的 mutation；tuple 首位是
+        #    原 plans 下标，用于对齐 evidence_refs/graph_node_ids 等按位参数）
         rendered: list[
-            tuple[CommitMutationPlan, bytes, int | None, int, str | None, dict[str, Any]]
+            tuple[int, CommitMutationPlan, bytes, int | None, int, str | None, dict[str, Any]]
         ] = []
         async with self._session_factory() as session:
-            for plan in plans:
+            for i, plan in pending:
                 rendered.append(
                     (
+                        i,
                         plan,
                         *await self._build_new_content(
                             session, user_id=user_id, plan=plan, now=now
                         ),
                     )
                 )
-        stored_by_plan: list[Any] = []
-        for plan, content, _bv, av, _tk, _idx in rendered:
+        stored_by_index: dict[int, Any] = {}
+        for i, plan, content, _bv, av, _tk, _idx in rendered:
             stored = await self._store.write_immutable_version(
                 user_id=user_id, memory_id=plan.memory_id, version=av, content=content
             )
-            stored_by_plan.append(stored)
+            stored_by_index[i] = stored
 
         # 2. 数据库事务
         # §11.6（裁决 2026-08-11）：进入 commit 副作用前用独立短事务打标记，
@@ -370,26 +424,32 @@ class MemoryService:
                     )
                     docs_by_id = {d["memory_id"]: d for d in locked_docs}
 
-                    for i, (
+                    for (
+                        i,
                         plan,
                         _content,
                         before_version,
                         after_version,
                         topic_key,
                         index_data,
-                    ) in enumerate(rendered):
-                        stored = stored_by_plan[i]
-                        # mutation_id 重放：直接返回原 commit（§11.3）
+                    ) in rendered:
+                        stored = stored_by_index[i]
+                        # mutation_id 重放竞态防御（评审 #5）：预检后、本事务前
+                        # 恰好有并发提交同一 mutation 时，直接复用原 commit
                         existing = await commits_repo.get_by_mutation_id(session, plan.mutation_id)
                         if existing is not None:
-                            outcome.mutations.append(
-                                MutationResult(
-                                    mutation_id=plan.mutation_id,
-                                    memory_id=plan.memory_id,
-                                    action=existing["action"],
-                                    before_version=existing["before_version"],
-                                    after_version=existing["after_version"],
-                                )
+                            _validate_replay_consistency(
+                                existing,
+                                user_id=user_id,
+                                memory_id=plan.memory_id,
+                                action=plan.action,
+                            )
+                            results_by_index[i] = MutationResult(
+                                mutation_id=plan.mutation_id,
+                                memory_id=plan.memory_id,
+                                action=existing["action"],
+                                before_version=existing["before_version"],
+                                after_version=existing["after_version"],
                             )
                             outcome.replayed = True
                             continue
@@ -541,21 +601,23 @@ class MemoryService:
                                     "changed_sections": changed_sections[:3],
                                 },
                             )
-                        outcome.mutations.append(
-                            MutationResult(
-                                mutation_id=plan.mutation_id,
-                                memory_id=plan.memory_id,
-                                action=plan.action,
-                                before_version=before_version,
-                                after_version=after_version,
-                            )
+                        results_by_index[i] = MutationResult(
+                            mutation_id=plan.mutation_id,
+                            memory_id=plan.memory_id,
+                            action=plan.action,
+                            before_version=before_version,
+                            after_version=after_version,
                         )
 
         finally:
             await self._clear_commit_started(operation_id)
 
-        # 3. 物化 current/（失败不影响活动版本，§8.6）
-        for plan, content, _bv, _av, _tk, _idx in rendered:
+        # 按原 plans 顺序汇总（replay 命中与新提交混排时保持返回顺序稳定）
+        outcome.mutations = [results_by_index[i] for i in range(len(plans))]
+
+        # 3. 物化 current/（失败不影响活动版本，§8.6）；replay 命中的 plan
+        #    不在 rendered 中，不会重写 current/（评审 #5）
+        for _i, plan, content, _bv, _av, _tk, _idx in rendered:
             try:
                 await self._store.materialize_current(
                     user_id=user_id, memory_id=plan.memory_id, content=content
@@ -631,6 +693,20 @@ class MemoryService:
         async with self._session_factory() as session:
             async with session.begin():
                 await acquire_user_lock(session, user_id)
+                # mutation replay 优先于状态检查（评审 #6）：同 mutation 重放
+                # 直接返回原结果，只有不存在 replay 时才检查当前状态和版本
+                existing = await commits_repo.get_by_mutation_id(session, mutation_id)
+                if existing is not None:
+                    _validate_replay_consistency(
+                        existing, user_id=user_id, memory_id=memory_id, action="forget"
+                    )
+                    return MutationResult(
+                        mutation_id=mutation_id,
+                        memory_id=memory_id,
+                        action="forget",
+                        before_version=existing["before_version"],
+                        after_version=None,
+                    )
                 docs = await docs_repo.lock_documents(
                     session, user_id=user_id, memory_ids=[memory_id]
                 )
@@ -643,15 +719,6 @@ class MemoryService:
                 if expected_version != current_version:
                     raise MemoryVersionConflictError(
                         f"{memory_id} 版本冲突", field="expected_version"
-                    )
-                existing = await commits_repo.get_by_mutation_id(session, mutation_id)
-                if existing is not None:
-                    return MutationResult(
-                        mutation_id=mutation_id,
-                        memory_id=memory_id,
-                        action="forget",
-                        before_version=existing["before_version"],
-                        after_version=None,
                     )
                 deleted_version = current_version
                 await commits_repo.insert_commit(
@@ -795,6 +862,20 @@ class MemoryService:
         async with self._session_factory() as session:
             async with session.begin():
                 await acquire_user_lock(session, user_id)
+                # mutation replay 优先于状态检查（评审 #6）：restore 首次成功后
+                # 重放同 mutation 不得因"已恢复"而抛版本冲突
+                existing = await commits_repo.get_by_mutation_id(session, mutation_id)
+                if existing is not None:
+                    _validate_replay_consistency(
+                        existing, user_id=user_id, memory_id=memory_id, action="restore"
+                    )
+                    return MutationResult(
+                        mutation_id=mutation_id,
+                        memory_id=memory_id,
+                        action="restore",
+                        before_version=None,
+                        after_version=existing["after_version"],
+                    )
                 docs = await docs_repo.lock_documents(
                     session, user_id=user_id, memory_ids=[memory_id]
                 )
@@ -811,15 +892,6 @@ class MemoryService:
                     )
                 if now >= doc["tombstone_until"]:
                     raise MemoryRestoreExpiredError(f"{memory_id} 已超过 30 天恢复窗口")
-                existing = await commits_repo.get_by_mutation_id(session, mutation_id)
-                if existing is not None:
-                    return MutationResult(
-                        mutation_id=mutation_id,
-                        memory_id=memory_id,
-                        action="restore",
-                        before_version=None,
-                        after_version=existing["after_version"],
-                    )
                 # 读取被删除版本正文并校验 checksum（§8.7.3）：
                 # 先读不可变版本区，物化移动成功后回退读隔离区。
                 old_commit = await self._find_commit_for_version(
