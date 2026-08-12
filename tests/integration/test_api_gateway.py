@@ -72,6 +72,14 @@ def _auth(user_id: UUID = USER_ID, **extra: str) -> dict[str, str]:
     return {"X-Dev-User-Id": str(user_id), **extra}
 
 
+#: 证据只接受内部 Agent（裁决 2026-08-12：用户不提交证据）
+_AGENT_EXTRA = {"X-Dev-Actor-Type": "conversation_agent", "X-Dev-Scopes": "memory:submit_evidence"}
+
+
+def _agent_auth(user_id: UUID = USER_ID) -> dict[str, str]:
+    return _auth(user_id, **_AGENT_EXTRA)
+
+
 EVENT_BODY = {
     "kind": "conversation_evidence",
     "thread_id": "thread-it-1",
@@ -83,7 +91,7 @@ EVENT_BODY = {
 async def test_event_idempotency_roundtrip(
     api_client: httpx.AsyncClient, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    headers = {"Idempotency-Key": "it-k-1", **_auth()}
+    headers = {"Idempotency-Key": "it-k-1", **_agent_auth()}
     first = await api_client.post("/api/v1/memory/events", json=EVENT_BODY, headers=headers)
     assert first.status_code == 202
     operation_id = first.json()["operation_id"]
@@ -113,7 +121,7 @@ async def test_event_idempotency_roundtrip(
             .one()
         )
     assert str(row["user_id"]) == str(USER_ID)
-    assert row["actor_type"] == "user"
+    assert row["actor_type"] == "conversation_agent"
     assert row["priority"] == 50
     assert row["status"] == "queued"
 
@@ -154,7 +162,7 @@ async def test_cancel_queued_then_409(
     created = await api_client.post(
         "/api/v1/memory/events",
         json=EVENT_BODY,
-        headers={"Idempotency-Key": "it-k-cancel-src", **_auth()},
+        headers={"Idempotency-Key": "it-k-cancel-src", **_agent_auth()},
     )
     operation_id = created.json()["operation_id"]
     cancelled = await api_client.post(
@@ -181,7 +189,7 @@ async def test_cancel_running_in_commit_returns_409(
     created = await api_client.post(
         "/api/v1/memory/events",
         json=EVENT_BODY,
-        headers={"Idempotency-Key": "it-k-commit-src", **_auth()},
+        headers={"Idempotency-Key": "it-k-commit-src", **_agent_auth()},
     )
     assert created.status_code == 202
     operation_id = UUID(created.json()["operation_id"])
@@ -259,7 +267,7 @@ async def test_stale_commit_marker_cleared_on_execute_then_cooperative_cancel(
     created = await api_client.post(
         "/api/v1/memory/events",
         json=EVENT_BODY,
-        headers={"Idempotency-Key": "it-k-stale-src", **_auth()},
+        headers={"Idempotency-Key": "it-k-stale-src", **_agent_auth()},
     )
     assert created.status_code == 202
     operation_id = UUID(created.json()["operation_id"])
@@ -434,7 +442,7 @@ async def test_account_purge_blocks_new_operations(
     blocked = await api_client.post(
         "/api/v1/memory/events",
         json=EVENT_BODY,
-        headers={"Idempotency-Key": f"blocked-{uuid4().hex[:8]}", **_auth(target_user)},
+        headers={"Idempotency-Key": f"blocked-{uuid4().hex[:8]}", **_agent_auth(target_user)},
     )
     assert blocked.status_code == 409
     assert blocked.json()["error"]["code"] == "ACCOUNT_PURGE_IN_PROGRESS"

@@ -68,7 +68,8 @@ from backend.settings import Settings
 router = APIRouter(prefix="/api/v1/memory", tags=["memory"])
 
 _USER_ONLY = frozenset({"user"})
-_EVIDENCE_ACTORS = frozenset({"user", "conversation_agent", "activity_agent"})
+#: 证据只接受内部 Agent（裁决 2026-08-12：用户修改记忆走 command 通道，不提交证据）
+_EVIDENCE_ACTORS = frozenset({"conversation_agent", "activity_agent"})
 #: 检索/上下文：用户与带 delegated user 的内部 Agent（§18.3/§19.8）
 _READ_AGENT_ACTORS = frozenset({"user", "conversation_agent", "activity_agent"})
 
@@ -110,15 +111,10 @@ def _mastery_view(doc: MasteryDocument) -> MasteryMemoryView:
 def _check_evidence_permission(auth: AuthContext, payload: Any) -> None:
     """证据提交的 actor 边界（§18.3 权限矩阵）。
 
-    - user 只能提交"明确记住"对话证据；
-    - conversation_agent / activity_agent 只能提交各自类型的证据。
+    裁决 2026-08-12：用户不提交证据（修改记忆走 command 通道），user actor
+    由 _EVIDENCE_ACTORS 白名单在依赖层 403；此处只约束 Agent 各自的证据类型。
     """
-    if auth.actor_type == "user":
-        if not isinstance(payload, ConversationEvidence) or payload.trigger != "explicit_remember":
-            raise AuthError(
-                "AUTH_FORBIDDEN", "用户只能提交 explicit_remember 对话证据", forbidden=True
-            )
-    elif auth.actor_type == "conversation_agent":
+    if auth.actor_type == "conversation_agent":
         if not isinstance(payload, ConversationEvidence):
             raise AuthError("AUTH_FORBIDDEN", "conversation_agent 只能提交对话证据", forbidden=True)
     elif auth.actor_type == "activity_agent":

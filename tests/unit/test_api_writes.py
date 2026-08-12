@@ -32,6 +32,7 @@ def _settings(tmp_path: Any, **overrides: Any) -> Settings:
     base: dict[str, Any] = {
         "app_env": "development",
         "dev_auth_enabled": True,
+        "dev_auth_allow_scope_override": True,
         "memory_storage_root": str(tmp_path / "storage"),
     }
     base.update(overrides)
@@ -42,11 +43,19 @@ def _auth(user_id: UUID = USER_ID, **extra: str) -> dict[str, str]:
     return {"X-Dev-User-Id": str(user_id), **extra}
 
 
+#: 证据只接受内部 Agent（裁决 2026-08-12）；事件提交默认以 conversation_agent 身份
+_AGENT_EXTRA = {"X-Dev-Actor-Type": "conversation_agent", "X-Dev-Scopes": "memory:submit_evidence"}
+
+
+def _agent_auth(user_id: UUID = USER_ID) -> dict[str, str]:
+    return _auth(user_id, **_AGENT_EXTRA)
+
+
 def _post_event(client: TestClient, key: str, body: dict[str, Any] | None = None, **headers: str):
     return client.post(
         "/api/v1/memory/events",
         json=body or EVENT_BODY,
-        headers={"Idempotency-Key": key, **_auth(), **headers},
+        headers={"Idempotency-Key": key, **_agent_auth(), **headers},
     )
 
 
@@ -65,7 +74,7 @@ def test_submit_event_returns_202_and_persists(tmp_path: Any, monkeypatch: Any) 
     assert body["operation_type"] == "conversation_evidence"
     row = store.rows[UUID(body["operation_id"])]
     assert row["user_id"] == USER_ID  # user_id 由认证上下文注入
-    assert row["actor_type"] == "user"
+    assert row["actor_type"] == "conversation_agent"
     assert row["priority"] == 50  # P2（§5.2）
     assert row["graph_thread_id"] == f"memory-op:{row['operation_id']}"
     assert len(row["trace_id"]) == 32
@@ -90,7 +99,7 @@ def test_account_purge_blocks_new_operation(tmp_path: Any, monkeypatch: Any) -> 
 def test_missing_idempotency_key_rejected(tmp_path: Any, monkeypatch: Any) -> None:
     app, *_ = build_test_app(_settings(tmp_path), monkeypatch=monkeypatch)
     client = TestClient(app)
-    response = client.post("/api/v1/memory/events", json=EVENT_BODY, headers=_auth())
+    response = client.post("/api/v1/memory/events", json=EVENT_BODY, headers=_agent_auth())
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "INVALID_IDEMPOTENCY_KEY"
 
@@ -101,7 +110,7 @@ def test_control_char_idempotency_key_rejected(tmp_path: Any, monkeypatch: Any) 
     response = client.post(
         "/api/v1/memory/events",
         json=EVENT_BODY,
-        headers={**_auth(), "Idempotency-Key": "bad\nkey"},
+        headers={**_agent_auth(), "Idempotency-Key": "bad\nkey"},
     )
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "INVALID_IDEMPOTENCY_KEY"
@@ -151,20 +160,26 @@ def test_invalid_payload_returns_422_invalid_payload(tmp_path: Any, monkeypatch:
 # ---------------------------------------------------------------------------
 
 
-def test_user_can_only_submit_explicit_remember(tmp_path: Any, monkeypatch: Any) -> None:
+def test_user_cannot_submit_evidence(tmp_path: Any, monkeypatch: Any) -> None:
+    """裁决 2026-08-12：用户不提交证据（即使 explicit_remember 也 403），修改走 command。"""
     app, *_ = build_test_app(_settings(tmp_path), monkeypatch=monkeypatch)
     client = TestClient(app)
-    response = _post_event(client, "k-turn", body={**EVENT_BODY, "trigger": "turn_boundary"})
+    response = client.post(
+        "/api/v1/memory/events",
+        json=EVENT_BODY,
+        headers={"Idempotency-Key": "k-user-ev", **_auth()},
+    )
     assert response.status_code == 403
+    assert response.json()["error"]["code"] == "AUTH_FORBIDDEN"
 
 
 def test_user_cannot_submit_activity_evidence(tmp_path: Any, monkeypatch: Any) -> None:
     app, *_ = build_test_app(_settings(tmp_path), monkeypatch=monkeypatch)
     client = TestClient(app)
-    response = _post_event(
-        client,
-        "k-act",
-        body={"kind": "activity_evidence", "activity_type": "page_view", "activity_ids": ["a1"]},
+    response = client.post(
+        "/api/v1/memory/events",
+        json={"kind": "activity_evidence", "activity_type": "page_view", "activity_ids": ["a1"]},
+        headers={"Idempotency-Key": "k-act", **_auth()},
     )
     assert response.status_code == 403
 
