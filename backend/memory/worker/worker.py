@@ -85,13 +85,18 @@ class Worker:
                 await asyncio.gather(*pending, return_exceptions=True)
 
     async def _claim_batch(self) -> list[dict[str, Any]]:
+        # 评审 #7：领取数量不得超过当前空闲并发槽位——在 semaphore 外等待的
+        # 任务没有心跳，Lease 过期会被 Scheduler 回收并二次领取
+        free_slots = self.config.concurrency - len(self._tasks)
+        if free_slots <= 0:
+            return []
         async with self.session_factory() as session:
             async with session.begin():
                 return await ops_repo.claim_operation(
                     session,
                     worker_id=self.worker_id,
                     lease_seconds=self.config.lease_seconds,
-                    batch_size=self.config.batch_size,
+                    batch_size=min(self.config.batch_size, free_slots),
                 )
 
     async def execute_claimed(self, row: dict[str, Any]) -> None:
@@ -111,11 +116,14 @@ class Worker:
 
     async def _execute(self, row: dict[str, Any]) -> None:
         operation_id = row["operation_id"]
+        # fencing token（评审 #7）：claim 时递增的 lease_generation，
+        # 本任务的 heartbeat/完成/重排写回全部按 (id, worker, generation) CAS
+        generation = int(row.get("lease_generation") or 0)
         # DB 行含状态/Lease 等额外列，只取契约字段（extra="forbid"）
         operation = MemoryOperation.model_validate(
             {k: row[k] for k in MemoryOperation.model_fields if k in row}
         )
-        heartbeat_task = asyncio.create_task(self._heartbeat_loop(operation_id))
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(operation_id, generation))
         try:
             # §11.6（裁决 2026-08-11）：进程在 commit 中崩溃会残留 commit_started_at；
             #  Lease 回收后重新执行时先清除残留标记，再检查协作取消
@@ -127,13 +135,18 @@ class Worker:
                 cancelled = await ops_repo.get_cancel_requested(session, operation_id=operation_id)
             if cancelled:
                 await self._complete(
-                    operation_id, status="cancelled", result=None, public_error=None
+                    operation_id,
+                    generation=generation,
+                    status="cancelled",
+                    result=None,
+                    public_error=None,
                 )
                 return
 
             result = await self._run_with_timeouts(operation)
             await self._complete(
                 operation_id,
+                generation=generation,
                 status=result.status,
                 result=result.model_dump(mode="json"),
                 public_error=(result.error.model_dump(mode="json") if result.error else None),
@@ -163,7 +176,7 @@ class Worker:
             watchdog.cancel()
             await asyncio.gather(watchdog, return_exceptions=True)
 
-    async def _heartbeat_loop(self, operation_id: Any) -> None:
+    async def _heartbeat_loop(self, operation_id: Any, generation: int) -> None:
         while True:
             await asyncio.sleep(self.config.heartbeat_interval_seconds)
             try:
@@ -174,9 +187,10 @@ class Worker:
                             operation_id=operation_id,
                             worker_id=self.worker_id,
                             lease_seconds=self.config.lease_seconds,
+                            generation=generation,
                         )
                 if not ok:
-                    return  # Lease 已易主，停止续约
+                    return  # Lease 已易主（fencing CAS 失败），停止续约
             except Exception:
                 self.logger.exception("心跳失败: %s", operation_id)
 
@@ -184,22 +198,33 @@ class Worker:
         self,
         operation_id: Any,
         *,
+        generation: int,
         status: str,
         result: dict[str, Any] | None,
         public_error: dict[str, Any] | None,
     ) -> None:
         async with self.session_factory() as session:
             async with session.begin():
-                await ops_repo.complete_operation(
+                written = await ops_repo.complete_operation(
                     session,
                     operation_id=operation_id,
                     status=status,
                     result=result,
                     public_error=public_error,
+                    expected_worker=self.worker_id,
+                    expected_generation=generation,
                 )
+        if not written:
+            # fencing（评审 #7）：Lease 已易主，丢弃迟到写回，
+            # 不得覆盖新持有者已写入的状态
+            self.logger.warning(
+                "operation %s 完成写回被 fencing 拒绝（Lease 已易主），结果丢弃",
+                operation_id,
+            )
 
     async def _handle_failure(self, row: dict[str, Any], exc: BaseException) -> None:
         operation_id = row["operation_id"]
+        generation = int(row.get("lease_generation") or 0)
         if isinstance(exc, TimeoutError | asyncio.TimeoutError):
             # hard timeout：协程已取消、心跳已停；保持 running 等 Lease 过期回收
             self.logger.warning("operation %s hard timeout，等待 Lease 回收", operation_id)
@@ -211,22 +236,37 @@ class Worker:
         public_error = _public_error(exc)
         if action is FailureAction.NEEDS_REVIEW:
             await self._complete(
-                operation_id, status="needs_review", result=None, public_error=public_error
+                operation_id,
+                generation=generation,
+                status="needs_review",
+                result=None,
+                public_error=public_error,
             )
         elif action is FailureAction.DEAD_LETTER or attempt >= max_attempts:
             await self._complete(
-                operation_id, status="dead_letter", result=None, public_error=public_error
+                operation_id,
+                generation=generation,
+                status="dead_letter",
+                result=None,
+                public_error=public_error,
             )
         else:
             backoff = task_backoff_seconds(attempt, rng=self._rng)
             async with self.session_factory() as session:
                 async with session.begin():
-                    await ops_repo.reschedule_operation(
+                    rescheduled = await ops_repo.reschedule_operation(
                         session,
                         operation_id=operation_id,
                         next_run_at=now + timedelta(seconds=backoff),
                         status="retry_wait",
+                        expected_worker=self.worker_id,
+                        expected_generation=generation,
                     )
+            if not rescheduled:
+                self.logger.warning(
+                    "operation %s 重排写回被 fencing 拒绝（Lease 已易主），结果丢弃",
+                    operation_id,
+                )
 
 
 def _public_error(exc: BaseException) -> dict[str, Any]:

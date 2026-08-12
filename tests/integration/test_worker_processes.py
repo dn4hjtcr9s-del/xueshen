@@ -479,3 +479,225 @@ class TestMaintenanceGraphBranch:
         assert run_row["status"] == "succeeded"
         assert run_row["result"]["kind"] == "cleanup_checkpoints"
         assert run_row["result"]["threads_deleted"] == 1
+
+
+class TestLeaseFencing:
+    """评审 #7/#8：lease_generation fencing token——Lease 易主后，
+    旧持有者的心跳/完成/重排/delivery 写回必须全部失败且不覆盖新状态。"""
+
+    async def _reclaim_operation(
+        self, session_factory: async_sessionmaker[AsyncSession], operation_id: UUID
+    ) -> dict[str, Any]:
+        """过期 → Scheduler 回收 → worker-2 重新领取，返回新行。"""
+        async with session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    text(
+                        "UPDATE memory_operations "
+                        "SET lease_expires_at = now() - interval '1 second' "
+                        "WHERE operation_id = :id"
+                    ),
+                    {"id": operation_id},
+                )
+        async with session_factory() as session:
+            async with session.begin():
+                assert await ops_repo.recover_expired_leases(session) == 1
+        async with session_factory() as session:
+            async with session.begin():
+                reclaimed = await ops_repo.claim_operation(
+                    session, worker_id="worker-2", lease_seconds=120
+                )
+        return reclaimed[0]
+
+    async def test_stale_worker_writebacks_rejected_after_reclaim(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        operation = make_operation(
+            user_id=USER,
+            actor_type="system",
+            input_kind="maintenance",
+            operation_type="purge_tombstones",
+            priority=0,
+            payload=MaintenanceCommand(kind="purge_tombstones"),
+        )
+        await persist_operation(session_factory, operation)
+        async with session_factory() as session:
+            async with session.begin():
+                claimed = await ops_repo.claim_operation(
+                    session, worker_id="worker-1", lease_seconds=120
+                )
+        gen1 = int(claimed[0]["lease_generation"])
+
+        reclaimed = await self._reclaim_operation(session_factory, operation.operation_id)
+        gen2 = int(reclaimed["lease_generation"])
+        assert gen2 > gen1, "重新领取必须递增 fencing generation"
+
+        # 旧持有者：心跳 / 完成 / 重排全部被 fencing 拒绝
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await ops_repo.heartbeat(
+                        session,
+                        operation_id=operation.operation_id,
+                        worker_id="worker-1",
+                        lease_seconds=120,
+                        generation=gen1,
+                    )
+                    is False
+                )
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await ops_repo.complete_operation(
+                        session,
+                        operation_id=operation.operation_id,
+                        status="succeeded",
+                        result={"stale": True},
+                        public_error=None,
+                        expected_worker="worker-1",
+                        expected_generation=gen1,
+                    )
+                    is False
+                )
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await ops_repo.reschedule_operation(
+                        session,
+                        operation_id=operation.operation_id,
+                        next_run_at=datetime.now(UTC),
+                        status="retry_wait",
+                        expected_worker="worker-1",
+                        expected_generation=gen1,
+                    )
+                    is False
+                )
+
+        # 新持有者状态未被覆盖
+        async with session_factory() as session:
+            row = await ops_repo.get_operation(session, operation.operation_id)
+        assert row is not None
+        assert row["status"] == "running"
+        assert row["locked_by"] == "worker-2"
+
+        # 新持有者写回成功
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await ops_repo.complete_operation(
+                        session,
+                        operation_id=operation.operation_id,
+                        status="succeeded",
+                        result={"fresh": True},
+                        public_error=None,
+                        expected_worker="worker-2",
+                        expected_generation=gen2,
+                    )
+                    is True
+                )
+        async with session_factory() as session:
+            row = await ops_repo.get_operation(session, operation.operation_id)
+        assert row is not None and row["status"] == "succeeded"
+
+    async def test_stale_consumer_writebacks_rejected_after_reclaim(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        outbox_id = uuid4()
+        await _insert_memory_deleted_event(
+            session_factory,
+            outbox_id=outbox_id,
+            memory_id="mastery:fencing",
+            deleted_version=1,
+            candidates=[],
+        )
+        async with session_factory() as session:
+            async with session.begin():
+                claimed = await outbox_repo.claim_batch(
+                    session, worker_id="consumer-1", lease_seconds=60, batch_size=100
+                )
+        gen1 = int(claimed[0]["lease_generation"])
+
+        # Lease 过期回收 → consumer-2 重新领取
+        async with session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    text(
+                        "UPDATE memory_outbox "
+                        "SET lease_expires_at = now() - interval '1 second' "
+                        "WHERE outbox_id = :id"
+                    ),
+                    {"id": outbox_id},
+                )
+        async with session_factory() as session:
+            async with session.begin():
+                assert await outbox_repo.recover_expired_leases(session) == 1
+        async with session_factory() as session:
+            async with session.begin():
+                reclaimed = await outbox_repo.claim_batch(
+                    session, worker_id="consumer-2", lease_seconds=60, batch_size=100
+                )
+        gen2 = int(reclaimed[0]["lease_generation"])
+        assert gen2 > gen1
+
+        async with session_factory() as session:
+            deliveries = await outbox_repo.list_deliveries(session, outbox_id=outbox_id)
+        delivery = deliveries[0]
+
+        # 旧 Consumer：delivery 标记 / finalize / 重排全部被 fencing 拒绝
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await outbox_repo.mark_delivery(
+                        session,
+                        delivery_id=delivery["delivery_id"],
+                        status="succeeded",
+                        expected_worker="consumer-1",
+                        expected_generation=gen1,
+                    )
+                    is False
+                )
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await outbox_repo.finalize_outbox(
+                        session,
+                        outbox_id=outbox_id,
+                        expected_worker="consumer-1",
+                        expected_generation=gen1,
+                    )
+                    is False
+                )
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await outbox_repo.reschedule_outbox(
+                        session,
+                        outbox_id=outbox_id,
+                        next_run_at=datetime.now(UTC),
+                        expected_worker="consumer-1",
+                        expected_generation=gen1,
+                    )
+                    is False
+                )
+
+        # 主行与 delivery 未被覆盖
+        row = await _outbox_row(session_factory, outbox_id)
+        assert row["status"] == "publishing"
+        assert row["locked_by"] == "consumer-2"
+        async with session_factory() as session:
+            deliveries = await outbox_repo.list_deliveries(session, outbox_id=outbox_id)
+        assert all(d["status"] == "pending" for d in deliveries)
+
+        # 新持有者写回成功
+        async with session_factory() as session:
+            async with session.begin():
+                assert (
+                    await outbox_repo.mark_delivery(
+                        session,
+                        delivery_id=delivery["delivery_id"],
+                        status="succeeded",
+                        expected_worker="consumer-2",
+                        expected_generation=gen2,
+                    )
+                    is True
+                )

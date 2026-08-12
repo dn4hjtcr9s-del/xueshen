@@ -190,3 +190,33 @@ async def test_hard_timeout_stays_running_for_lease_recovery(recorder: _Recorder
     # 不 complete、不 reschedule：行保持 running，由 Scheduler 回收
     assert recorder.completed == []
     assert recorder.rescheduled == []
+
+
+async def test_claim_batch_limited_to_free_slots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """评审 #7：领取数量不超过空闲并发槽位——在 semaphore 外等待的任务
+    没有心跳，Lease 过期会被 Scheduler 回收并二次领取。"""
+    import asyncio
+
+    calls: list[int] = []
+
+    async def fake_claim(session: Any, **kwargs: Any) -> list[Any]:
+        calls.append(int(kwargs["batch_size"]))
+        return []
+
+    monkeypatch.setattr(ops_repo, "claim_operation", fake_claim)
+    worker = _worker(_FakeRunner(), concurrency=2, batch_size=10)
+
+    # 空载：按空闲槽位（2）领取，而不是 batch_size（10）
+    assert await worker._claim_batch() == []
+    assert calls == [2]
+
+    # 槽位占满：不再领取，也不调用仓储
+    tasks = {asyncio.create_task(asyncio.sleep(60)) for _ in range(2)}
+    worker._tasks.update(tasks)
+    try:
+        assert await worker._claim_batch() == []
+        assert calls == [2]
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

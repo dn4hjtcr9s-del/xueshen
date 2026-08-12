@@ -169,19 +169,38 @@ def create_app(settings: Settings | None = None, *, runtime: ApiRuntime | None =
         metrics.memory_http_requests_total.labels(
             route=route_path, method=request.method, status=str(response.status_code)
         ).inc()
-        # §13.15：break-glass 会话的所有正文读取/修改必须写审计
+        # §13.15：break-glass 会话的所有正文读取/修改必须写审计（fail-closed，
+        # 评审 #10）：审计写不进去时不得返回敏感正文或确认修改成功；
+        # 审计在响应返回（流式响应首字节发送）前完成
         break_glass = getattr(request.state, "break_glass", None)
         if (
             break_glass is not None
             and request.url.path.startswith("/api/v1/memory")
             and response.status_code < 400
         ):
-            await _write_break_glass_body_audit(
-                request,
-                break_glass,
-                action=("read_body" if request.method == "GET" else "modify_body"),
-                resource_type=route_path,
-            )
+            try:
+                await _write_break_glass_body_audit(
+                    request,
+                    break_glass,
+                    action=("read_body" if request.method == "GET" else "modify_body"),
+                    resource_type=route_path,
+                )
+            except Exception:
+                logger.error(
+                    "break-glass 正文审计写入失败，按 fail-closed 中止响应: %s %s",
+                    request.method,
+                    request.url.path,
+                    exc_info=True,
+                )
+                return JSONResponse(
+                    status_code=500,
+                    content=_public_error_body(
+                        "AUDIT_WRITE_FAILED",
+                        "break-glass 审计写入失败，请求结果已按安全策略中止",
+                        retryable=True,
+                        trace_id=request.state.trace_id,
+                    ),
+                )
         return response
 
     async def _write_break_glass_body_audit(
@@ -195,23 +214,20 @@ def create_app(settings: Settings | None = None, *, runtime: ApiRuntime | None =
 
         runtime: ApiRuntime | None = getattr(request.app.state, "runtime", None)
         if runtime is None:
-            return
-        try:
-            async with runtime.session_factory() as session:
-                await bg_repo.insert_audit(
-                    session,
-                    audit_id=uuid4(),
-                    grant_id=break_glass["grant_id"],  # type: ignore[arg-type]
-                    admin_user_id=break_glass["admin_user_id"],  # type: ignore[arg-type]
-                    target_user_id=break_glass["target_user_id"],  # type: ignore[arg-type]
-                    action=action,
-                    resource_type=resource_type,
-                    resource_id=None,
-                    trace_id=request.state.trace_id,
-                )
-                await session.commit()
-        except Exception:
-            logger.error("break-glass 正文审计写入失败", exc_info=True)
+            raise RuntimeError("API 运行时未初始化，无法写入 break-glass 审计")
+        async with runtime.session_factory() as session:
+            await bg_repo.insert_audit(
+                session,
+                audit_id=uuid4(),
+                grant_id=break_glass["grant_id"],  # type: ignore[arg-type]
+                admin_user_id=break_glass["admin_user_id"],  # type: ignore[arg-type]
+                target_user_id=break_glass["target_user_id"],  # type: ignore[arg-type]
+                action=action,
+                resource_type=resource_type,
+                resource_id=None,
+                trace_id=request.state.trace_id,
+            )
+            await session.commit()
 
     @app.exception_handler(MemoryError)
     async def memory_error_handler(request: Request, exc: MemoryError) -> JSONResponse:

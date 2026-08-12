@@ -123,6 +123,7 @@ class InMemoryOperationStore:
             row["status"] = "running"
             row["locked_by"] = worker_id
             row["attempt_count"] += 1
+            row["lease_generation"] = int(row.get("lease_generation") or 0) + 1
             row["updated_at"] = datetime.now(UTC)
             claimed.append(row)
         return claimed
@@ -169,7 +170,9 @@ class InMemoryOperationStore:
         result: dict[str, Any] | None,
         public_error: dict[str, Any] | None,
         llm_call_count: int = 0,
-    ) -> None:
+        expected_worker: str | None = None,
+        expected_generation: int | None = None,
+    ) -> bool:
         row = self.rows[operation_id]
         row["status"] = status
         row["result"] = result
@@ -177,17 +180,32 @@ class InMemoryOperationStore:
         row["completed_at"] = datetime.now(UTC)
         row["updated_at"] = datetime.now(UTC)
         row["commit_started_at"] = None
+        return True
 
     async def heartbeat(
-        self, session: Any, *, operation_id: UUID, worker_id: str, lease_seconds: int
+        self,
+        session: Any,
+        *,
+        operation_id: UUID,
+        worker_id: str,
+        lease_seconds: int,
+        generation: int = 0,
     ) -> bool:
         return True
 
     async def reschedule_operation(
-        self, session: Any, *, operation_id: UUID, next_run_at: datetime, status: str
-    ) -> None:
+        self,
+        session: Any,
+        *,
+        operation_id: UUID,
+        next_run_at: datetime,
+        status: str,
+        expected_worker: str | None = None,
+        expected_generation: int | None = None,
+    ) -> bool:
         self.rows[operation_id]["status"] = status
         self.rows[operation_id]["commit_started_at"] = None
+        return True
 
     async def get_manifest_by_user_hash(self, session: Any, *, user_hash: str) -> Any:
         return self.manifests.get(user_hash)

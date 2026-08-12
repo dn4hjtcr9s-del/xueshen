@@ -132,6 +132,7 @@ async def claim_operation(
             SET status = 'running', locked_by = :worker_id,
                 lease_expires_at = :lease_expires, started_at = now(),
                 last_heartbeat_at = now(), attempt_count = attempt_count + 1,
+                lease_generation = lease_generation + 1,
                 updated_at = now()
             WHERE operation_id = ANY(:ids)
             """
@@ -147,8 +148,18 @@ async def claim_operation(
 
 
 async def heartbeat(
-    session: AsyncSession, *, operation_id: UUID, worker_id: str, lease_seconds: int
+    session: AsyncSession,
+    *,
+    operation_id: UUID,
+    worker_id: str,
+    lease_seconds: int,
+    generation: int,
 ) -> bool:
+    """续约 Lease（评审 #7）：按 operation_id + locked_by + generation CAS。
+
+    generation 是 claim 时递增的 fencing token；Lease 被回收并由其他 Worker
+    重新领取后，旧持有者的续约必然失败（rowcount 0）。
+    """
     rowcount = await exec_rowcount(
         session,
         text(
@@ -157,12 +168,14 @@ async def heartbeat(
             SET last_heartbeat_at = now(),
                 lease_expires_at = :lease_expires, updated_at = now()
             WHERE operation_id = :operation_id AND locked_by = :worker_id
+              AND lease_generation = :generation
               AND status = 'running'
             """
         ),
         {
             "operation_id": operation_id,
             "worker_id": worker_id,
+            "generation": generation,
             "lease_expires": datetime.now(UTC) + timedelta(seconds=lease_seconds),
         },
     )
@@ -203,8 +216,17 @@ async def complete_operation(
     result: dict[str, Any] | None,
     public_error: dict[str, Any] | None,
     llm_call_count: int = 0,
-) -> None:
-    await session.execute(
+    expected_worker: str,
+    expected_generation: int,
+) -> bool:
+    """终态写回（评审 #7）：fencing CAS，旧 lease 持有者的迟到写回失败。
+
+    按 operation_id + locked_by + lease_generation + status='running' 更新并
+    检查 rowcount；返回是否真正写入。Lease 已易主时返回 False，调用方必须
+    丢弃结果而不是覆盖新持有者状态。
+    """
+    rowcount = await exec_rowcount(
+        session,
         text(
             """
             UPDATE memory_operations
@@ -215,6 +237,9 @@ async def complete_operation(
                 commit_started_at = NULL,
                 llm_call_count = llm_call_count + :llm_call_count
             WHERE operation_id = :operation_id
+              AND locked_by = :expected_worker
+              AND lease_generation = :expected_generation
+              AND status = 'running'
             """
         ),
         {
@@ -225,25 +250,49 @@ async def complete_operation(
                 json.dumps(public_error, ensure_ascii=False) if public_error is not None else None
             ),
             "llm_call_count": llm_call_count,
+            "expected_worker": expected_worker,
+            "expected_generation": expected_generation,
         },
     )
+    return rowcount == 1
 
 
 async def reschedule_operation(
-    session: AsyncSession, *, operation_id: UUID, next_run_at: datetime, status: str
-) -> None:
-    """任务级重试退避后重新排队（§11.2）。"""
-    await session.execute(
+    session: AsyncSession,
+    *,
+    operation_id: UUID,
+    next_run_at: datetime,
+    status: str,
+    expected_worker: str,
+    expected_generation: int,
+) -> bool:
+    """任务级重试退避后重新排队（§11.2 / 评审 #7 fencing CAS）。
+
+    同 complete_operation：旧 lease 持有者的迟到重排返回 False，不得覆盖
+    新持有者已写入的状态。
+    """
+    rowcount = await exec_rowcount(
+        session,
         text(
             """
             UPDATE memory_operations
             SET status = :status, next_run_at = :next_run_at, updated_at = now(),
                 locked_by = NULL, lease_expires_at = NULL, commit_started_at = NULL
             WHERE operation_id = :operation_id
+              AND locked_by = :expected_worker
+              AND lease_generation = :expected_generation
+              AND status = 'running'
             """
         ),
-        {"operation_id": operation_id, "status": status, "next_run_at": next_run_at},
+        {
+            "operation_id": operation_id,
+            "status": status,
+            "next_run_at": next_run_at,
+            "expected_worker": expected_worker,
+            "expected_generation": expected_generation,
+        },
     )
+    return rowcount == 1
 
 
 async def recover_expired_leases(session: AsyncSession) -> int:

@@ -103,11 +103,11 @@ async def test_fail_after_dispatch_before_mark_published_redelivers_once(
     original_mark = outbox_repo.mark_delivery
     fired = {"done": False}
 
-    async def flaky_mark(session: Any, **kwargs: Any) -> None:
+    async def flaky_mark(session: Any, **kwargs: Any) -> bool:
         if kwargs.get("delivery_id") == notification_delivery_id and not fired["done"]:
             fired["done"] = True
             raise RuntimeError("injected: mark_delivery failure")
-        await original_mark(session, **kwargs)
+        return await original_mark(session, **kwargs)
 
     monkeypatch.setattr(outbox_repo, "mark_delivery", flaky_mark)
     await consumer.tick()

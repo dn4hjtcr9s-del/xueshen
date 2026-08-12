@@ -77,8 +77,9 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _ConsumerRecorder:
             rec.inserted_operations.append(operation)
         return rec.insert_operation_result
 
-    async def fake_mark_delivery(session: Any, *, delivery_id: Any, status: str, **kw: Any) -> None:
+    async def fake_mark_delivery(session: Any, *, delivery_id: Any, status: str, **kw: Any) -> bool:
         rec.marked.append((str(delivery_id), status))
+        return True
 
     async def fake_event_log(session: Any, **kwargs: Any) -> bool:
         rec.event_logs.append(kwargs)
@@ -89,11 +90,13 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _ConsumerRecorder:
             raise rec.notification_error
         rec.notifications.append(kwargs)
 
-    async def fake_finalize(session: Any, *, outbox_id: Any) -> None:
-        rec.finalized.append(outbox_id)
+    async def fake_finalize(session: Any, *, outbox_id: Any, **kw: Any) -> bool:
+        rec.finalized.append({"outbox_id": outbox_id, **kw})
+        return True
 
-    async def fake_reschedule(session: Any, **kwargs: Any) -> None:
+    async def fake_reschedule(session: Any, **kwargs: Any) -> bool:
         rec.rescheduled.append(kwargs)
+        return True
 
     async def fake_get_status(session: Any, *, outbox_id: Any) -> str:
         return rec.outbox_status
@@ -255,10 +258,10 @@ async def test_single_target_failure_isolated(recorder: _ConsumerRecorder) -> No
     assert marked[str(log_delivery["delivery_id"])] == "succeeded"
     assert marked[str(projection_delivery["delivery_id"])] == "succeeded"
     assert marked[str(notification_delivery["delivery_id"])] == "retry_wait"
-    # 主行未 published：退避重排而非 finalize 后直接完成
+    # 主行未 published：finalize 携带退避时间（评审 #8：finalize 后不再持锁重排）
     assert len(rec.finalized) == 1
-    assert len(rec.rescheduled) == 1
-    assert rec.rescheduled[0]["next_run_at"] > datetime.now(UTC)
+    assert rec.rescheduled == []
+    assert rec.finalized[0]["retry_next_run_at"] > datetime.now(UTC)
     # internal_event_log 使用 delivery 幂等键
     assert rec.event_logs[0]["idempotency_key"] == "key-internal_event_log"
 

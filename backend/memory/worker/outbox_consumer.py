@@ -44,6 +44,10 @@ from backend.memory.worker.retry import outbox_backoff_seconds
 _PROJECTION_EVENTS = {"memory.changed", "memory.deleted", "memory.restored"}
 
 
+class _DeliveryFencedError(Exception):
+    """delivery 写回被 fencing 拒绝（Lease 已易主）；用于回滚同事务的投递副作用。"""
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -178,7 +182,11 @@ class OutboxConsumer:
             await asyncio.sleep(self.config.poll_interval_seconds)
 
     async def tick(self) -> int:
-        """单次轮询 tick：领取一批并逐条处理，返回领取条数。"""
+        """单次轮询 tick：领取一批并逐条处理，返回领取条数。
+
+        评审 #8：串行处理期间用批量心跳维持整批 Lease；所有写回按
+        owner/generation fencing CAS，Lease 易主后立即停止本行处理。
+        """
         async with self.session_factory() as session:
             async with session.begin():
                 rows = await outbox_repo.claim_batch(
@@ -187,9 +195,42 @@ class OutboxConsumer:
                     lease_seconds=self.config.lease_seconds,
                     batch_size=self.config.batch_size,
                 )
-        for row in rows:
-            await self._process_guarded(row)
+        if not rows:
+            return 0
+        heartbeat_task = asyncio.create_task(
+            self._batch_heartbeat_loop([row["outbox_id"] for row in rows])
+        )
+        try:
+            for row in rows:
+                if self._stopping.is_set():
+                    break
+                await self._process_guarded(row)
+        finally:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
         return len(rows)
+
+    async def _batch_heartbeat_loop(self, outbox_ids: list[UUID]) -> None:
+        interval = max(self.config.lease_seconds / 3, 1.0)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                async with self.session_factory() as session:
+                    async with session.begin():
+                        renewed = await outbox_repo.heartbeat_batch(
+                            session,
+                            worker_id=self.consumer_id,
+                            outbox_ids=outbox_ids,
+                            lease_seconds=self.config.lease_seconds,
+                        )
+                if renewed < len(outbox_ids):
+                    self.logger.info(
+                        "批量心跳：%s/%s 行仍持有 Lease（其余已易主或终结）",
+                        renewed,
+                        len(outbox_ids),
+                    )
+            except Exception:
+                self.logger.exception("outbox 批量心跳失败")
 
     async def _process_guarded(self, row: dict[str, Any]) -> None:
         try:
@@ -203,31 +244,40 @@ class OutboxConsumer:
                         session,
                         outbox_id=row["outbox_id"],
                         next_run_at=self.clock() + timedelta(seconds=backoff),
+                        expected_worker=self.consumer_id,
+                        expected_generation=int(row.get("lease_generation") or 0),
                     )
 
     async def _process(self, row: dict[str, Any]) -> None:
         outbox_id = row["outbox_id"]
+        generation = int(row.get("lease_generation") or 0)
         status: str | None = None
         async with self.session_factory() as session:
             deliveries = await outbox_repo.list_deliveries(session, outbox_id=outbox_id)
         for delivery in deliveries:
             if delivery["status"] == "succeeded":
                 continue
-            await self._deliver(row, delivery)
+            if not await self._deliver(row, delivery, generation=generation):
+                self.logger.info("outbox %s Lease 已易主，停止本行处理", outbox_id)
+                return
         async with self.session_factory() as session:
             async with session.begin():
-                # 全部成功 → published；任一 dead_letter → dead_letter（§13.12）
-                await outbox_repo.finalize_outbox(session, outbox_id=outbox_id)
+                # 全部成功 → published；任一 dead_letter → dead_letter（§13.12）。
+                # finalize 同时释放 Lease 并写入退避时间，之后不得再做持锁写回
+                backoff = outbox_backoff_seconds(int(row.get("attempt_count", 1)), rng=self._rng)
+                finalized = await outbox_repo.finalize_outbox(
+                    session,
+                    outbox_id=outbox_id,
+                    expected_worker=self.consumer_id,
+                    expected_generation=generation,
+                    retry_next_run_at=self.clock() + timedelta(seconds=backoff),
+                )
+                if not finalized:
+                    self.logger.info(
+                        "outbox %s finalize 被 fencing 拒绝（Lease 已易主）", outbox_id
+                    )
+                    return
                 status = await outbox_repo.get_status(session, outbox_id=outbox_id)
-                if status == "retry_wait":
-                    backoff = outbox_backoff_seconds(
-                        int(row.get("attempt_count", 1)), rng=self._rng
-                    )
-                    await outbox_repo.reschedule_outbox(
-                        session,
-                        outbox_id=outbox_id,
-                        next_run_at=self.clock() + timedelta(seconds=backoff),
-                    )
         if status == "dead_letter":
             self.logger.error(
                 "告警：Outbox %s（%s/%s）存在 dead_letter target，主行已置 dead_letter",
@@ -236,14 +286,27 @@ class OutboxConsumer:
                 row["aggregate_id"],
             )
 
-    async def _deliver(self, row: dict[str, Any], delivery: dict[str, Any]) -> None:
+    async def _deliver(
+        self, row: dict[str, Any], delivery: dict[str, Any], *, generation: int
+    ) -> bool:
+        """投递单个 target；返回 False 表示 fencing 拒绝（Lease 已易主）。"""
         try:
             async with self.session_factory() as session:
                 async with session.begin():
                     await self._dispatch(session, row, delivery)
-                    await outbox_repo.mark_delivery(
-                        session, delivery_id=delivery["delivery_id"], status="succeeded"
+                    written = await outbox_repo.mark_delivery(
+                        session,
+                        delivery_id=delivery["delivery_id"],
+                        status="succeeded",
+                        expected_worker=self.consumer_id,
+                        expected_generation=generation,
                     )
+                    if not written:
+                        # 投递副作用与标记在同一事务：fencing 失败整体回滚，
+                        # 不产生未记账的投递
+                        raise _DeliveryFencedError()
+        except _DeliveryFencedError:
+            return False
         except Exception as exc:
             attempt = int(delivery["attempt_count"]) + 1
             max_attempts = int(row.get("max_attempts") or self.config.max_attempts)
@@ -258,12 +321,15 @@ class OutboxConsumer:
             )
             async with self.session_factory() as session:
                 async with session.begin():
-                    await outbox_repo.mark_delivery(
+                    return await outbox_repo.mark_delivery(
                         session,
                         delivery_id=delivery["delivery_id"],
                         status=status,
                         last_error={"code": type(exc).__name__, "message": str(exc)[:500]},
+                        expected_worker=self.consumer_id,
+                        expected_generation=generation,
                     )
+        return True
 
     async def _dispatch(
         self, session: AsyncSession, row: dict[str, Any], delivery: dict[str, Any]

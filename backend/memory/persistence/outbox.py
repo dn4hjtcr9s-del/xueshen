@@ -121,7 +121,8 @@ async def claim_batch(
             """
             UPDATE memory_outbox
             SET status = 'publishing', locked_by = :worker_id,
-                lease_expires_at = :lease_expires, attempt_count = attempt_count + 1
+                lease_expires_at = :lease_expires, attempt_count = attempt_count + 1,
+                lease_generation = lease_generation + 1
             WHERE outbox_id = ANY(:ids)
             """
         ),
@@ -135,6 +136,39 @@ async def claim_batch(
         text("SELECT * FROM memory_outbox WHERE outbox_id = ANY(:ids)"), {"ids": list(rows)}
     )
     return [dict(r) for r in result.mappings().all()]
+
+
+async def heartbeat_batch(
+    session: AsyncSession,
+    *,
+    worker_id: str,
+    outbox_ids: list[UUID],
+    lease_seconds: int,
+) -> int:
+    """整批续约（评审 #8）：Consumer 串行处理期间维持整批 Lease。
+
+    只续约仍由本 Consumer 持有且处于 publishing 的行；返回续约条数，
+    小于请求条数说明部分行 Lease 已易主（其写回将被 fencing 拒绝）。
+    """
+    if not outbox_ids:
+        return 0
+    rowcount = await exec_rowcount(
+        session,
+        text(
+            """
+            UPDATE memory_outbox
+            SET lease_expires_at = :lease_expires
+            WHERE outbox_id = ANY(:ids) AND locked_by = :worker_id
+              AND status = 'publishing'
+            """
+        ),
+        {
+            "ids": list(outbox_ids),
+            "worker_id": worker_id,
+            "lease_expires": datetime.now(UTC) + timedelta(seconds=lease_seconds),
+        },
+    )
+    return rowcount
 
 
 async def list_deliveries(session: AsyncSession, *, outbox_id: UUID) -> list[dict[str, Any]]:
@@ -151,16 +185,29 @@ async def mark_delivery(
     delivery_id: UUID,
     status: str,
     last_error: dict[str, Any] | None = None,
-) -> None:
-    await session.execute(
+    expected_worker: str,
+    expected_generation: int,
+) -> bool:
+    """delivery 写回（评审 #8）：经父 outbox 行的 owner/generation fencing。
+
+    只有仍持有父 outbox Lease（locked_by + lease_generation + publishing）
+    的 Consumer 才能推进 delivery；旧持有者的迟到写回返回 False。
+    """
+    rowcount = await exec_rowcount(
+        session,
         text(
             """
-            UPDATE memory_outbox_deliveries
+            UPDATE memory_outbox_deliveries d
             SET status = :status,
                 completed_at = CASE WHEN :status = 'succeeded' THEN now() ELSE NULL END,
-                attempt_count = attempt_count + 1,
+                attempt_count = d.attempt_count + 1,
                 last_error = CAST(:last_error AS jsonb)
-            WHERE delivery_id = :delivery_id
+            FROM memory_outbox o
+            WHERE d.delivery_id = :delivery_id
+              AND o.outbox_id = d.outbox_id
+              AND o.locked_by = :expected_worker
+              AND o.lease_generation = :expected_generation
+              AND o.status = 'publishing'
             """
         ),
         {
@@ -169,13 +216,29 @@ async def mark_delivery(
             "last_error": (
                 json.dumps(last_error, ensure_ascii=False) if last_error is not None else None
             ),
+            "expected_worker": expected_worker,
+            "expected_generation": expected_generation,
         },
     )
+    return rowcount == 1
 
 
-async def finalize_outbox(session: AsyncSession, *, outbox_id: UUID) -> None:
-    """全部启用 target 成功后主行 published；任一 dead_letter 则主行 dead_letter。"""
-    await session.execute(
+async def finalize_outbox(
+    session: AsyncSession,
+    *,
+    outbox_id: UUID,
+    expected_worker: str,
+    expected_generation: int,
+    retry_next_run_at: datetime | None = None,
+) -> bool:
+    """全部启用 target 成功后主行 published；任一 dead_letter 则主行 dead_letter。
+
+    评审 #8：按 owner/generation CAS，Lease 易主后旧 Consumer 的 finalize 无效。
+    retry_next_run_at：仍有 pending/retry_wait delivery 时的退避时间
+    （finalize 会释放 Lease，调用方不得在此之后再做持锁写回）。
+    """
+    rowcount = await exec_rowcount(
+        session,
         text(
             """
             UPDATE memory_outbox o
@@ -199,12 +262,28 @@ async def finalize_outbox(session: AsyncSession, *, outbox_id: UUID) -> None:
                     ELSE NULL
                 END,
                 locked_by = NULL, lease_expires_at = NULL,
-                next_run_at = now()
+                next_run_at = CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM memory_outbox_deliveries d
+                        WHERE d.outbox_id = o.outbox_id
+                          AND d.status IN ('pending', 'retry_wait')
+                    ) THEN CAST(:retry_next_run_at AS timestamptz)
+                    ELSE now()
+                END
             WHERE o.outbox_id = :outbox_id
+              AND o.locked_by = :expected_worker
+              AND o.lease_generation = :expected_generation
+              AND o.status = 'publishing'
             """
         ),
-        {"outbox_id": outbox_id},
+        {
+            "outbox_id": outbox_id,
+            "expected_worker": expected_worker,
+            "expected_generation": expected_generation,
+            "retry_next_run_at": retry_next_run_at,
+        },
     )
+    return rowcount == 1
 
 
 async def get_status(session: AsyncSession, *, outbox_id: UUID) -> str | None:
@@ -217,19 +296,35 @@ async def get_status(session: AsyncSession, *, outbox_id: UUID) -> str | None:
 
 
 async def reschedule_outbox(
-    session: AsyncSession, *, outbox_id: UUID, next_run_at: datetime
-) -> None:
-    await session.execute(
+    session: AsyncSession,
+    *,
+    outbox_id: UUID,
+    next_run_at: datetime,
+    expected_worker: str,
+    expected_generation: int,
+) -> bool:
+    """重排（评审 #8）：owner/generation fencing CAS，旧持有者写回返回 False。"""
+    rowcount = await exec_rowcount(
+        session,
         text(
             """
             UPDATE memory_outbox
             SET status = 'retry_wait', next_run_at = :next_run_at,
                 locked_by = NULL, lease_expires_at = NULL
             WHERE outbox_id = :outbox_id
+              AND locked_by = :expected_worker
+              AND lease_generation = :expected_generation
+              AND status = 'publishing'
             """
         ),
-        {"outbox_id": outbox_id, "next_run_at": next_run_at},
+        {
+            "outbox_id": outbox_id,
+            "next_run_at": next_run_at,
+            "expected_worker": expected_worker,
+            "expected_generation": expected_generation,
+        },
     )
+    return rowcount == 1
 
 
 async def recover_expired_leases(session: AsyncSession) -> int:

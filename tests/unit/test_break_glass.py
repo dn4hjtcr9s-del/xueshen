@@ -74,6 +74,7 @@ class FakeBreakGlassRepo:
     def __init__(self, grants: list[dict[str, Any]]) -> None:
         self.grants = {g["grant_id"]: g for g in grants}
         self.audits: list[dict[str, Any]] = []
+        self.fail_actions: set[str] = set()
 
     async def get_grant(self, session: Any, grant_id: UUID) -> dict[str, Any] | None:
         return self.grants.get(grant_id)
@@ -91,6 +92,8 @@ class FakeBreakGlassRepo:
         resource_id: str | None,
         trace_id: str,
     ) -> None:
+        if action in self.fail_actions:
+            raise RuntimeError(f"injected: audit write failure ({action})")
         self.audits.append(
             {
                 "grant_id": grant_id,
@@ -160,6 +163,20 @@ def test_valid_grant_allows_admin_body_read(tmp_path: Any, monkeypatch: Any) -> 
     assert [a["action"] for a in repo.audits] == ["use", "read_body"]
     assert all(a["admin_user_id"] == ADMIN_ID for a in repo.audits)
     assert all(a["target_user_id"] == TARGET_USER_ID for a in repo.audits)
+
+
+def test_body_audit_failure_aborts_response_fail_closed(tmp_path: Any, monkeypatch: Any) -> None:
+    """评审 #10：正文审计写入失败时 fail-closed——不得返回 2xx 敏感正文。"""
+    grant = _grant()
+    client, repo, _, _ = _build(tmp_path, monkeypatch, [grant])
+    repo.fail_actions.add("read_body")
+    response = client.get("/api/v1/memory/learner", headers=_admin_auth(grant_id=grant["grant_id"]))
+    assert response.status_code == 500
+    body = response.json()
+    assert body["error"]["code"] == "AUDIT_WRITE_FAILED"
+    assert "memory_type" not in body, "审计失败时不得返回敏感正文"
+    # 授权阶段的 use 审计已成功；失败的 read_body 未落库
+    assert [a["action"] for a in repo.audits] == ["use"]
 
 
 def test_expired_grant_rejected_with_expired_check_audit(tmp_path: Any, monkeypatch: Any) -> None:
