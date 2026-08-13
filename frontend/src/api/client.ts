@@ -3,6 +3,8 @@
 import {
   getAccessToken,
   getAccessTokenGeneration,
+  getLogoutEpoch,
+  incrementLogoutEpoch,
   setAccessToken,
 } from "../auth/tokenStore";
 
@@ -51,40 +53,37 @@ export async function errorFromResponse(response: Response, fallback: string): P
 // 杜绝"第一个 refresh 轮换后第二个被误判重放导致整族撤销"。
 let refreshPromise: Promise<boolean> | null = null;
 
-// 复审 P1-2：单页 refreshPromise 只能协调同一 JS context。多个浏览器标签页共享
-// HttpOnly refresh Cookie 但各自有独立 context，必须用 Web Locks 串行化跨标签页
-// refresh（等待期间 Cookie 罐已被其他标签页轮换，不会提交旧 token 触发重放），
-// 并用 BroadcastChannel 同步新 token / 退出事件。
+// 复审 P1-2 / P1：单页 refreshPromise 只能协调同一 JS context。多个浏览器标签页
+// 共享 HttpOnly refresh Cookie 但各自有独立 context，必须用 Web Locks 串行化跨
+// 标签页 refresh（等待期间 Cookie 罐已被其他标签页轮换，不会提交旧 token 触发
+// 重放），并用 BroadcastChannel 同步新 token / 退出事件。
 const REFRESH_LOCK_NAME = "gewu-auth-refresh";
 const SESSION_CHANNEL_NAME = "gewu-auth-session";
 
-let sessionChannel: BroadcastChannel | null = null;
+// 复审 P1：频道在模块加载时立即初始化（而非首次使用时惰性创建）——
+// 等待锁的标签页若在 broadcast 前尚未订阅，会错过 logout 消息；
+// epoch 标记（localStorage）兜底保证即使错过消息也不会恢复已退出会话。
+const sessionChannel: BroadcastChannel | null =
+  typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel(SESSION_CHANNEL_NAME);
 
-function channel(): BroadcastChannel | null {
-  if (typeof BroadcastChannel === "undefined") return null;
-  if (sessionChannel === null) {
-    sessionChannel = new BroadcastChannel(SESSION_CHANNEL_NAME);
-    sessionChannel.addEventListener("message", (event: MessageEvent) => {
-      const message = event.data as { type?: string; token?: string } | null;
-      if (message?.type === "access-token" && typeof message.token === "string") {
-        setAccessToken(message.token);
-      } else if (
-        message?.type === "session-expired" ||
-        message?.type === "logout"
-      ) {
-        setAccessToken(null);
-        sessionExpiredHandler?.();
-      }
-    });
-  }
-  return sessionChannel;
+if (sessionChannel !== null) {
+  sessionChannel.addEventListener("message", (event: MessageEvent) => {
+    const message = event.data as { type?: string; token?: string } | null;
+    if (message?.type === "access-token" && typeof message.token === "string") {
+      setAccessToken(message.token);
+    } else if (message?.type === "session-expired" || message?.type === "logout") {
+      setAccessToken(null);
+      incrementLogoutEpoch();
+      sessionExpiredHandler?.();
+    }
+  });
 }
 
 function broadcast(message: { type: string; token?: string }): void {
-  channel()?.postMessage(message);
+  sessionChannel?.postMessage(message);
 }
 
-/** 退出登录后通知其他标签页同步清除本地会话。 */
+/** 退出登录后通知其他标签页同步清除本地会话（epoch 已在锁内/401 路径递增）。 */
 export function notifyLogout(): void {
   broadcast({ type: "logout" });
 }
@@ -110,6 +109,7 @@ async function doRefreshRequest(): Promise<boolean> {
   if (response.status === 401) {
     // 仅 401 AUTH_SESSION_INVALID 才视为凭据失效
     setAccessToken(null);
+    incrementLogoutEpoch();
     broadcast({ type: "session-expired" });
     sessionExpiredHandler?.();
     return false;
@@ -137,17 +137,26 @@ async function refreshSession(): Promise<boolean> {
     refreshPromise = (async () => {
       try {
         const generationBefore = getAccessTokenGeneration();
+        const epochBefore = getLogoutEpoch();
+        // 复审 P1：等锁期间必须复查 logout epoch——任何标签页在本标签页排队
+        // 期间发生 logout（本地退出或 401 失效），本标签页不得发起 refresh、
+        // 不得广播新 access token，直接按会话失效处理
+        const refreshOrReuse = async (): Promise<boolean> => {
+          if (getLogoutEpoch() !== epochBefore) {
+            setAccessToken(null);
+            return false;
+          }
+          // 复审 P2：等锁期间若其他标签页已广播新 token（或已失效），
+          // 直接复用该结果，不再发起一次轮换（避免连续换 Cookie 触发限流）
+          if (getAccessTokenGeneration() !== generationBefore) {
+            return getAccessToken() !== null;
+          }
+          return await doRefreshRequest();
+        };
         if (typeof navigator !== "undefined" && "locks" in navigator) {
-          return await navigator.locks.request(REFRESH_LOCK_NAME, async () => {
-            // 复审 P2：等锁期间若其他标签页已广播新 token（或已失效），
-            // 直接复用该结果，不再发起一次轮换（避免连续换 Cookie 触发限流）
-            if (getAccessTokenGeneration() !== generationBefore) {
-              return getAccessToken() !== null;
-            }
-            return await doRefreshRequest();
-          });
+          return await navigator.locks.request(REFRESH_LOCK_NAME, refreshOrReuse);
         }
-        return await doRefreshRequest();
+        return await refreshOrReuse();
       } finally {
         refreshPromise = null;
       }

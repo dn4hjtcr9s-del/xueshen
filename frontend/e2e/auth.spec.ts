@@ -128,3 +128,70 @@ test("多标签页并发刷新不会撤销合法会话（复审 P1-2 / P3 barrie
   await page2.reload();
   await expect(page2.getByText("晚上好")).toBeVisible({ timeout: 15_000 });
 });
+
+test("logout 失败时等待锁的标签页不得恢复会话（复审 P1）", async ({ page, context }) => {
+  await registerAndLogin(page);
+
+  // 第二个标签页：静默恢复会话（触发一次 refresh）
+  const page2 = await context.newPage();
+  await page2.goto("/");
+  await expect(page2.getByText("晚上好")).toBeVisible();
+
+  // 拦截 logout：持锁期间不放行，最终返回 503（family 未撤销、Cookie 未删除）
+  let logoutRequestStarted!: () => void;
+  let releaseLogout!: () => void;
+  const logoutHeld = new Promise<void>((resolve) => {
+    logoutRequestStarted = resolve;
+  });
+  const releasePromise = new Promise<void>((resolve) => {
+    releaseLogout = resolve;
+  });
+  await context.route("**/api/v1/auth/logout", async (route) => {
+    logoutRequestStarted();
+    await releasePromise;
+    await route.fulfill({
+      status: 503,
+      json: {
+        error: {
+          code: "AUTH_DB_UNAVAILABLE",
+          message: "认证数据库暂不可用，请稍后重试",
+          retryable: true,
+          field: null,
+          trace_id: "e2e",
+        },
+      },
+    });
+  });
+
+  // 统计 logout 持锁期间各标签页发起的 refresh 请求（B 的排队 refresh 应为 0）
+  let refreshDuringLogout = 0;
+  await context.route("**/api/v1/auth/refresh", async (route) => {
+    refreshDuringLogout += 1;
+    await route.fallback();
+  });
+
+  // A 发起 logout（withRefreshLock 持有跨标签页锁）
+  await page.getByRole("button", { name: "个人中心" }).click();
+  await page.getByRole("button", { name: "退出登录" }).click();
+  await logoutHeld;
+
+  // B 在 logout 持锁期间 reload → restore 的 refresh 排队等待同一把锁。
+  // 等待 React 挂载 + refreshSession 入队完成（确定性：放行 logout 前 B 必已排队）
+  await page2.reload();
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+
+  // 放行 logout → 503：A 本地清除并递增 logout epoch、广播 logout
+  releaseLogout();
+  await expect(page.getByText("欢迎回来")).toBeVisible({ timeout: 15_000 });
+  await expect(page2.getByText("欢迎回来")).toBeVisible({ timeout: 15_000 });
+
+  // 复审 P1：B 的排队 refresh 必须被 epoch 复查拦截，不得发出请求
+  await page2.waitForLoadState("networkidle");
+  expect(refreshDuringLogout).toBe(0);
+
+  // A 侧探针：登录请求不得携带 Bearer（本地 token 已被清除）
+  await page.getByLabel(/用户名 \/ 邮箱/).fill("probe-user");
+  await page.getByLabel("密码", { exact: true }).fill("probe-password-123");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByText("账号或密码错误")).toBeVisible();
+});
