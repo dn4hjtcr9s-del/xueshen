@@ -47,6 +47,12 @@ IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'auth') THEN
 END IF; END \$\$;"
 psql_as postgres template1 \
   -c "ALTER ROLE auth WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD 'auth';"
+psql_as postgres template1 -c "DO \$\$ BEGIN
+IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'conversation') THEN
+    CREATE ROLE conversation LOGIN PASSWORD 'conversation';
+END IF; END \$\$;"
+psql_as postgres template1 \
+  -c "ALTER ROLE conversation WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD 'conversation';"
 
 # 3. 按 memory 角色当前状态分类处理
 STATE="$(psql_as postgres template1 -tAc "SELECT CASE
@@ -126,10 +132,14 @@ SELECT 'CREATE DATABASE memory OWNER memory'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'memory')\gexec
 SELECT 'CREATE DATABASE auth OWNER auth'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'auth')\gexec
+SELECT 'CREATE DATABASE conversation OWNER conversation'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'conversation')\gexec
 REVOKE CONNECT ON DATABASE memory FROM PUBLIC;
 GRANT CONNECT ON DATABASE memory TO memory;
 REVOKE CONNECT ON DATABASE auth FROM PUBLIC;
 GRANT CONNECT ON DATABASE auth TO auth;
+REVOKE CONNECT ON DATABASE conversation FROM PUBLIC;
+GRANT CONNECT ON DATABASE conversation TO conversation;
 SQL
 
-echo "三账号隔离升级完成：管理员=postgres；应用账号=memory、auth（均为非超级用户）"
+echo "四账号隔离升级完成：管理员=postgres；应用账号=memory、auth、conversation（均为非超级用户）"
