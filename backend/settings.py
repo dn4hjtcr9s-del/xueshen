@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     auth_audience: str = Field(default="memory-api", alias="AUTH_AUDIENCE")
     auth_jwks_url: str | None = Field(default=None, alias="AUTH_JWKS_URL")
     auth_public_key: str | None = Field(default=None, alias="AUTH_PUBLIC_KEY")
+    # 文件优先于 PEM 文本（方案 §6.2）；文本形式保留用于测试直注
+    auth_public_key_file: str | None = Field(default=None, alias="AUTH_PUBLIC_KEY_FILE")
+    auth_private_key_file: str | None = Field(default=None, alias="AUTH_PRIVATE_KEY_FILE")
     service_token_audience: str = Field(default="memory-api", alias="SERVICE_TOKEN_AUDIENCE")
     auth_token_max_lifetime_seconds: int = Field(default=300)
 
@@ -139,7 +142,7 @@ class Settings(BaseSettings):
         """生产 readiness：认证参数是否齐备（§2.1）。"""
         if not self.auth_issuer:
             return False
-        return bool(self.auth_jwks_url or self.auth_public_key)
+        return bool(self.auth_jwks_url or self.auth_public_key or self.auth_public_key_file)
 
 
 @lru_cache

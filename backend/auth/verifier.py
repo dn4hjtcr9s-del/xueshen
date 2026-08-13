@@ -7,9 +7,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, cast
 from uuid import UUID
 
@@ -148,7 +150,17 @@ class ProductionJwtAuthAdapter:
         token = authorization.removeprefix("Bearer ").strip()
 
         decode_key: object
-        if self.settings.auth_public_key:
+        if self.settings.auth_public_key_file:
+            # 文件优先（方案 §6.2）；读取失败直接抛 AuthError 而非静默回退
+            try:
+                decode_key = await asyncio.to_thread(
+                    Path(self.settings.auth_public_key_file).read_text, encoding="utf-8"
+                )
+            except OSError as exc:
+                raise AuthError(
+                    "AUTH_REQUIRED", f"公钥文件读取失败: {type(exc).__name__}"
+                ) from exc
+        elif self.settings.auth_public_key:
             decode_key = self.settings.auth_public_key
         elif self.settings.auth_jwks_url:
             client = jwt.PyJWKClient(self.settings.auth_jwks_url)
