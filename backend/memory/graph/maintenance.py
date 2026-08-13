@@ -40,19 +40,21 @@ async def run_maintenance(
     assert isinstance(payload, MaintenanceCommand)
     kind = payload.kind
 
-    # acquire_scheduler_lock：每类维护任务全局互斥（§14.3）
+    # acquire_scheduler_lock：每类维护任务全局互斥（§14.3）。
+    # 复审修复（生产静默失效）：改用事务级 pg_try_advisory_xact_lock——
+    # 锁随事务提交/回滚自动释放，天然免疫"session 级锁 + 连接归还连接池后
+    # unlock 落在另一条连接"的泄漏；泄漏会使同类型维护任务此后永久返回
+    # busy 且无任何报错。lock/unlock 现在必然在同一事务边界内成对生效。
     async with ctx.session_factory() as session:
-        result = await session.execute(
-            text("SELECT pg_try_advisory_lock(hashtext(:name))"),
-            {"name": f"maintenance:{kind}"},
-        )
-        acquired = bool(result.scalar_one())
-        # 结束 autobegin 事务；session 级 advisory lock 不受 commit 影响
-        await session.commit()
-        if not acquired:
-            detail = {"kind": kind, "status": "busy"}
-            # busy 也回写 run（保持 running），由 Scheduler 稍后重排同 cursor 批次
-            async with session.begin():
+        async with session.begin():
+            result = await session.execute(
+                text("SELECT pg_try_advisory_xact_lock(hashtext(:name))"),
+                {"name": f"maintenance:{kind}"},
+            )
+            acquired = bool(result.scalar_one())
+            if not acquired:
+                detail = {"kind": kind, "status": "busy"}
+                # busy 也回写 run（保持 running），由 Scheduler 稍后重排同 cursor 批次
                 await maintenance_repo.update_run_by_operation(
                     session,
                     operation_id=operation.operation_id,
@@ -60,26 +62,20 @@ async def run_maintenance(
                     cursor=payload.cursor,
                     result=detail,
                 )
-            return {
-                "graph_state_result": {"maintenance": detail},
-                "warnings": [*state.get("warnings", []), f"维护任务 {kind} 正在其他实例运行"],
-            }
-        try:
-            async with session.begin():
-                detail = await _execute_batch(ctx, operation, payload, session)
-                # persist_cursor_or_finish：回写 maintenance run（§10.7 / §14.3）
-                await maintenance_repo.update_run_by_operation(
-                    session,
-                    operation_id=operation.operation_id,
-                    status="running" if detail.get("status") == "continue" else "succeeded",
-                    cursor=detail.get("next_cursor"),
-                    result=detail,
-                )
-        finally:
-            await session.execute(
-                text("SELECT pg_advisory_unlock(hashtext(:name))"),
-                {"name": f"maintenance:{kind}"},
+                return {
+                    "graph_state_result": {"maintenance": detail},
+                    "warnings": [*state.get("warnings", []), f"维护任务 {kind} 正在其他实例运行"],
+                }
+            detail = await _execute_batch(ctx, operation, payload, session)
+            # persist_cursor_or_finish：回写 maintenance run（§10.7 / §14.3）
+            await maintenance_repo.update_run_by_operation(
+                session,
+                operation_id=operation.operation_id,
+                status="running" if detail.get("status") == "continue" else "succeeded",
+                cursor=detail.get("next_cursor"),
+                result=detail,
             )
+    # 事务已提交（或异常回滚）→ 事务级 advisory lock 自动释放
     return {"graph_state_result": {"maintenance": detail}}
 
 
