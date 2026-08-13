@@ -1,2 +1,3 @@
-frontend/test-results/
-frontend/playwright-report/
+# Playwright 产物
+test-results/
+playwright-report/
