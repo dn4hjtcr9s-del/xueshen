@@ -88,6 +88,8 @@ services:
       KNOWLEDGE_GRAPH_ROOT: /app/knowledge_graph
       BACKUP_ROOT: /backups
       MEMORY_SCHEDULER_TIMEZONE: Asia/Shanghai
+      # 附录 A.1 #6：scheduler 只做 refresh family 数据清理，仅需 AUTH_DATABASE_URL
+      AUTH_DATABASE_URL: postgresql+psycopg://auth:auth@postgres:5432/auth
     volumes:
       - memory-data:/data/memory
       - ./knowledge_graph:/app/knowledge_graph:ro

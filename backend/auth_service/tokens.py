@@ -77,3 +77,32 @@ class AccessTokenIssuer:
             "jti": str(uuid4()),
         }
         return jwt.encode(claims, self._load_private_key(), algorithm="RS256")
+
+
+class AccessTokenVerifier:
+    """验签本服务签发的 access token（/me 用）；不查身份映射。"""
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+
+    def verify_sub(self, token: str) -> UUID:
+        """验签并返回 sub；失败抛 jwt.PyJWTError。"""
+        key_file = self._settings.auth_public_key_file
+        if key_file:
+            try:
+                decode_key = Path(key_file).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise RuntimeError(f"公钥文件读取失败: {type(exc).__name__}") from exc
+        elif self._settings.auth_public_key:
+            decode_key = self._settings.auth_public_key
+        else:
+            raise RuntimeError("认证公钥未配置")
+        claims = jwt.decode(
+            token,
+            decode_key,
+            algorithms=["RS256", "ES256"],
+            audience=self._settings.auth_audience,
+            issuer=self._settings.auth_issuer or DEFAULT_ISSUER,
+            options={"require": ["sub", "exp"]},
+        )
+        return UUID(str(claims["sub"]))

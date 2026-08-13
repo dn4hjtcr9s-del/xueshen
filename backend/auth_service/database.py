@@ -179,31 +179,6 @@ async def insert_outbox_event(
     )
 
 
-async def insert_refresh_token(
-    session: AsyncSession,
-    *,
-    token_hash: bytes,
-    user_id: UUID,
-    family_id: UUID,
-    expires_at: datetime,
-) -> None:
-    """插入 refresh token 行（方案 §4.4：只存哈希，family 独立）。"""
-    await session.execute(
-        text(
-            """
-            INSERT INTO refresh_tokens (token_hash, user_id, family_id, expires_at)
-            VALUES (:token_hash, :user_id, :family_id, :expires_at)
-            """
-        ),
-        {
-            "token_hash": token_hash,
-            "user_id": user_id,
-            "family_id": family_id,
-            "expires_at": expires_at,
-        },
-    )
-
-
 def refresh_expiry(now: datetime) -> datetime:
     """refresh token 过期时间：签发时刻 + 30 天（方案 §4.4）。"""
     return (now if now.tzinfo else now.replace(tzinfo=UTC)) + timedelta(days=REFRESH_TOKEN_TTL_DAYS)

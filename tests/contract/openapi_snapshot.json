@@ -2753,6 +2753,61 @@
         ]
       }
     },
+    "/api/v1/auth/logout": {
+      "post": {
+        "description": "退出登录：撤销当前 family，删除 Cookie；幂等（方案 §4.1 / §4.4）。",
+        "operationId": "logout_api_v1_auth_logout_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "description": "当前用户信息（方案 §4.1）：仅认 Bearer token，不查身份映射。",
+        "operationId": "me_api_v1_auth_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Me",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/refresh": {
+      "post": {
+        "description": "轮换 refresh token（方案 §4.4）。\n\n- 缺失/无效/过期/已撤销/重放统一返回 401 AUTH_SESSION_INVALID；\n- 重放（已作废 token 复用）撤销整族，细节只写安全日志；\n- 用户 disabled 时撤销其全部 family。",
+        "operationId": "refresh_api_v1_auth_refresh_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Refresh",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/api/v1/auth/register": {
       "post": {
         "description": "注册新账号：同事务写 users + 补偿事件，映射异步建立（方案 §3.2）。",

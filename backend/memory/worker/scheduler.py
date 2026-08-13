@@ -86,6 +86,8 @@ TASKS: tuple[ScheduledTask, ...] = (
     ScheduledTask("cleanup_checkpoints", daily_at=time(3, 30)),
     ScheduledTask("purge_notifications", daily_at=time(3, 45)),
     ScheduledTask("verify_checksums", daily_at=time(4, 0)),
+    # 认证会话清理（方案 §4.4 / 附录 A.2 #8）：过期超过 30 天的 refresh family
+    ScheduledTask("cleanup_expired_refresh_families", daily_at=time(4, 30)),
     ScheduledTask("check_backup_runs", daily_at=time(5, 0)),
 )
 
@@ -97,6 +99,9 @@ class Scheduler:
     clock: Callable[[], datetime] = _utc_now
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("memory.scheduler"))
     maintenance_gate: MaintenanceGate | None = None
+    #: auth 库会话工厂（方案 §4.4 / 附录 A.2 #8）：仅用于 refresh family 清理；
+    #: 未装配时跳过该任务（auth 库不可用不阻塞 memory 调度）
+    auth_session_factory: async_sessionmaker[AsyncSession] | None = None
 
     def __post_init__(self) -> None:
         self._stopping = asyncio.Event()
@@ -449,6 +454,22 @@ class Scheduler:
             self.logger.info("清理 90 天前用户通知：%d 条", total)
         return False
 
+    async def _task_cleanup_expired_refresh_families(self, now: datetime) -> bool:
+        """删除过期超过 30 天的 refresh family（方案 §4.4 / 附录 A.2 #8）。
+
+        auth 库不可用或未装配时不阻塞 memory 调度（run_task 已兜底异常日志）。
+        """
+        if self.auth_session_factory is None:
+            return False
+        from backend.auth_service.session import delete_expired_families
+
+        async with self.auth_session_factory() as session:
+            async with session.begin():
+                deleted = await delete_expired_families(session)
+        if deleted:
+            self.logger.info("清理过期 refresh family：%d 行", deleted)
+        return False
+
     async def _task_check_backup_runs(self, now: datetime) -> bool:
         """只读 backup_runs 并告警；备份执行不由 Scheduler 发起（§14.3）。"""
         tz = ZoneInfo(self.config.timezone)
@@ -567,6 +588,10 @@ async def _run() -> None:
     configure_logging(settings)
     db = Database(settings)
     maintenance_gate = MaintenanceGate(db.engine)
+    # auth 库会话工厂（方案 §4.4 / 附录 A.2 #8）：refresh family 每日清理用
+    from backend.auth_service.database import AuthDatabase
+
+    auth_db = AuthDatabase(settings)
     try:
         scheduler = Scheduler(
             session_factory=db.session_factory,
@@ -575,10 +600,12 @@ async def _run() -> None:
                 notification_retention_days=settings.memory_notification_retention_days,
             ),
             maintenance_gate=maintenance_gate,
+            auth_session_factory=auth_db.session_factory,
         )
         scheduler.install_signal_handlers()
         await scheduler.run_forever()
     finally:
+        await auth_db.close()
         await db.close()
 
 

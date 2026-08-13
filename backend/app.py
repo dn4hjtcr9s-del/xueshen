@@ -25,6 +25,7 @@ from sqlalchemy import text
 from backend.auth.verifier import AuthError
 from backend.auth_service.api import router as auth_router
 from backend.auth_service.errors import AuthServiceError
+from backend.auth_service.mapping_consumer import IdentityMappingConsumer
 from backend.auth_service.runtime import AuthRuntime, build_auth_runtime
 from backend.memory import metrics
 from backend.memory.api import (
@@ -154,6 +155,7 @@ def create_app(
     app.state.settings = settings
     app.state.runtime = runtime
     app.state.auth_runtime = auth_runtime
+    app.state.mapping_consumer_task = None
     app.state.rate_limiter = FixedWindowRateLimiter()
     app.state.startup_complete = False
     app.state.migration_head = None
@@ -346,8 +348,19 @@ def create_app(
         if app.state.runtime is None:
             app.state.runtime = await _build_runtime(settings, app)
         if app.state.auth_runtime is None:
-            # 认证服务与 memory-api 同进程（方案 §2.3）：独立 auth 库连接池 + 签发器
-            app.state.auth_runtime = build_auth_runtime(settings)
+            # 认证服务与 memory-api 同进程（方案 §2.3）：独立 auth 库连接池 + 签发器；
+            # 附带 memory 会话工厂供登录映射兜底与补偿消费任务使用（方案 §3.2）。
+            memory_factory = getattr(app.state.runtime, "session_factory", None)
+            app.state.auth_runtime = build_auth_runtime(
+                settings, memory_session_factory=memory_factory
+            )
+        # 身份映射补偿消费任务：只在 API 进程运行（附录 A.2 #7）
+        if app.state.mapping_consumer_task is None:
+            consumer = IdentityMappingConsumer(
+                auth_session_factory=app.state.auth_runtime.session_factory,
+                memory_session_factory=app.state.runtime.session_factory,
+            )
+            app.state.mapping_consumer_task = asyncio.create_task(consumer.run_forever())
         try:
             from alembic.config import Config
             from alembic.script import ScriptDirectory
@@ -361,6 +374,10 @@ def create_app(
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
+        task: asyncio.Task[None] | None = getattr(app.state, "mapping_consumer_task", None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         stack: AsyncExitStack | None = getattr(app.state, "db_exit_stack", None)
         if stack is not None:
             await stack.aclose()
