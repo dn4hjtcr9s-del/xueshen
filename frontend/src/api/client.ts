@@ -1,6 +1,7 @@
 // 共享请求层（方案 §9.1）：挂 Bearer、带 credentials、统一 401 → single-flight refresh。
 // 所有 API 客户端（memory / auth）都经由本层发出请求。
 import {
+  adoptLogoutEpoch,
   getAccessToken,
   getAccessTokenGeneration,
   getLogoutEpoch,
@@ -68,24 +69,30 @@ const sessionChannel: BroadcastChannel | null =
 
 if (sessionChannel !== null) {
   sessionChannel.addEventListener("message", (event: MessageEvent) => {
-    const message = event.data as { type?: string; token?: string } | null;
+    const message = event.data as { type?: string; token?: string; epoch?: number } | null;
     if (message?.type === "access-token" && typeof message.token === "string") {
-      setAccessToken(message.token);
+      // 复审 P1：仅同会话世代（发送方 epoch 与本地一致）时采用新 token，
+      // 杜绝"已退出标签页收到旧广播重新携带 Bearer"
+      if (message.epoch === getLogoutEpoch()) {
+        setAccessToken(message.token);
+      }
     } else if (message?.type === "session-expired" || message?.type === "logout") {
       setAccessToken(null);
-      incrementLogoutEpoch();
+      // 复审 P1：接收端只取 max（消息携带发送方 epoch），绝不自行递增，
+      // 避免新标签页把全局 epoch 回退
+      adoptLogoutEpoch(message.epoch ?? 0);
       sessionExpiredHandler?.();
     }
   });
 }
 
-function broadcast(message: { type: string; token?: string }): void {
+function broadcast(message: { type: string; token?: string; epoch?: number }): void {
   sessionChannel?.postMessage(message);
 }
 
-/** 退出登录后通知其他标签页同步清除本地会话（epoch 已在锁内/401 路径递增）。 */
+/** 退出登录后通知其他标签页同步清除本地会话（epoch 已在锁内递增）。 */
 export function notifyLogout(): void {
-  broadcast({ type: "logout" });
+  broadcast({ type: "logout", epoch: getLogoutEpoch() });
 }
 
 // 会话彻底失效（refresh 失败）时的回调：由 AuthContext 注册，跳回登录页。
@@ -96,6 +103,7 @@ export function setSessionExpiredHandler(handler: (() => void) | null): void {
 }
 
 async function doRefreshRequest(): Promise<boolean> {
+  const epochBeforeRequest = getLogoutEpoch();
   let response: Response;
   try {
     response = await fetch(`${AUTH_V1}/auth/refresh`, {
@@ -110,7 +118,7 @@ async function doRefreshRequest(): Promise<boolean> {
     // 仅 401 AUTH_SESSION_INVALID 才视为凭据失效
     setAccessToken(null);
     incrementLogoutEpoch();
-    broadcast({ type: "session-expired" });
+    broadcast({ type: "session-expired", epoch: getLogoutEpoch() });
     sessionExpiredHandler?.();
     return false;
   }
@@ -118,18 +126,43 @@ async function doRefreshRequest(): Promise<boolean> {
     // 复审 P2：429 / 5xx 是临时故障，保留现有会话，稍后自然重试
     return false;
   }
+  // 复审 P1：请求期间若收到其他标签页的 logout/session-expired（epoch 变化），
+  // 丢弃本次响应，不得写 token、不得广播新 access token
+  if (getLogoutEpoch() !== epochBeforeRequest) {
+    setAccessToken(null);
+    return false;
+  }
   const data = (await response.json()) as { access_token?: string };
   setAccessToken(data.access_token ?? null);
-  broadcast({ type: "access-token", token: data.access_token });
+  broadcast({
+    type: "access-token",
+    token: data.access_token,
+    epoch: getLogoutEpoch(),
+  });
   return Boolean(data.access_token);
 }
 
-/** 复审 P1：logout 与 refresh 使用同一把跨标签页锁，避免竞态残留会话。 */
+// 复审 P1：无 Web Locks 环境下的同页面互斥队列——logout 与 refresh 串行执行，
+// 消除"refresh 在途时 logout 完成、响应后又写回 token"的竞态
+let pageMutex: Promise<void> = Promise.resolve();
+
+/** 复审 P1：logout 与 refresh 使用同一把跨标签页锁（Web Locks）；
+ *  无 Web Locks 时退化为同页面互斥队列。 */
 export async function withRefreshLock<T>(task: () => Promise<T>): Promise<T> {
-  if (typeof navigator !== "undefined" && "locks" in navigator) {
+  if (typeof navigator !== "undefined" && navigator.locks?.request) {
     return await navigator.locks.request(REFRESH_LOCK_NAME, task);
   }
-  return await task();
+  const previous = pageMutex;
+  let release!: () => void;
+  pageMutex = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+  }
 }
 
 async function refreshSession(): Promise<boolean> {
@@ -153,7 +186,7 @@ async function refreshSession(): Promise<boolean> {
           }
           return await doRefreshRequest();
         };
-        if (typeof navigator !== "undefined" && "locks" in navigator) {
+        if (typeof navigator !== "undefined" && navigator.locks?.request) {
           return await navigator.locks.request(REFRESH_LOCK_NAME, refreshOrReuse);
         }
         return await refreshOrReuse();
