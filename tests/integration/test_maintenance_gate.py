@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
 from collections.abc import AsyncIterator, Iterator
@@ -41,10 +42,24 @@ def maintenance_database_url() -> Iterator[str]:
     settings = Settings.model_validate({"app_env": "test"})
     parsed = urlparse(settings.database_url)
     db_user = parsed.username or "memory"
+    # memory 账号已降权 NOCREATEDB（方案 §6.1），临时库由管理员创建、归 memory 所有
+    admin_user = os.environ.get("POSTGRES_ADMIN_USER", "postgres")
     database_name = f"memory_gate_{__import__('uuid').uuid4().hex[:8]}"
     database_url = settings.database_url.rsplit("/", 1)[0] + f"/{database_name}"
     subprocess.run(
-        ["docker", "compose", "exec", "-T", "postgres", "createdb", "-U", db_user, database_name],
+        [
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "postgres",
+            "createdb",
+            "-U",
+            admin_user,
+            "-O",
+            db_user,
+            database_name,
+        ],
         check=True,
         capture_output=True,
     )
@@ -55,7 +70,17 @@ def maintenance_database_url() -> Iterator[str]:
         yield database_url
     finally:
         subprocess.run(
-            ["docker", "compose", "exec", "-T", "postgres", "dropdb", "-U", db_user, database_name],
+            [
+                "docker",
+                "compose",
+                "exec",
+                "-T",
+                "postgres",
+                "dropdb",
+                "-U",
+                admin_user,
+                database_name,
+            ],
             check=False,
             capture_output=True,
         )
@@ -220,10 +245,24 @@ def test_upgrade_reconciles_weak_bootstrap_gate_schema(settings: Settings) -> No
     """0006 必须强化旧 bootstrap 表，不能因 CREATE IF NOT EXISTS 保留弱约束。"""
     parsed = urlparse(settings.database_url)
     db_user = parsed.username or "memory"
+    # memory 账号已降权 NOCREATEDB（方案 §6.1），临时库由管理员创建、归 memory 所有
+    admin_user = os.environ.get("POSTGRES_ADMIN_USER", "postgres")
     database_name = f"memory_gate_legacy_{__import__('uuid').uuid4().hex[:8]}"
     database_url = settings.database_url.rsplit("/", 1)[0] + f"/{database_name}"
     subprocess.run(
-        ["docker", "compose", "exec", "-T", "postgres", "createdb", "-U", db_user, database_name],
+        [
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "postgres",
+            "createdb",
+            "-U",
+            admin_user,
+            "-O",
+            db_user,
+            database_name,
+        ],
         check=True,
         capture_output=True,
     )
@@ -298,7 +337,17 @@ def test_upgrade_reconciles_weak_bootstrap_gate_schema(settings: Settings) -> No
                 assert "system_maintenance_state_consistent" in constraint_names
     finally:
         subprocess.run(
-            ["docker", "compose", "exec", "-T", "postgres", "dropdb", "-U", db_user, database_name],
+            [
+                "docker",
+                "compose",
+                "exec",
+                "-T",
+                "postgres",
+                "dropdb",
+                "-U",
+                admin_user,
+                database_name,
+            ],
             check=False,
             capture_output=True,
         )

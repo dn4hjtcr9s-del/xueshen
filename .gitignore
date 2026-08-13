@@ -27,3 +27,12 @@ experiments/**/output/
 experiments/**/outputs/
 
 .DS_Store
+
+# 脏工作区（评审 #25 裁决：不提交、不修改）
+bulid.md
+Review Findings.txt
+Review 结论.txt
+doule/
+embedding_artifacts/
+docs/auth-service-implementation-plan.md
+docs/conversation-agentic-rag-implementation-plan.md

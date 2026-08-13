@@ -2,13 +2,18 @@ services:
   postgres:
     image: postgres:17
     environment:
-      POSTGRES_USER: memory
-      POSTGRES_PASSWORD: memory
-      POSTGRES_DB: memory
+      # 管理员账号仅用于初始化与运维（方案 §6.1 / 附录 A.1 #2），不进入应用配置；
+      # 应用使用最小权限的 memory / auth 账号（见 initdb 脚本）。
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
     ports:
       - "55432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      # 全新 volume 首次启动自动执行三账号初始化；存量 volume 需手动执行
+      # scripts/postgres_roles_upgrade.sh（幂等，不删除任何数据）
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U memory -d memory"]
       interval: 5s

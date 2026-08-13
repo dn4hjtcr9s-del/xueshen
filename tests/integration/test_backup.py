@@ -86,11 +86,25 @@ async def _temporary_restore_environment(
     """创建仅供恢复测试使用的独立数据库，避免触碰开发/运行环境。"""
     parsed = urlparse(settings.database_url)
     db_user = parsed.username or "memory"
+    # memory 账号已降权 NOCREATEDB（方案 §6.1），临时库由管理员创建、归 memory 所有
+    admin_user = __import__("os").environ.get("POSTGRES_ADMIN_USER", "postgres")
     temp_db = f"memory_restore_{uuid4().hex[:8]}"
     temp_url = settings.database_url.rsplit("/", 1)[0] + f"/{temp_db}"
     await asyncio.to_thread(
         subprocess.run,
-        ["docker", "compose", "exec", "-T", "postgres", "createdb", "-U", db_user, temp_db],
+        [
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "postgres",
+            "createdb",
+            "-U",
+            admin_user,
+            "-O",
+            db_user,
+            temp_db,
+        ],
         check=True,
         capture_output=True,
     )
@@ -107,7 +121,7 @@ async def _temporary_restore_environment(
             await engine.dispose()
         await asyncio.to_thread(
             subprocess.run,
-            ["docker", "compose", "exec", "-T", "postgres", "dropdb", "-U", db_user, temp_db],
+            ["docker", "compose", "exec", "-T", "postgres", "dropdb", "-U", admin_user, temp_db],
             check=False,
             capture_output=True,
         )
@@ -362,12 +376,26 @@ async def test_restore_replays_completed_account_deletion(
 
     parsed = urlparse(settings.database_url)
     db_user = parsed.username or "memory"
+    # memory 账号已降权 NOCREATEDB（方案 §6.1），临时库由管理员创建、归 memory 所有
+    admin_user = __import__("os").environ.get("POSTGRES_ADMIN_USER", "postgres")
     temp_db = f"memory_restore_{uuid4().hex[:8]}"
     temp_url = settings.database_url.rsplit("/", 1)[0] + f"/{temp_db}"
 
     await asyncio.to_thread(
         subprocess.run,
-        ["docker", "compose", "exec", "-T", "postgres", "createdb", "-U", db_user, temp_db],
+        [
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "postgres",
+            "createdb",
+            "-U",
+            admin_user,
+            "-O",
+            db_user,
+            temp_db,
+        ],
         check=True,
         capture_output=True,
     )
@@ -465,7 +493,7 @@ async def test_restore_replays_completed_account_deletion(
     finally:
         await asyncio.to_thread(
             subprocess.run,
-            ["docker", "compose", "exec", "-T", "postgres", "dropdb", "-U", db_user, temp_db],
+            ["docker", "compose", "exec", "-T", "postgres", "dropdb", "-U", admin_user, temp_db],
             check=False,
             capture_output=True,
         )
