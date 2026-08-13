@@ -175,4 +175,24 @@ describe("共享请求层 401 → single-flight refresh（§9.3）", () => {
     await expect(logout()).rejects.toMatchObject({ status: 503 });
     expect(getAccessToken()).toBeNull();
   });
+
+  it("refresh 遇 503 视为可重试故障，不清 token（复审 P2）", async () => {
+    setAccessToken("valid-token");
+    server.use(
+      http.post("*/api/v1/auth/refresh", () => new HttpResponse(null, { status: 503 })),
+      http.get("*/api/v1/memory/index", () => new HttpResponse(null, { status: 401 })),
+    );
+    await expect(request("GET", "/memory/index")).rejects.toMatchObject({ status: 401 });
+    expect(getAccessToken()).toBe("valid-token");
+  });
+
+  it("refresh 网络故障不清 token（复审 P2）", async () => {
+    setAccessToken("valid-token");
+    server.use(
+      http.post("*/api/v1/auth/refresh", () => HttpResponse.error()),
+      http.get("*/api/v1/memory/index", () => new HttpResponse(null, { status: 401 })),
+    );
+    await expect(request("GET", "/memory/index")).rejects.toMatchObject({ status: 401 });
+    expect(getAccessToken()).toBe("valid-token");
+  });
 });

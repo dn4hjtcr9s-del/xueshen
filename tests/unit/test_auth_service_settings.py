@@ -133,17 +133,18 @@ def test_production_jwks_only_rejected(keys: dict[str, str]) -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="权限校验仅 POSIX")
-def test_production_private_key_permissions_too_wide_rejected(
-    keys: dict[str, str],
+@pytest.mark.parametrize("bad_mode", [0o644, 0o700, 0o400])
+def test_production_private_key_permissions_not_exactly_0600_rejected(
+    keys: dict[str, str], bad_mode: int
 ) -> None:
-    """复审 P2-6：私钥文件 group/other 存在权限时启动拒绝。"""
+    """复审 P2：私钥权限必须精确 0600（过宽 0644/0700、过严 0400 均拒绝）。"""
     from pathlib import Path
 
     private_path = Path(keys["private_file"])
     original_mode = private_path.stat().st_mode
     try:
-        private_path.chmod(0o644)
-        with pytest.raises(ValueError, match="权限过宽"):
+        private_path.chmod(bad_mode)
+        with pytest.raises(ValueError, match="精确为 0600"):
             Settings.model_validate(_base(keys))
     finally:
         private_path.chmod(original_mode)

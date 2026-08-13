@@ -169,6 +169,7 @@ class Settings(BaseSettings):
         - 第一版 token 无 kid（方案 §6.2），生产禁止仅配置 AUTH_JWKS_URL。
         """
         import os
+        import stat
 
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import rsa as crypto_rsa
@@ -176,12 +177,12 @@ class Settings(BaseSettings):
         private_path = Path(self.auth_private_key_file or "")
         if not private_path.is_file():
             raise ValueError(f"私钥文件不存在或不可读: {private_path}")
-        # 复审 P2-6：私钥文件不得对 group/other 开放任何权限（POSIX）
+        # 复审 P2：私钥文件权限精确强制 0600（方案 §6.2），过宽或过严均拒绝
         if os.name == "posix":
-            mode = private_path.stat().st_mode & 0o077
-            if mode:
+            mode = stat.S_IMODE(private_path.stat().st_mode)
+            if mode != 0o600:
                 raise ValueError(
-                    f"私钥文件权限过宽（方案要求 0600，当前 {oct(mode)}）: {private_path}"
+                    f"私钥文件权限必须精确为 0600（方案 §6.2），当前 {oct(mode)}: {private_path}"
                 )
         try:
             private_key = serialization.load_pem_private_key(

@@ -250,9 +250,13 @@ async def test_login_rejected_when_mapping_points_to_other_user(
 
 
 async def test_login_rate_limit_account_bucket_shared_across_identifiers(
-    auth_api_client: httpx.AsyncClient,
+    auth_api_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """复审 P2-7：用户名与邮箱共用同一个账号限流桶（key=user_id）。"""
+    # 固定限流器时钟窗口：避免测试跨分钟边界时窗口重置导致 429 偶发缺席
+    monkeypatch.setattr(
+        "backend.memory.api.dependencies.time.time", lambda: 1_700_000_000.0
+    )
     client = auth_api_client
     resp = await client.post(
         "/api/v1/auth/register",
@@ -333,6 +337,30 @@ async def test_expired_family_cleanup_boundary(
         remaining = {str(row[0]) for row in rows.all()}
     assert str(purge_family) not in remaining
     assert str(keep_family) in remaining
+
+
+async def test_logout_with_replayed_old_token_revokes_rotated_family(
+    auth_api_client: httpx.AsyncClient,
+) -> None:
+    """复审 P1：R0 轮换得 R1 后，用 R0 调 logout 仍须撤销整个 family（R1 失效）。"""
+    client = auth_api_client
+    _, cookies = await _register_and_login(client, USERNAME)
+    r0 = cookies["gewu_refresh_token"]
+
+    resp = await client.post("/api/v1/auth/refresh")
+    assert resp.status_code == 200, resp.text
+    r1 = client.cookies["gewu_refresh_token"]
+    assert r1 != r0, "refresh 必须轮换 token"
+
+    # 用已被轮换撤销的 R0 调 logout：不得因 R0 已 revoked 而跳过 family 撤销
+    client.cookies.set("gewu_refresh_token", r0)
+    resp = await client.post("/api/v1/auth/logout")
+    assert resp.status_code == 204
+
+    # R1 必须随 family 一并失效
+    client.cookies.set("gewu_refresh_token", r1)
+    resp = await client.post("/api/v1/auth/refresh")
+    assert resp.status_code == 401, resp.text
 
 
 async def test_readiness_503_when_auth_db_unavailable(

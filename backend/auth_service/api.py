@@ -373,7 +373,9 @@ async def logout(request: Request) -> Response:
             async with runtime.session_factory() as session:
                 async with session.begin():
                     row = await get_token_row_for_update(session, refresh_token_hash(raw))
-                    if row is not None and row["revoked_at"] is None:
+                    if row is not None:
+                        # 复审 P1：logout 必须撤销当前 family 全部 token，即使该
+                        # token 已被并发 refresh 轮换撤销（否则 R1 残留有效会话）
                         await revoke_family(session, row["family_id"])
         except SQLAlchemyError as exc:
             raise auth_db_unavailable() from exc

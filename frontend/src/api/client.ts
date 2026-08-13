@@ -1,6 +1,10 @@
 // 共享请求层（方案 §9.1）：挂 Bearer、带 credentials、统一 401 → single-flight refresh。
 // 所有 API 客户端（memory / auth）都经由本层发出请求。
-import { getAccessToken, setAccessToken } from "../auth/tokenStore";
+import {
+  getAccessToken,
+  getAccessTokenGeneration,
+  setAccessToken,
+} from "../auth/tokenStore";
 
 const API_BASE: string = import.meta.env.VITE_MEMORY_API_BASE_URL ?? "/memory-api";
 const V1 = `${API_BASE}/api/v1`;
@@ -93,37 +97,53 @@ export function setSessionExpiredHandler(handler: (() => void) | null): void {
 }
 
 async function doRefreshRequest(): Promise<boolean> {
+  let response: Response;
   try {
-    const response = await fetch(`${AUTH_V1}/auth/refresh`, {
+    response = await fetch(`${AUTH_V1}/auth/refresh`, {
       method: "POST",
       credentials: "include",
     });
-    if (!response.ok) {
-      setAccessToken(null);
-      broadcast({ type: "session-expired" });
-      sessionExpiredHandler?.();
-      return false;
-    }
-    const data = (await response.json()) as { access_token?: string };
-    setAccessToken(data.access_token ?? null);
-    broadcast({ type: "access-token", token: data.access_token });
-    return Boolean(data.access_token);
   } catch {
+    // 复审 P2：网络/网关故障是可重试故障，不清 token、不广播会话失效
+    return false;
+  }
+  if (response.status === 401) {
+    // 仅 401 AUTH_SESSION_INVALID 才视为凭据失效
     setAccessToken(null);
     broadcast({ type: "session-expired" });
     sessionExpiredHandler?.();
     return false;
   }
+  if (!response.ok) {
+    // 复审 P2：429 / 5xx 是临时故障，保留现有会话，稍后自然重试
+    return false;
+  }
+  const data = (await response.json()) as { access_token?: string };
+  setAccessToken(data.access_token ?? null);
+  broadcast({ type: "access-token", token: data.access_token });
+  return Boolean(data.access_token);
+}
+
+/** 复审 P1：logout 与 refresh 使用同一把跨标签页锁，避免竞态残留会话。 */
+export async function withRefreshLock<T>(task: () => Promise<T>): Promise<T> {
+  if (typeof navigator !== "undefined" && "locks" in navigator) {
+    return await navigator.locks.request(REFRESH_LOCK_NAME, task);
+  }
+  return await task();
 }
 
 async function refreshSession(): Promise<boolean> {
   if (!refreshPromise) {
     refreshPromise = (async () => {
       try {
+        const generationBefore = getAccessTokenGeneration();
         if (typeof navigator !== "undefined" && "locks" in navigator) {
           return await navigator.locks.request(REFRESH_LOCK_NAME, async () => {
-            // 等锁期间其他标签页可能已完成轮换；此刻再发 refresh 时
-            // Cookie 罐已是新值（跨标签页共享），不会触发重放撤销
+            // 复审 P2：等锁期间若其他标签页已广播新 token（或已失效），
+            // 直接复用该结果，不再发起一次轮换（避免连续换 Cookie 触发限流）
+            if (getAccessTokenGeneration() !== generationBefore) {
+              return getAccessToken() !== null;
+            }
             return await doRefreshRequest();
           });
         }
