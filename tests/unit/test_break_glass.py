@@ -31,7 +31,7 @@ def _settings(tmp_path: Any, **overrides: Any) -> Settings:
         "dev_auth_allow_scope_override": True,
         "memory_storage_root": str(tmp_path / "storage"),
     }
-    # production 覆盖时补齐 §6.3 认证配置（评审 P1-4 要求密钥文件真实存在）
+    # production 覆盖时补齐 §6.3 认证配置（评审 P1-4 / 复审 P2-6：密钥文件 0600）
     if overrides.get("app_env") == "production":
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
@@ -45,6 +45,7 @@ def _settings(tmp_path: Any, **overrides: Any) -> Settings:
                 encryption_algorithm=serialization.NoEncryption(),
             )
         )
+        private_file.chmod(0o600)
         public_pem = (
             key.public_key()
             .public_bytes(

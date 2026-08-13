@@ -47,6 +47,44 @@ export async function errorFromResponse(response: Response, fallback: string): P
 // 杜绝"第一个 refresh 轮换后第二个被误判重放导致整族撤销"。
 let refreshPromise: Promise<boolean> | null = null;
 
+// 复审 P1-2：单页 refreshPromise 只能协调同一 JS context。多个浏览器标签页共享
+// HttpOnly refresh Cookie 但各自有独立 context，必须用 Web Locks 串行化跨标签页
+// refresh（等待期间 Cookie 罐已被其他标签页轮换，不会提交旧 token 触发重放），
+// 并用 BroadcastChannel 同步新 token / 退出事件。
+const REFRESH_LOCK_NAME = "gewu-auth-refresh";
+const SESSION_CHANNEL_NAME = "gewu-auth-session";
+
+let sessionChannel: BroadcastChannel | null = null;
+
+function channel(): BroadcastChannel | null {
+  if (typeof BroadcastChannel === "undefined") return null;
+  if (sessionChannel === null) {
+    sessionChannel = new BroadcastChannel(SESSION_CHANNEL_NAME);
+    sessionChannel.addEventListener("message", (event: MessageEvent) => {
+      const message = event.data as { type?: string; token?: string } | null;
+      if (message?.type === "access-token" && typeof message.token === "string") {
+        setAccessToken(message.token);
+      } else if (
+        message?.type === "session-expired" ||
+        message?.type === "logout"
+      ) {
+        setAccessToken(null);
+        sessionExpiredHandler?.();
+      }
+    });
+  }
+  return sessionChannel;
+}
+
+function broadcast(message: { type: string; token?: string }): void {
+  channel()?.postMessage(message);
+}
+
+/** 退出登录后通知其他标签页同步清除本地会话。 */
+export function notifyLogout(): void {
+  broadcast({ type: "logout" });
+}
+
 // 会话彻底失效（refresh 失败）时的回调：由 AuthContext 注册，跳回登录页。
 let sessionExpiredHandler: (() => void) | null = null;
 
@@ -54,26 +92,42 @@ export function setSessionExpiredHandler(handler: (() => void) | null): void {
   sessionExpiredHandler = handler;
 }
 
+async function doRefreshRequest(): Promise<boolean> {
+  try {
+    const response = await fetch(`${AUTH_V1}/auth/refresh`, {
+      method: "POST",
+      credentials: "include",
+    });
+    if (!response.ok) {
+      setAccessToken(null);
+      broadcast({ type: "session-expired" });
+      sessionExpiredHandler?.();
+      return false;
+    }
+    const data = (await response.json()) as { access_token?: string };
+    setAccessToken(data.access_token ?? null);
+    broadcast({ type: "access-token", token: data.access_token });
+    return Boolean(data.access_token);
+  } catch {
+    setAccessToken(null);
+    broadcast({ type: "session-expired" });
+    sessionExpiredHandler?.();
+    return false;
+  }
+}
+
 async function refreshSession(): Promise<boolean> {
   if (!refreshPromise) {
     refreshPromise = (async () => {
       try {
-        const response = await fetch(`${AUTH_V1}/auth/refresh`, {
-          method: "POST",
-          credentials: "include",
-        });
-        if (!response.ok) {
-          setAccessToken(null);
-          sessionExpiredHandler?.();
-          return false;
+        if (typeof navigator !== "undefined" && "locks" in navigator) {
+          return await navigator.locks.request(REFRESH_LOCK_NAME, async () => {
+            // 等锁期间其他标签页可能已完成轮换；此刻再发 refresh 时
+            // Cookie 罐已是新值（跨标签页共享），不会触发重放撤销
+            return await doRefreshRequest();
+          });
         }
-        const data = (await response.json()) as { access_token?: string };
-        setAccessToken(data.access_token ?? null);
-        return Boolean(data.access_token);
-      } catch {
-        setAccessToken(null);
-        sessionExpiredHandler?.();
-        return false;
+        return await doRefreshRequest();
       } finally {
         refreshPromise = null;
       }

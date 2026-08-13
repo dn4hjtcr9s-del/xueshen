@@ -244,8 +244,6 @@ async def login(request: Request, body: LoginRequest) -> JSONResponse:
 
     if ip is not None and limiter.is_limited("auth_login_ip", ip, rl.LOGIN_FAIL_PER_IP):
         raise rate_limited(rl.retry_after_seconds())
-    if limiter.is_limited("auth_login_account", account, rl.LOGIN_FAIL_PER_ACCOUNT):
-        raise rate_limited(rl.retry_after_seconds())
 
     try:
         async with runtime.session_factory() as session:
@@ -255,17 +253,25 @@ async def login(request: Request, body: LoginRequest) -> JSONResponse:
     except SQLAlchemyError as exc:
         raise auth_db_unavailable() from exc
 
+    # 复审 P2-7：账号桶 key 使用稳定的 user_id（账号存在时），避免用户名/邮箱
+    # 把同一账号拆成两个限流桶；账号不存在时用规范化 identifier。存在与不存在的
+    # 账号都执行相同的查询 + bcrypt（缺失时用 DUMMY 哈希），时序与响应一致，
+    # 不通过限流行为泄露账号是否存在。
+    account_key = str(row["user_id"]) if row is not None else f"missing:{account}"
+    if limiter.is_limited("auth_login_account", account_key, rl.LOGIN_FAIL_PER_ACCOUNT):
+        raise rate_limited(rl.retry_after_seconds())
+
     stored_hash: str | None = row["password_hash"] if row is not None else None
     password_ok = await verify_password_async(body.password, stored_hash or DUMMY_PASSWORD_HASH)
     status_ok = row is not None and row["status"] == "active"
     if not password_ok or not status_ok:
         if ip is not None:
             limiter.hit("auth_login_ip", ip, rl.LOGIN_FAIL_PER_IP)
-        limiter.hit("auth_login_account", account, rl.LOGIN_FAIL_PER_ACCOUNT)
+        limiter.hit("auth_login_account", account_key, rl.LOGIN_FAIL_PER_ACCOUNT)
         raise invalid_credentials()
 
     assert row is not None
-    limiter.clear("auth_login_account", account)
+    limiter.clear("auth_login_account", account_key)
     await _ensure_identity_mapping(runtime, row["user_id"], runtime.issuer.issuer)
 
     family_id = uuid4()

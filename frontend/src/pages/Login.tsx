@@ -4,7 +4,7 @@ import { useAuth } from "../auth/AuthContext";
 import { MemoryApiError } from "../api/client";
 
 export function LoginPage({ onGoRegister }: { onGoRegister: () => void }) {
-  const { login } = useAuth();
+  const { login, logoutWarning } = useAuth();
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -34,6 +34,7 @@ export function LoginPage({ onGoRegister }: { onGoRegister: () => void }) {
         <div className="brand-seal" title="格物 · Math Studio">格</div>
         <h1 className="auth-title">欢迎回来</h1>
         <p className="auth-sub">登录后继续你的数学学习记忆</p>
+        {logoutWarning && <div className="auth-warning">{logoutWarning}</div>}
         <form onSubmit={submit} className="auth-form">
           <label className="auth-label" htmlFor="auth-identifier">
             用户名 / 邮箱

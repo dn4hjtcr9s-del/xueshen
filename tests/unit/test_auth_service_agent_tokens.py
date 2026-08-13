@@ -24,10 +24,14 @@ def keypair(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     ).decode("ascii")
-    public_pem = key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode("ascii")
+    public_pem = (
+        key.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode("ascii")
+    )
     tmp = tmp_path_factory.mktemp("agent_keys")
     private_file = tmp / "auth_private.pem"
     private_file.write_text(private_pem, encoding="utf-8")
@@ -100,9 +104,7 @@ def test_agent_token_resolves_delegated_user_in_verifier(
             return delegated
 
     adapter = ProductionJwtAuthAdapter(settings=settings, identity_resolver=Resolver())
-    ctx = asyncio.run(
-        adapter.authenticate({"authorization": f"Bearer {token}"}, client_host=None)
-    )
+    ctx = asyncio.run(adapter.authenticate({"authorization": f"Bearer {token}"}, client_host=None))
     assert ctx.user_id == delegated
     assert ctx.actor_type == "activity_agent"
     assert ctx.actor_principal == "activity-agent-prod-01"

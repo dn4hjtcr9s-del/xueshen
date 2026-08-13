@@ -170,9 +170,7 @@ class LocalLangGraphRunner:
             configurable={"thread_id": thread_id_for_operation(operation.operation_id)}
         )
         graph = (
-            self._purge_graph
-            if operation.operation_type == "purge_account_memory"
-            else self._graph
+            self._purge_graph if operation.operation_type == "purge_account_memory" else self._graph
         )
         final_state = await graph.ainvoke(
             {"operation": operation.model_dump(mode="json"), "fencing": fencing},

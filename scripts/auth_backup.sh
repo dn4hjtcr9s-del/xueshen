@@ -17,8 +17,10 @@ AUTH_DB_NAME="${AUTH_DB_NAME:-auth}"
 ADMIN_USER="${POSTGRES_ADMIN_USER:-postgres}"
 
 check_consistency() {
-  # 双向核对：1) auth 用户 → memory 映射（pending 补偿事件除外）
-  #           2) memory 映射 → auth 用户
+  # 双向核对（复审 P2-8）：
+  #   1) auth 用户 → memory 映射（pending 补偿事件除外）
+  #   2) memory 映射 → auth 用户
+  #   3) 映射归属：internal_user_id 必须等于 external_subject
   echo "== 一致性检查：auth users ↔ memory identity mappings =="
   USERS="$(docker compose exec -T postgres psql -U "$AUTH_DB_USER" -d auth -tAc \
     "SELECT user_id::text FROM users ORDER BY 1")"
@@ -26,15 +28,21 @@ check_consistency() {
     "SELECT external_subject FROM account_identity_mappings WHERE issuer='gewu-auth' ORDER BY 1")"
   PENDING="$(docker compose exec -T postgres psql -U "$AUTH_DB_USER" -d auth -tAc \
     "SELECT user_id::text FROM identity_mapping_outbox WHERE status='pending' ORDER BY 1")"
+  MISMATCH="$(docker compose exec -T postgres psql -U memory -d memory -tAc \
+    "SELECT external_subject || ' -> ' || internal_user_id::text \
+       FROM account_identity_mappings \
+      WHERE issuer='gewu-auth' AND internal_user_id::text <> external_subject \
+      ORDER BY 1")"
 
   MISSING_MAPPING="$(comm -23 <(echo "$USERS") <(printf '%s\n%s\n' "$SUBS" "$PENDING" | sort -u))"
   ORPHAN_MAPPING="$(comm -13 <(echo "$USERS") <(echo "$SUBS"))"
 
-  if [[ -z "$MISSING_MAPPING" && -z "$ORPHAN_MAPPING" ]]; then
-    echo "  一致：无缺失映射，无孤儿映射。"
+  if [[ -z "$MISSING_MAPPING" && -z "$ORPHAN_MAPPING" && -z "$MISMATCH" ]]; then
+    echo "  一致：无缺失映射，无孤儿映射，映射归属全部正确。"
   else
     [[ -n "$MISSING_MAPPING" ]] && echo "  缺失映射的用户: $MISSING_MAPPING"
     [[ -n "$ORPHAN_MAPPING" ]] && echo "  无对应用户的映射行: $ORPHAN_MAPPING"
+    [[ -n "$MISMATCH" ]] && echo "  归属不一致的映射行(external -> internal): $MISMATCH"
     return 1
   fi
 }

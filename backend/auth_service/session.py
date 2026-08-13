@@ -14,7 +14,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.auth_service.database import REFRESH_TOKEN_TTL_DAYS, refresh_expiry
+from backend.auth_service.database import refresh_expiry
 
 
 async def _rowcount(result: Any) -> int:
@@ -105,8 +105,12 @@ async def revoke_all_families(session: AsyncSession, user_id: UUID) -> int:
 
 
 async def delete_expired_families(session: AsyncSession, *, older_than_days: int = 30) -> int:
-    """删除过期超过 30 天的 family 全部行（方案 §4.4，scheduler 每日执行）。"""
-    cutoff = datetime.now(UTC) - timedelta(days=REFRESH_TOKEN_TTL_DAYS + older_than_days)
+    """删除过期超过 30 天的 family 全部行（方案 §4.4，scheduler 每日执行）。
+
+    复审 P2-5：expires_at 本身已是签发时刻 + 30 天，因此边界比较只减
+    older_than_days（不重复加 REFRESH_TOKEN_TTL_DAYS）。
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
     result = await session.execute(
         text(
             """

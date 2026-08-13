@@ -143,12 +143,17 @@ class Settings(BaseSettings):
         if self.app_env == "production":
             if self.dev_auth_enabled or self.dev_auth_allow_scope_override:
                 raise ValueError("生产环境禁止 DEV_AUTH_ENABLED / DEV_AUTH_ALLOW_SCOPE_OVERRIDE")
-            # §6.3 评审 #14：签发/验签与 auth 库配置缺失 → 启动直接失败
+            # §6.3 评审 #14 / 复审 P1-1：签发/验签与 auth 库配置缺失 → 启动直接失败。
+            # 第一版 token 不带 kid（方案 §6.2），JWKS 无法选中密钥，
+            # 因此生产环境不允许仅配置 AUTH_JWKS_URL，必须提供本地匹配公钥。
             missing: list[str] = []
             if not self.auth_private_key_file:
                 missing.append("AUTH_PRIVATE_KEY_FILE")
-            if not (self.auth_public_key or self.auth_public_key_file or self.auth_jwks_url):
-                missing.append("AUTH_PUBLIC_KEY_FILE / AUTH_PUBLIC_KEY / AUTH_JWKS_URL")
+            if not (self.auth_public_key or self.auth_public_key_file):
+                missing.append(
+                    "AUTH_PUBLIC_KEY_FILE / AUTH_PUBLIC_KEY"
+                    "（第一版 token 无 kid，生产不支持仅配置 AUTH_JWKS_URL）"
+                )
             if "auth_database_url" not in self.model_fields_set:
                 missing.append("AUTH_DATABASE_URL")
             if missing:
@@ -157,16 +162,27 @@ class Settings(BaseSettings):
         return self
 
     def _validate_auth_keys(self) -> None:
-        """评审 P1-4：生产启动时实际校验密钥（存在/可读/合法/公私匹配）。
+        """评审 P1-4 / 复审 P1-1、P2-6：生产启动时实际校验密钥。
 
-        JWKS 为合法替代（将来外部 IdP），此时跳过本地公钥校验，验签留待运行时。
+        - 私钥：存在、可读、合法 PEM、RSA 2048 位（方案 §6.2）、权限 0600；
+        - 公钥：文件优先、PEM 文本备选；与私钥必须匹配；
+        - 第一版 token 无 kid（方案 §6.2），生产禁止仅配置 AUTH_JWKS_URL。
         """
+        import os
+
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import rsa as crypto_rsa
 
         private_path = Path(self.auth_private_key_file or "")
         if not private_path.is_file():
             raise ValueError(f"私钥文件不存在或不可读: {private_path}")
+        # 复审 P2-6：私钥文件不得对 group/other 开放任何权限（POSIX）
+        if os.name == "posix":
+            mode = private_path.stat().st_mode & 0o077
+            if mode:
+                raise ValueError(
+                    f"私钥文件权限过宽（方案要求 0600，当前 {oct(mode)}）: {private_path}"
+                )
         try:
             private_key = serialization.load_pem_private_key(
                 private_path.read_bytes(), password=None
@@ -175,6 +191,9 @@ class Settings(BaseSettings):
             raise ValueError(f"私钥文件不是合法 PEM 私钥: {private_path}") from exc
         if not isinstance(private_key, crypto_rsa.RSAPrivateKey):
             raise ValueError("私钥必须是 RSA 密钥")
+        # 复审 P2-6：强制方案指定的 RSA 2048 位
+        if private_key.key_size != 2048:
+            raise ValueError(f"私钥必须为 RSA 2048 位（方案 §6.2），当前 {private_key.key_size} 位")
 
         public_pem: str | None = None
         if self.auth_public_key_file:
@@ -185,8 +204,9 @@ class Settings(BaseSettings):
         elif self.auth_public_key:
             public_pem = self.auth_public_key
         else:
-            # 仅 JWKS：本地无公钥可比对，验签由运行时 JWKS 客户端完成
-            return
+            # 复审 P1-1：无 kid 的 token 无法被 JWKS 选中密钥，
+            # 生产不允许 JWKS-only 配置（missing 检查已先行拒绝，此处兜底）
+            raise ValueError("第一版 token 无 kid，生产环境不允许仅配置 AUTH_JWKS_URL")
         try:
             public_key = serialization.load_pem_public_key(public_pem.encode("ascii"))
         except Exception as exc:
@@ -201,10 +221,10 @@ class Settings(BaseSettings):
         return self.app_env == "development"
 
     def production_auth_ready(self) -> bool:
-        """生产 readiness：认证参数是否齐备（§2.1）。"""
+        """生产 readiness：认证参数是否齐备（§2.1 / 复审 P1-1 要求本地公钥）。"""
         if not self.auth_issuer:
             return False
-        return bool(self.auth_jwks_url or self.auth_public_key or self.auth_public_key_file)
+        return bool(self.auth_public_key or self.auth_public_key_file)
 
 
 @lru_cache

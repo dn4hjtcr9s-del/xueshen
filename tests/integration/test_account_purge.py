@@ -496,9 +496,7 @@ async def _seed_checkpoint_thread(saver: AsyncPostgresSaver, thread_id: str) -> 
     checkpoint["channel_values"]["operation"] = {"target_user_id": str(USER)}
     checkpoint["channel_versions"]["operation"] = version
     metadata = CheckpointMetadata(source="input", step=-1, parents={})
-    next_config = await saver.aput(
-        config, checkpoint, metadata, {"operation": version}
-    )
+    next_config = await saver.aput(config, checkpoint, metadata, {"operation": version})
     await saver.aput_writes(
         next_config,
         [("result", {"target_user_id": str(USER)})],
@@ -506,9 +504,7 @@ async def _seed_checkpoint_thread(saver: AsyncPostgresSaver, thread_id: str) -> 
     )
 
 
-async def _count_checkpoint_rows(
-    session: AsyncSession, thread_ids: list[str]
-) -> dict[str, int]:
+async def _count_checkpoint_rows(session: AsyncSession, thread_ids: list[str]) -> dict[str, int]:
     """按目标 thread 汇总 LangGraph 三张表的残留行数。"""
     counts: dict[str, int] = {}
     for table in ("checkpoints", "checkpoint_writes", "checkpoint_blobs"):
@@ -559,9 +555,7 @@ async def test_purge_account_memory_full_flow(
         thread_id_for_operation(ids["user_op"]),
         thread_id_for_operation(purge_op.operation_id),
     ]
-    conninfo = settings.database_url.replace(
-        "postgresql+psycopg://", "postgresql://", 1
-    )
+    conninfo = settings.database_url.replace("postgresql+psycopg://", "postgresql://", 1)
     async with AsyncPostgresSaver.from_conn_string(conninfo) as saver:
         await saver.setup()
         for thread_id in checkpoint_threads:
@@ -573,9 +567,7 @@ async def test_purge_account_memory_full_flow(
         context = dataclasses.replace(
             runtime_context, checkpoint_cleanup=CheckpointCleanupAdapter(saver=saver)
         )
-        result = await LocalLangGraphRunner(
-            context=context, checkpointer=saver
-        ).run(purge_op)
+        result = await LocalLangGraphRunner(context=context, checkpointer=saver).run(purge_op)
     assert result.status == "succeeded"
 
     async with session_factory() as session:

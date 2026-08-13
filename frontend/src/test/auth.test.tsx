@@ -165,4 +165,14 @@ describe("共享请求层 401 → single-flight refresh（§9.3）", () => {
     await expect(request("GET", "/memory/index")).rejects.toMatchObject({ status: 401 });
     expect(getAccessToken()).toBeNull();
   });
+
+  it("logout 服务端失败仍清除本地 token（评审 P1-3）", async () => {
+    const { logout } = await import("../api/auth");
+    setAccessToken("local-token");
+    server.use(
+      http.post("*/api/v1/auth/logout", () => new HttpResponse(null, { status: 503 })),
+    );
+    await expect(logout()).rejects.toMatchObject({ status: 503 });
+    expect(getAccessToken()).toBeNull();
+  });
 });

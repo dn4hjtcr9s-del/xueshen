@@ -227,9 +227,10 @@ def _make_token(private_pem: str, **claims: Any) -> str:
 
 
 def _prod_settings(tmp_path: Any, private_pem: str, public_pem: str) -> Settings:
-    # 评审 P1-4：生产启动校验要求私钥文件真实存在且与公钥匹配
+    # 评审 P1-4 / 复审 P2-6：生产启动校验要求私钥文件真实存在、0600、与公钥匹配
     private_file = tmp_path / "auth_private.pem"
     private_file.write_text(private_pem, encoding="utf-8")
+    private_file.chmod(0o600)
     return Settings(
         app_env="production",
         dev_auth_enabled=False,

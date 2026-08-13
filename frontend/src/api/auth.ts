@@ -38,8 +38,13 @@ export async function login(identifier: string, password: string): Promise<Token
 }
 
 export async function logout(): Promise<void> {
-  await request<void>("POST", "/auth/logout", { auth: true });
-  setAccessToken(null);
+  // 复审 P1-3：无论服务端成败，本地 access token 必须清除（本地退出语义），
+  // 失败时异常照常抛出，由调用方提示用户服务器会话可能仍有效
+  try {
+    await request<void>("POST", "/auth/logout", { auth: true });
+  } finally {
+    setAccessToken(null);
+  }
 }
 
 export async function me(): Promise<AuthUser> {

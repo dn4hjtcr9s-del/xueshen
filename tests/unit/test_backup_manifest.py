@@ -104,6 +104,7 @@ def test_validate_manifest_detects_tampering_without_reseal() -> None:
     with pytest.raises(BackupError, match="自身 checksum 不匹配"):
         _check(manifest)
 
+
 @pytest.mark.parametrize(
     "revision",
     [None, 123, "", "9999_unknown", "0004"],

@@ -1,9 +1,12 @@
-"""生产配置校验单元测试（方案 §6.3 / §11 第 7 条 / 评审 P1-4）。
+"""生产配置校验单元测试（方案 §6.3 / §11 第 7 条 / 评审 P1-4 / 复审 P1-1、P2-6）。
 
-缺配置、密钥文件缺失、非法 PEM、公私钥不匹配 → Settings 构造直接失败。
+缺配置、密钥文件缺失、非法 PEM、公私钥不匹配、RSA 位数不足、
+文件权限过宽、JWKS-only 配置 → Settings 构造直接失败。
 """
 
 from __future__ import annotations
+
+import os
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -12,8 +15,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from backend.settings import Settings
 
 
-def _keypair() -> tuple[str, str]:
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+def _keypair(key_size: int = 2048) -> tuple[str, str]:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
     private_pem = key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
@@ -37,6 +40,7 @@ def keys(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
     private_file = keys_dir / "auth_private.pem"
     public_file = keys_dir / "auth_public.pem"
     private_file.write_text(private_pem, encoding="utf-8")
+    private_file.chmod(0o600)
     public_file.write_text(public_pem, encoding="utf-8")
     return {
         "private_pem": private_pem,
@@ -70,7 +74,7 @@ def test_production_missing_private_key_fails(keys: dict[str, str]) -> None:
 def test_production_missing_public_key_fails(keys: dict[str, str]) -> None:
     base = _base(keys)
     base.pop("auth_public_key_file")
-    with pytest.raises(ValueError, match="AUTH_PUBLIC_KEY_FILE / AUTH_PUBLIC_KEY / AUTH_JWKS_URL"):
+    with pytest.raises(ValueError, match="AUTH_PUBLIC_KEY_FILE / AUTH_PUBLIC_KEY"):
         Settings.model_validate(base)
 
 
@@ -100,6 +104,7 @@ def test_production_invalid_private_key_pem_fails(keys: dict[str, str], tmp_path
 
     bogus = Path(str(tmp_path)) / "bogus.pem"
     bogus.write_text("not-a-pem", encoding="utf-8")
+    bogus.chmod(0o600)
     base = _base(keys)
     base["auth_private_key_file"] = str(bogus)
     with pytest.raises(ValueError, match="合法 PEM"):
@@ -118,8 +123,44 @@ def test_production_key_pair_mismatch_fails(keys: dict[str, str], tmp_path: obje
         Settings.model_validate(base)
 
 
-def test_production_jwks_only_allowed(keys: dict[str, str]) -> None:
+def test_production_jwks_only_rejected(keys: dict[str, str]) -> None:
+    """复审 P1-1：第一版 token 无 kid，生产禁止 JWKS-only 配置。"""
     base = _base(keys)
     base.pop("auth_public_key_file")
     base["auth_jwks_url"] = "https://auth.example/.well-known/jwks.json"
-    Settings.model_validate(base)
+    with pytest.raises(ValueError, match="AUTH_JWKS_URL"):
+        Settings.model_validate(base)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="权限校验仅 POSIX")
+def test_production_private_key_permissions_too_wide_rejected(
+    keys: dict[str, str],
+) -> None:
+    """复审 P2-6：私钥文件 group/other 存在权限时启动拒绝。"""
+    from pathlib import Path
+
+    private_path = Path(keys["private_file"])
+    original_mode = private_path.stat().st_mode
+    try:
+        private_path.chmod(0o644)
+        with pytest.raises(ValueError, match="权限过宽"):
+            Settings.model_validate(_base(keys))
+    finally:
+        private_path.chmod(original_mode)
+
+
+def test_production_private_key_size_1024_rejected(keys: dict[str, str], tmp_path: object) -> None:
+    """复审 P2-6：非 2048 位 RSA 私钥启动拒绝。"""
+    from pathlib import Path
+
+    private_pem, public_pem = _keypair(key_size=1024)
+    private_file = Path(str(tmp_path)) / "small_private.pem"
+    public_file = Path(str(tmp_path)) / "small_public.pem"
+    private_file.write_text(private_pem, encoding="utf-8")
+    private_file.chmod(0o600)
+    public_file.write_text(public_pem, encoding="utf-8")
+    base = _base(keys)
+    base["auth_private_key_file"] = str(private_file)
+    base["auth_public_key_file"] = str(public_file)
+    with pytest.raises(ValueError, match="RSA 2048"):
+        Settings.model_validate(base)

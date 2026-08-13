@@ -649,16 +649,11 @@ async def restore_backup(
                         if non_empty_tables
                         else "存储目录非空"
                     )
-                    raise RestoreAbortedError(
-                        f"目标非空（{detail}）；覆盖现有环境必须显式 --force"
-                    )
+                    raise RestoreAbortedError(f"目标非空（{detail}）；覆盖现有环境必须显式 --force")
                 if run is not None:
                     if run["status"] != "succeeded":
                         raise BackupError(f"批次状态非 succeeded: {run['status']}")
-                    if (
-                        await asyncio.to_thread(_sha256, manifest_path)
-                        != run["manifest_checksum"]
-                    ):
+                    if await asyncio.to_thread(_sha256, manifest_path) != run["manifest_checksum"]:
                         raise BackupError("manifest checksum 与 backup_runs 不匹配")
 
                 target = _db_target(settings)
@@ -717,8 +712,7 @@ async def restore_backup(
                     upgraded_revision = await _current_migration_revision(session)
                 if upgraded_revision != head:
                     raise BackupError(
-                        "恢复后 migration 未到当前 head: "
-                        f"database={upgraded_revision}, head={head}"
+                        f"恢复后 migration 未到当前 head: database={upgraded_revision}, head={head}"
                     )
 
                 await asyncio.to_thread(

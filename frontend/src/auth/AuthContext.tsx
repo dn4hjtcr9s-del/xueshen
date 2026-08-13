@@ -10,7 +10,11 @@ import {
   type ReactNode,
 } from "react";
 import { login as apiLogin, logout as apiLogout, me as apiMe, type AuthUser } from "../api/auth";
-import { restoreSessionWithRefresh, setSessionExpiredHandler } from "../api/client";
+import {
+  notifyLogout,
+  restoreSessionWithRefresh,
+  setSessionExpiredHandler,
+} from "../api/client";
 
 interface AuthContextValue {
   user: AuthUser | null;
@@ -18,6 +22,8 @@ interface AuthContextValue {
   ready: boolean;
   login: (identifier: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  /** 服务端退出失败时的用户提示（评审 P1-3：凭据可能残留，需明确告知） */
+  logoutWarning: string | null;
   /** 当前用户首字（顶部用户标识，方案 §9.2） */
   initials: string;
 }
@@ -38,6 +44,7 @@ async function restoreSession(): Promise<AuthUser | null> {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [ready, setReady] = useState(false);
+  const [logoutWarning, setLogoutWarning] = useState<string | null>(null);
 
   // 会话彻底失效（任意请求 refresh 失败）→ 回到登录页
   useEffect(() => {
@@ -60,13 +67,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (identifier: string, password: string) => {
     const data = await apiLogin(identifier, password);
+    setLogoutWarning(null);
     setUser(data.user);
   }, []);
 
+  // 复审 P1-3：服务端 logout 失败时本地凭据已由 apiLogout 的 finally 清除，
+  // 但 HttpOnly refresh Cookie 无法由前端删除、服务器会话可能仍有效——
+  // 必须明确告知用户，而不是无提示地显示"已退出"。
   const logout = useCallback(async () => {
     try {
       await apiLogout();
+      setLogoutWarning(null);
+    } catch {
+      setLogoutWarning(
+        "服务端退出失败：本机登录状态已清除，但服务器会话可能仍有效。若在使用共用设备，请稍后重试退出。",
+      );
     } finally {
+      notifyLogout();
       setUser(null);
     }
   }, []);
@@ -77,9 +94,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       ready,
       login,
       logout,
+      logoutWarning,
       initials: user ? user.username.slice(0, 1).toUpperCase() : "",
     }),
-    [user, ready, login, logout],
+    [user, ready, login, logout, logoutWarning],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

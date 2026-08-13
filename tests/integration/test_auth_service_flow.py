@@ -249,6 +249,92 @@ async def test_login_rejected_when_mapping_points_to_other_user(
     assert body["code"] == "AUTH_MAPPING_PENDING"
 
 
+async def test_login_rate_limit_account_bucket_shared_across_identifiers(
+    auth_api_client: httpx.AsyncClient,
+) -> None:
+    """复审 P2-7：用户名与邮箱共用同一个账号限流桶（key=user_id）。"""
+    client = auth_api_client
+    resp = await client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": USERNAME,
+            "email": f"{USERNAME}@example.com",
+            "password": PASSWORD,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+
+    identifiers = [USERNAME, f"{USERNAME}@example.com"] * 3  # 6 次尝试
+    statuses = []
+    for identifier in identifiers[:5]:
+        resp = await client.post(
+            "/api/v1/auth/login",
+            json={"identifier": identifier, "password": "wrong-password-123"},
+        )
+        statuses.append(resp.status_code)
+    assert statuses == [401] * 5
+
+    # 第 6 次（无论用用户名还是邮箱）都应命中账号桶限流 429
+    resp = await client.post(
+        "/api/v1/auth/login",
+        json={"identifier": identifiers[5], "password": "wrong-password-123"},
+    )
+    assert resp.status_code == 429, resp.text
+    assert resp.json()["error"]["code"] == "RATE_LIMITED"
+
+
+async def test_expired_family_cleanup_boundary(
+    auth_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """复审 P2-5：过期恰好 29 天保留、31 天删除（不再额外加 30 天 TTL）。"""
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+
+    from backend.auth_service.session import delete_expired_families
+
+    user_id = uuid4()
+    async with auth_session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                text("INSERT INTO users (user_id, username, password_hash) VALUES (:u, :n, :h)"),
+                {"u": user_id, "n": f"cleanup_{uuid4().hex[:8]}", "h": "hash"},
+            )
+
+    keep_family = uuid4()
+    purge_family = uuid4()
+    now = datetime.now(UTC)
+    async with auth_session_factory() as session:
+        async with session.begin():
+            for family, expires in (
+                (keep_family, now - timedelta(days=29)),
+                (purge_family, now - timedelta(days=31)),
+            ):
+                await session.execute(
+                    text(
+                        "INSERT INTO refresh_tokens "
+                        "(token_hash, user_id, family_id, expires_at) "
+                        "VALUES (decode(md5(CAST(:family AS text) "
+                        "|| CAST(:expires AS text)), 'hex'), "
+                        ":user_id, :family, :expires)"
+                    ),
+                    {"family": family, "expires": expires, "user_id": user_id},
+                )
+
+    async with auth_session_factory() as session:
+        async with session.begin():
+            deleted = await delete_expired_families(session)
+    assert deleted == 1
+
+    async with auth_session_factory() as session:
+        rows = await session.execute(
+            text("SELECT family_id FROM refresh_tokens WHERE user_id = :u"),
+            {"u": user_id},
+        )
+        remaining = {str(row[0]) for row in rows.all()}
+    assert str(purge_family) not in remaining
+    assert str(keep_family) in remaining
+
+
 async def test_readiness_503_when_auth_db_unavailable(
     auth_test_settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],

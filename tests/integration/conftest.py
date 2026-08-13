@@ -26,16 +26,18 @@ from backend.memory.services.memory_service import MemoryService
 from backend.memory.storage.local_markdown import LocalMarkdownStore
 from backend.settings import Settings
 
-#: 允许连接的测试库名（附录 A.6 #20）：memory_test / auth_test（可带随机后缀）
-_TEST_DB_RE = re.compile(r"^(memory_test|auth_test)(_\w+)?$")
-
 
 def require_test_database(url: str, expected_prefix: str) -> str:
-    """校验数据库 URL 指向允许的测试库；否则拒绝执行（评审 P1-1 fail-closed）。"""
+    """校验数据库 URL 指向本链路的专用测试库；否则拒绝执行（评审 P1-1 / 复审 P3-9）。
+
+    memory 链路只允许 memory_test*，auth 链路只允许 auth_test*，
+    交叉注入（memory fixture 连 auth_test 等）同样拒绝。
+    """
     name = make_url(url).database or ""
-    if not _TEST_DB_RE.match(name):
+    pattern = re.compile(rf"^{re.escape(expected_prefix)}_test(_\w+)?$")
+    if not pattern.match(name):
         pytest.fail(
-            f"集成测试拒绝使用非测试数据库 {name!r}（{url}）。"
+            f"集成测试拒绝使用数据库 {name!r}（{url}）。"
             f"请通过 scripts/ci-local.sh backend-integration 运行，或显式注入"
             f" {expected_prefix}_test 数据库 URL。"
         )
