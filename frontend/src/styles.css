@@ -953,3 +953,96 @@ body::before {
 }
 
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ============================================================
+   认证：登录 / 注册页（方案 §9.2，视觉沿现有样式延伸）
+   ============================================================ */
+
+.auth-screen {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 16px;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+  padding: 36px 34px 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.auth-card .brand-seal {
+  margin-bottom: 18px;
+}
+
+.auth-title {
+  font-family: var(--serif);
+  font-size: 26px;
+  letter-spacing: 0.02em;
+}
+
+.auth-sub {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.auth-form {
+  width: 100%;
+  margin-top: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.auth-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+
+.auth-input {
+  font-family: var(--ui);
+  font-size: 14px;
+  color: var(--ink);
+  background: var(--card);
+  border: var(--hairline);
+  padding: 10px 12px;
+  outline: none;
+}
+
+.auth-input:focus {
+  box-shadow: 3px 3px 0 rgba(34, 28, 18, 0.12);
+  border-color: var(--ink);
+}
+
+.auth-error {
+  font-size: 12.5px;
+  color: var(--cinnabar-deep);
+  background: var(--cinnabar-wash);
+  border: 1px solid var(--cinnabar);
+  padding: 8px 10px;
+}
+
+.auth-submit {
+  margin-top: 4px;
+  width: 100%;
+  justify-content: center;
+}
+
+.auth-switch {
+  margin-top: 18px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}

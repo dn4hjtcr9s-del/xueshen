@@ -11,7 +11,7 @@ import {
   Users,
 } from "lucide-react";
 import type { PageKey } from "./data";
-import { user } from "./data";
+import { useAuth } from "./auth/AuthContext";
 import {
   listNotifications,
   markNotificationRead,
@@ -90,6 +90,7 @@ function NotifPanel({
 }
 
 export default function App() {
+  const { initials } = useAuth();
   const [page, setPage] = useState<PageKey>("home");
   const [showNotif, setShowNotif] = useState(false);
   const [notifications, setNotifications] = useState<MemoryNotification[]>([]);
@@ -159,7 +160,7 @@ export default function App() {
             {unread && <span className="dot" />}
           </button>
           <button className="avatar-btn" onClick={() => setPage("profile")} aria-label="个人中心">
-            {user.initials}
+            {initials || "格"}
           </button>
         </header>
 

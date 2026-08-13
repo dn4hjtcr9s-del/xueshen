@@ -1,9 +1,8 @@
 // Memory API 客户端（规格 §19 / §20.4）。
-// 基址来自 VITE_MEMORY_API_BASE_URL（默认 /memory-api，由 Vite proxy 转发）；
+// 经由共享请求层 client.ts 发出（挂 Bearer、带 credentials、401 自动刷新）；
 // 前端代码不注入任何 Dev Auth Header（开发环境由 Vite proxy 注入 X-Dev-User-Id）。
 
-const API_BASE: string = import.meta.env.VITE_MEMORY_API_BASE_URL ?? "/memory-api";
-const V1 = `${API_BASE}/api/v1`;
+import { MemoryApiError, idempotencyKey, request, type PublicError } from "./client";
 
 // ---------------------------------------------------------------------------
 // 契约镜像类型（后端 backend/memory/contracts 的公开结构）
@@ -20,13 +19,8 @@ export type OperationStatus =
   | "dead_letter"
   | "cancelled";
 
-export interface PublicError {
-  code: string;
-  message: string;
-  retryable: boolean;
-  field: string | null;
-  trace_id: string;
-}
+// PublicError 单一来源在共享请求层；此处重新导出保持既有导入兼容
+export type { PublicError } from "./client";
 
 export interface CursorPage<T> {
   items: T[];
@@ -257,57 +251,10 @@ export interface ReviewDecisionRequest {
 }
 
 // ---------------------------------------------------------------------------
-// 错误与请求基础设施
+// 错误与请求基础设施（经由共享请求层；MemoryApiError 重新导出保持兼容）
 // ---------------------------------------------------------------------------
 
-export class MemoryApiError extends Error {
-  readonly status: number;
-  readonly code: string;
-  readonly retryable: boolean;
-  readonly field: string | null;
-  readonly traceId: string | null;
-
-  constructor(status: number, error: Partial<PublicError> | undefined, fallback: string) {
-    super(error?.message ?? fallback);
-    this.status = status;
-    this.code = error?.code ?? "INTERNAL_ERROR";
-    this.retryable = error?.retryable ?? false;
-    this.field = error?.field ?? null;
-    this.traceId = error?.trace_id ?? null;
-  }
-}
-
-async function request<T>(
-  method: string,
-  path: string,
-  options: { body?: unknown; idempotencyKey?: string; query?: Record<string, string> } = {},
-): Promise<T> {
-  const headers: Record<string, string> = {};
-  if (options.body !== undefined) headers["Content-Type"] = "application/json";
-  if (options.idempotencyKey) headers["Idempotency-Key"] = options.idempotencyKey;
-  const url = options.query
-    ? `${V1}${path}?${new URLSearchParams(options.query).toString()}`
-    : `${V1}${path}`;
-  const response = await fetch(url, {
-    method,
-    headers,
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-  });
-  if (!response.ok) {
-    let error: Partial<PublicError> | undefined;
-    try {
-      error = (await response.json()).error;
-    } catch {
-      // 非 JSON 错误体：用 HTTP 状态兜底
-    }
-    throw new MemoryApiError(response.status, error, `请求失败（HTTP ${response.status}）`);
-  }
-  return (await response.json()) as T;
-}
-
-function idempotencyKey(): string {
-  return crypto.randomUUID();
-}
+export { MemoryApiError, idempotencyKey } from "./client";
 
 // ---------------------------------------------------------------------------
 // 总结记忆读接口（§19.4）

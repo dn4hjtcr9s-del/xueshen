@@ -2,11 +2,13 @@
 import { ArrowRight, MessageCircle, RotateCcw } from "lucide-react";
 import { planMeta, todayTasks, user, weekMinutes } from "../data";
 import type { PageKey } from "../data";
+import { useAuth } from "../auth/AuthContext";
 import { MasteryRadar, SectionHead } from "../ui";
 
 const WEEKDAYS = ["五", "六", "日", "一", "二", "三", "四"];
 
 export function HomePage({ goChat, go }: { goChat: () => void; go: (p: PageKey) => void }) {
+  const { user: authUser } = useAuth();
   const done = todayTasks.filter((t) => t.done).length;
   const maxMin = Math.max(...weekMinutes, 1);
 
@@ -16,7 +18,7 @@ export function HomePage({ goChat, go }: { goChat: () => void; go: (p: PageKey) 
         <div className="hero-ghost">λ</div>
         <div className="hero-kicker">TUESDAY · 2026.08.04 · 第 {user.streakDays} 天连续学习</div>
         <h1 className="hero-greet">
-          晚上好，{user.name}。
+          晚上好，{authUser?.username ?? ""}。
           <br />
           今天继续攻克 <span className="mark">特征值与对角化</span>。
         </h1>
