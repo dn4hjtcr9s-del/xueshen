@@ -7,13 +7,18 @@ scope 调用；目标用户只能经 account_identity_mappings 解析，调用�
 
 from __future__ import annotations
 
-from datetime import timedelta
-from typing import Any
+from datetime import datetime, timedelta
+from typing import Any, Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fastapi import APIRouter, Depends, Response
+from pydantic import BaseModel, ConfigDict, Field
 
-from backend.auth.context import SCOPE_MEMORY_MAINTENANCE, AuthContext
+from backend.auth.context import (
+    SCOPE_MEMORY_MAINTENANCE,
+    SCOPE_MEMORY_SOURCE_DELETE,
+    AuthContext,
+)
 from backend.memory.api.dependencies import (
     ApiRuntime,
     get_runtime,
@@ -34,6 +39,7 @@ from backend.memory.contracts.errors import (
     IdentityMappingNotFoundError,
 )
 from backend.memory.contracts.events import AccountMemoryPurgeRequestedPayload
+from backend.memory.contracts.evidence import SourceDeletedEvent
 from backend.memory.contracts.operations import MemoryOperation, MemoryOperationResult
 from backend.memory.persistence import account_deletion as deletion_repo
 from backend.memory.persistence import operations as ops_repo
@@ -184,3 +190,67 @@ async def purge_account_memory(
     result = operation_result_from_row(row)
     response.status_code = status_code_for_row(row)
     return result
+
+
+# ---------------------------------------------------------------------------
+# 内部 source-deletions 端点（方案 §1.1 D5 / §8.6 / §22）
+#
+# 调用既有 RecordingSourceDeletionHandler 记录删除事实；只接受独立 system
+# principal 的 memory:source_delete scope。未获 Memory/Conversation/Auth owner
+# 批准前由部署配置决定是否挂载（默认关闭，见方案 §1.3）。
+# ---------------------------------------------------------------------------
+
+
+class SourceDeletionRequest(BaseModel):
+    """内部删除事件请求（§8.6 步骤 4：source_ref/source_version 与 Reader 返回值一致）。
+
+    修复（评审 P2）：event_id 由调用方稳定生成（幂等锚点），服务端不再随机生成——
+    随机 event_id 使重试产生新记录，幂等失效。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: UUID
+    user_id: UUID
+    source_system: Literal["conversation", "activity"]
+    source_ref: str = Field(min_length=1, max_length=500)
+    source_version: str | None = Field(default=None, max_length=200)
+    deleted_at: datetime | None = None
+
+
+def build_source_deletions_router(
+    *,
+    handler: Any,
+    session_factory: Any,
+    enabled: bool = False,
+) -> APIRouter | None:
+    """组装内部 source-deletions Router（composition root 注入 RecordingSourceDeletionHandler）。
+
+    修复（评审 P2）：enabled 默认 False（§1.3 默认关闭）——未获 owner 批准时
+    端点不挂载。幂等锚点为调用方提供的 event_id，重复删除返回 duplicate。
+    """
+    if not enabled:
+        return None
+    deletion_router = APIRouter(prefix="/api/v1/internal", tags=["internal"])
+
+    @deletion_router.post("/source-deletions")
+    async def record_source_deletion(
+        request: SourceDeletionRequest,
+        auth: AuthContext = Depends(
+            require(actors=_SERVICE_ONLY, scope=SCOPE_MEMORY_SOURCE_DELETE)
+        ),
+    ) -> dict[str, str]:
+        """记录一条源删除事件（§8.6 步骤 4）。"""
+        from datetime import UTC as _UTC
+
+        event = SourceDeletedEvent(
+            event_id=request.event_id,
+            source_system=request.source_system,
+            source_ref=request.source_ref,
+            source_version=request.source_version,
+            deleted_at=request.deleted_at or datetime.now(_UTC),
+        )
+        result = await handler.handle(user_id=request.user_id, event=event)
+        return {"status": result}
+
+    return deletion_router

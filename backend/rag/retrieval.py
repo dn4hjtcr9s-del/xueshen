@@ -29,7 +29,10 @@ _SELECT_COLUMNS = """
     c.content_text,
     c.source_page_start,
     c.source_page_end,
-    c.source_refs
+    c.source_refs,
+    c.corpus_id,
+    c.chunk_index,
+    c.token_count
 """
 
 

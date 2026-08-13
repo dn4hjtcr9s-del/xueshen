@@ -56,6 +56,9 @@ class PublicError(BaseModel):
     retryable: bool
     field: str | None = None
     trace_id: str
+    # 附录 A.4（v1.4）：仅 THREAD_VERSION_CONFLICT 时填充；序列化时 exclude_none 不出现。
+    # 向后兼容：Memory 域既有响应不受影响。
+    current_version: int | None = None
 
 
 class MemoryError(Exception):

@@ -272,6 +272,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "sqlalchemy" },
+    { name = "tiktoken" },
     { name = "uvicorn" },
 ]
 
@@ -313,6 +314,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12,<1.0" },
     { name = "sqlalchemy", specifier = ">=2.0.49,<2.1" },
     { name = "testcontainers", extras = ["postgres"], marker = "extra == 'dev'", specifier = ">=4.10,<5.0" },
+    { name = "tiktoken", specifier = ">=0.11,<1" },
     { name = "tiktoken", marker = "extra == 'embedding'", specifier = ">=0.11,<1" },
     { name = "uvicorn", specifier = ">=0.47,<0.48" },
 ]

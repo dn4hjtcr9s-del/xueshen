@@ -87,8 +87,12 @@ class Database:
             async with self.session_factory() as session:
                 await session.execute(text("SELECT 1"))
             return True
-        except OSError:
-            return False
+        except Exception as exc:
+            from sqlalchemy.exc import DBAPIError, OperationalError
+
+            if isinstance(exc, (DBAPIError, OperationalError, OSError)):
+                return False
+            raise
 
     async def close(self) -> None:
         await self.engine.dispose()

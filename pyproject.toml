@@ -20,6 +20,8 @@ dependencies = [
     "pyjwt[crypto]>=2.10,<3.0",
     "httpx>=0.28,<1.0",
     "bcrypt>=4.2,<6.0",
+    # 附录 A.7（v1.4）：TokenCounter 全链路统一 tiktoken o200k_base，主依赖必需
+    "tiktoken>=0.11,<1",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +58,7 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 # FastAPI 依赖注入工厂模式（Depends(require(...))/Depends(rate_limit(...))）是
 # 框架标准用法，B008 函数调用默认值在此为有意为之
 "backend/memory/api/**" = ["B008"]
+"backend/conversation/api/**" = ["B008"]
 
 [tool.mypy]
 python_version = "3.13"
@@ -65,3 +68,9 @@ mypy_path = "."
 [[tool.mypy.overrides]]
 module = ["langgraph.*", "langgraph_checkpoint.*", "testcontainers.*"]
 ignore_missing_imports = true
+
+# LangGraph StateGraph 泛型与 Send 动态节点类型无法在 strict 模式精确表达，
+# 与对 langgraph 包的忽略处理一致；builder 只做图装配，不含业务逻辑
+[[tool.mypy.overrides]]
+module = ["backend.conversation.graph.builder"]
+disable_error_code = ["type-var", "arg-type", "type-arg", "no-any-return", "misc", "attr-defined"]

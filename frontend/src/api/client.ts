@@ -18,6 +18,8 @@ export interface PublicError {
   retryable: boolean;
   field: string | null;
   trace_id: string;
+  // 附录 A.4：仅 THREAD_VERSION_CONFLICT 时出现
+  current_version?: number | null;
 }
 
 export class MemoryApiError extends Error {

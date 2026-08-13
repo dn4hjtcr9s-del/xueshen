@@ -137,6 +137,196 @@ class Settings(BaseSettings):
     rate_limit_search_per_minute: int = Field(default=60)
     rate_limit_graph_state_per_minute: int = Field(default=30)
 
+    # ------------------------------------------------------------------
+    # Conversation Agentic RAG（方案 §20，v1.3/v1.4）
+    # ------------------------------------------------------------------
+
+    # 数据与运行时（§20.1）
+    conversation_database_url: str = Field(
+        default="postgresql+psycopg://conversation:conversation@127.0.0.1:55432/conversation",
+        alias="CONVERSATION_DATABASE_URL",
+    )
+    conversation_graph_checkpoint_schema: str = Field(
+        default="conversation_checkpoints", alias="CONVERSATION_GRAPH_CHECKPOINT_SCHEMA"
+    )
+    conversation_max_active_turns_per_thread: int = Field(
+        default=1, alias="CONVERSATION_MAX_ACTIVE_TURNS_PER_THREAD"
+    )
+    conversation_worker_poll_seconds: float = Field(
+        default=1.0, alias="CONVERSATION_WORKER_POLL_SECONDS"
+    )
+    conversation_turn_lease_seconds: int = Field(
+        default=60, alias="CONVERSATION_TURN_LEASE_SECONDS"
+    )
+    conversation_turn_max_attempts: int = Field(default=3, alias="CONVERSATION_TURN_MAX_ATTEMPTS")
+    conversation_job_max_attempts: int = Field(default=10, alias="CONVERSATION_JOB_MAX_ATTEMPTS")
+    conversation_retention_sweep_interval_hours: int = Field(
+        default=24, alias="CONVERSATION_RETENTION_SWEEP_INTERVAL_HOURS"
+    )
+    conversation_max_user_message_chars: int = Field(
+        default=10_000, alias="CONVERSATION_MAX_USER_MESSAGE_CHARS"
+    )
+    conversation_list_default_limit: int = Field(
+        default=50, alias="CONVERSATION_LIST_DEFAULT_LIMIT"
+    )
+    conversation_list_max_limit: int = Field(default=100, alias="CONVERSATION_LIST_MAX_LIMIT")
+    conversation_turn_rate_limit_per_minute: int = Field(
+        default=10, alias="CONVERSATION_TURN_RATE_LIMIT_PER_MINUTE"
+    )
+    conversation_internal_tester_user_ids: list[str] = Field(
+        default_factory=list, alias="CONVERSATION_INTERNAL_TESTER_USER_IDS"
+    )
+    conversation_context_max_messages: int = Field(
+        default=20, alias="CONVERSATION_CONTEXT_MAX_MESSAGES"
+    )
+    conversation_context_token_budget: int = Field(
+        default=6000, alias="CONVERSATION_CONTEXT_TOKEN_BUDGET"
+    )
+    conversation_memory_token_budget: int = Field(
+        default=3000, alias="CONVERSATION_MEMORY_TOKEN_BUDGET"
+    )
+    conversation_answer_token_budget: int = Field(
+        default=2000, alias="CONVERSATION_ANSWER_TOKEN_BUDGET"
+    )
+    conversation_summary_trigger_tokens: int = Field(
+        default=8000, alias="CONVERSATION_SUMMARY_TRIGGER_TOKENS"
+    )
+    conversation_turn_deadline_seconds: int = Field(
+        default=120, alias="CONVERSATION_TURN_DEADLINE_SECONDS"
+    )
+
+    # RAG 与 Query Embedding（§20.2）
+    conversation_retrieval_max_subqueries: int = Field(
+        default=4, alias="CONVERSATION_RETRIEVAL_MAX_SUBQUERIES"
+    )
+    conversation_retrieval_max_total_subqueries: int = Field(
+        default=6, alias="CONVERSATION_RETRIEVAL_MAX_TOTAL_SUBQUERIES"
+    )
+    conversation_retrieval_max_iterations: int = Field(
+        default=1, alias="CONVERSATION_RETRIEVAL_MAX_ITERATIONS"
+    )
+    conversation_retrieval_concurrency: int = Field(
+        default=4, alias="CONVERSATION_RETRIEVAL_CONCURRENCY"
+    )
+    conversation_retrieval_worker_timeout_seconds: float = Field(
+        default=5.0, alias="CONVERSATION_RETRIEVAL_WORKER_TIMEOUT_SECONDS"
+    )
+    conversation_retrieval_total_timeout_seconds: float = Field(
+        default=10.0, alias="CONVERSATION_RETRIEVAL_TOTAL_TIMEOUT_SECONDS"
+    )
+    conversation_retrieval_result_limit: int = Field(
+        default=20, alias="CONVERSATION_RETRIEVAL_RESULT_LIMIT"
+    )
+    conversation_retrieval_adjacent_chunks_per_side: int = Field(
+        default=1, alias="CONVERSATION_RETRIEVAL_ADJACENT_CHUNKS_PER_SIDE"
+    )
+    conversation_retrieval_merged_hit_max_tokens: int = Field(
+        default=1500, alias="CONVERSATION_RETRIEVAL_MERGED_HIT_MAX_TOKENS"
+    )
+    conversation_citation_snippet_max_chars: int = Field(
+        default=300, alias="CONVERSATION_CITATION_SNIPPET_MAX_CHARS"
+    )
+    conversation_evidence_token_budget: int = Field(
+        default=4000, alias="CONVERSATION_EVIDENCE_TOKEN_BUDGET"
+    )
+
+    # Memory、Reader 与 Outbox（§20.3）
+    memory_api_base_url: str = Field(default="", alias="MEMORY_API_BASE_URL")
+    memory_agent_token: str | None = Field(default=None, alias="MEMORY_AGENT_TOKEN")
+    memory_context_timeout_seconds: float = Field(
+        default=5.0, alias="MEMORY_CONTEXT_TIMEOUT_SECONDS"
+    )
+    conversation_reader_base_url: str = Field(default="", alias="CONVERSATION_READER_BASE_URL")
+    conversation_reader_service_token: str | None = Field(
+        default=None, alias="CONVERSATION_READER_SERVICE_TOKEN"
+    )
+    conversation_source_delete_service_token: str | None = Field(
+        default=None, alias="CONVERSATION_SOURCE_DELETE_SERVICE_TOKEN"
+    )
+    conversation_outbox_poll_seconds: float = Field(
+        default=1.0, alias="CONVERSATION_OUTBOX_POLL_SECONDS"
+    )
+    conversation_outbox_lease_seconds: int = Field(
+        default=60, alias="CONVERSATION_OUTBOX_LEASE_SECONDS"
+    )
+    conversation_outbox_max_attempts: int = Field(
+        default=10, alias="CONVERSATION_OUTBOX_MAX_ATTEMPTS"
+    )
+
+    # SSE（§20.4）
+    conversation_sse_heartbeat_seconds: int = Field(
+        default=15, alias="CONVERSATION_SSE_HEARTBEAT_SECONDS"
+    )
+    conversation_sse_event_retention_days: int = Field(
+        default=30, alias="CONVERSATION_SSE_EVENT_RETENTION_DAYS"
+    )
+    conversation_checkpoint_retention_days: int = Field(
+        default=30, alias="CONVERSATION_CHECKPOINT_RETENTION_DAYS"
+    )
+    conversation_sse_delta_batch_ms: float = Field(
+        default=100.0, alias="CONVERSATION_SSE_DELTA_BATCH_MS"
+    )
+    conversation_sse_delta_batch_chars: int = Field(
+        default=64, alias="CONVERSATION_SSE_DELTA_BATCH_CHARS"
+    )
+
+    # 模型角色（§19.1：不写死模型名，按角色配置）
+    openai_rewrite_model: str = Field(default="", alias="OPENAI_REWRITE_MODEL")
+    openai_evidence_model: str = Field(default="", alias="OPENAI_EVIDENCE_MODEL")
+    openai_answer_model: str = Field(default="", alias="OPENAI_ANSWER_MODEL")
+    openai_conversation_summary_model: str = Field(
+        default="", alias="OPENAI_CONVERSATION_SUMMARY_MODEL"
+    )
+
+    # Embedding 复用现有配置（§20.2 / D15：不新增重复凭证）
+    embedding_base_url: str | None = Field(default=None, alias="EMBEDDING_BASE_URL")
+    embedding_api_key: str | None = Field(default=None, alias="EMBEDDING_API_KEY")
+    embedding_model: str | None = Field(default=None, alias="EMBEDDING_MODEL")
+    rag_embedding_dimensions: int = Field(default=1024, alias="RAG_EMBEDDING_DIMENSIONS")
+    # §20.2 / D15：EMBEDDING_API_KEY 的既有回退源（scripts 域同规则）
+    dashscope_api_key: str | None = Field(default=None, alias="DASHSCOPE_API_KEY")
+
+    # Feature Flags（§27.1 / 附录 A.10）
+    # §1.3（评审 P1-8）：内部 Memory transport 未获 owner 批准前默认关闭；
+    # "实现不等批准，启用必须等批准"。Memory 读取/投递相关默认 false。
+    conversation_agentic_rag_enabled: bool = Field(
+        default=True, alias="CONVERSATION_AGENTIC_RAG_ENABLED"
+    )
+    conversation_multi_query_enabled: bool = Field(
+        default=True, alias="CONVERSATION_MULTI_QUERY_ENABLED"
+    )
+    conversation_evidence_loop_enabled: bool = Field(
+        default=True, alias="CONVERSATION_EVIDENCE_LOOP_ENABLED"
+    )
+    conversation_memory_read_enabled: bool = Field(
+        default=False, alias="CONVERSATION_MEMORY_READ_ENABLED"
+    )
+    conversation_memory_submit_enabled: bool = Field(
+        default=False, alias="CONVERSATION_MEMORY_SUBMIT_ENABLED"
+    )
+    conversation_streaming_enabled: bool = Field(
+        default=True, alias="CONVERSATION_STREAMING_ENABLED"
+    )
+
+    @property
+    def embedding_api_key_resolved(self) -> str | None:
+        """§20.2 / D15：EMBEDDING_API_KEY 缺失时回退 DASHSCOPE_API_KEY。"""
+        if self.embedding_api_key:
+            return self.embedding_api_key
+        return self.dashscope_api_key
+
+    @property
+    def conversation_flags(self) -> dict[str, bool]:
+        """Feature Flag 快照（附录 A.10：进程启动时读入，运行中不热切换）。"""
+        return {
+            "agentic_rag": self.conversation_agentic_rag_enabled,
+            "multi_query": self.conversation_multi_query_enabled,
+            "evidence_loop": self.conversation_evidence_loop_enabled,
+            "memory_read": self.conversation_memory_read_enabled,
+            "memory_submit": self.conversation_memory_submit_enabled,
+            "streaming": self.conversation_streaming_enabled,
+        }
+
     @model_validator(mode="after")
     def validate_environment_rules(self) -> Settings:
         """生产环境安全约束（§18.1 / §6.3）。"""
@@ -159,6 +349,42 @@ class Settings(BaseSettings):
             if missing:
                 raise ValueError("生产环境缺少认证服务配置: " + ", ".join(missing))
             self._validate_auth_keys()
+            # 附录 A.11 #2（评审 P2）：生产若显式启用 Conversation Agentic RAG 功能
+            # （agentic_rag / memory_read / memory_submit 任一被显式开启，
+            # 或显式提供了 CONVERSATION_DATABASE_URL），必须显式配置数据库 URL，
+            # 禁止开发默认凭证。全部默认关闭/未显式启用时保持纯 Memory 部署可行。
+            conversation_explicitly_used = (
+                "conversation_database_url" in self.model_fields_set
+                or any(
+                    field in self.model_fields_set
+                    for field in (
+                        "conversation_agentic_rag_enabled",
+                        "conversation_memory_read_enabled",
+                        "conversation_memory_submit_enabled",
+                    )
+                )
+            )
+            if (
+                conversation_explicitly_used
+                and "conversation_database_url" not in self.model_fields_set
+            ):
+                raise ValueError(
+                    "生产环境启用 Conversation 功能必须显式配置"
+                    " CONVERSATION_DATABASE_URL（不允许使用开发默认凭证）"
+                )
+            # 附录 A.7 / 评审 P1-10：生产若启用 Agentic RAG 且提供 Conversation URL，
+            # 模型角色必须齐备（未提供 URL = Conversation 未部署，角色校验无意义）
+            if (
+                self.conversation_agentic_rag_enabled
+                and "conversation_database_url" in self.model_fields_set
+            ):
+                for role_field in (
+                    "openai_rewrite_model",
+                    "openai_evidence_model",
+                    "openai_answer_model",
+                ):
+                    if not getattr(self, role_field, ""):
+                        raise ValueError(f"生产环境启用 Agentic RAG 必须配置 {role_field}")
         return self
 
     def _validate_auth_keys(self) -> None:

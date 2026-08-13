@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.4",
+    "@microsoft/fetch-event-source": "^2.0.1",
     "katex": "^0.16.28",
     "lucide-react": "^0.562.0",
     "react": "^19.2.7",

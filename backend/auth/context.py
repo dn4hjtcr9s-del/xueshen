@@ -31,6 +31,10 @@ SCOPE_MEMORY_GRAPH_STATE = "memory:graph_state"
 SCOPE_MEMORY_CONTEXT = "memory:context"
 SCOPE_MEMORY_MAINTENANCE = "memory:maintenance"
 SCOPE_MEMORY_BREAK_GLASS = "memory:break_glass"
+# Conversation 域内部 scope（方案 §1.2 / §8.2 / §8.6 / §22）：
+# 两个独立 system principal，不授予普通用户与 delegated Agent
+SCOPE_CONVERSATION_SOURCE_READ = "conversation:source_read"
+SCOPE_MEMORY_SOURCE_DELETE = "memory:source_delete"
 
 ALL_SCOPES: frozenset[str] = frozenset(
     {
@@ -45,6 +49,8 @@ ALL_SCOPES: frozenset[str] = frozenset(
         SCOPE_MEMORY_CONTEXT,
         SCOPE_MEMORY_MAINTENANCE,
         SCOPE_MEMORY_BREAK_GLASS,
+        SCOPE_CONVERSATION_SOURCE_READ,
+        SCOPE_MEMORY_SOURCE_DELETE,
     }
 )
 

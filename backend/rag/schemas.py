@@ -20,7 +20,11 @@ class SearchFilters:
 
 @dataclass(frozen=True, slots=True)
 class SearchHit:
-    """检索结果；页码和 source_refs 可直接用于回答引用。"""
+    """检索结果；页码和 source_refs 可直接用于回答引用。
+
+    corpus_id / chunk_index / token_count 为 Conversation 域增强列
+    （方案 §12.5：RAG 表已具备，本期只增强查询列映射与 DTO，不新增 migration）。
+    """
 
     chunk_id: str
     score: float
@@ -36,6 +40,9 @@ class SearchHit:
     source_page_end: int
     source_refs: tuple[dict[str, Any], ...]
     matched_channels: tuple[str, ...] = field(default_factory=tuple)
+    corpus_id: str = ""
+    chunk_index: int = 0
+    token_count: int | None = None
 
     @classmethod
     def from_mapping(cls, row: Mapping[str, Any]) -> SearchHit:
@@ -57,4 +64,7 @@ class SearchHit:
             source_page_end=int(row["source_page_end"]),
             source_refs=tuple(dict(item) for item in refs),
             matched_channels=tuple(str(item) for item in row.get("matched_channels", ())),
+            corpus_id=str(row.get("corpus_id") or ""),
+            chunk_index=int(row.get("chunk_index") or 0),
+            token_count=int(row["token_count"]) if row.get("token_count") is not None else None,
         )

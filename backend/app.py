@@ -13,7 +13,7 @@ import asyncio
 import logging
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -21,12 +21,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.auth.verifier import AuthError
 from backend.auth_service.api import router as auth_router
 from backend.auth_service.errors import AuthServiceError
 from backend.auth_service.mapping_consumer import IdentityMappingConsumer
 from backend.auth_service.runtime import AuthRuntime, build_auth_runtime
+from backend.conversation.contracts.errors import ConversationError
 from backend.memory import metrics
 from backend.memory.api import (
     graph_states,
@@ -61,12 +63,23 @@ def _effective_origins(settings: Settings) -> list[str]:
 
 
 def _public_error_body(
-    code: str, message: str, *, retryable: bool, trace_id: str, field: str | None = None
+    code: str,
+    message: str,
+    *,
+    retryable: bool,
+    trace_id: str,
+    field: str | None = None,
+    current_version: int | None = None,
 ) -> dict[str, object]:
     return {
         "error": PublicError(
-            code=code, message=message, retryable=retryable, field=field, trace_id=trace_id
-        ).model_dump(mode="json")
+            code=code,
+            message=message,
+            retryable=retryable,
+            field=field,
+            trace_id=trace_id,
+            current_version=current_version,
+        ).model_dump(mode="json", exclude_none=True)
     }
 
 
@@ -90,7 +103,6 @@ async def _build_runtime(settings: Settings, app: FastAPI) -> ApiRuntime:
     from backend.memory.worker.main import (
         _psycopg_conninfo,
         _UnavailableActivityReader,
-        _UnavailableConversationReader,
         _worker_config,
     )
     from backend.memory.worker.worker import Worker
@@ -108,13 +120,16 @@ async def _build_runtime(settings: Settings, app: FastAPI) -> ApiRuntime:
     )
     async with maintenance_gate.traffic():
         await saver.setup()
+    conversation_reader = await _conversation_reader_for_runtime(
+        settings, stack, db.session_factory
+    )
     context = MemoryRuntimeContext(
         settings=settings,
         memory_service=memory_service,
         graph_state_service=KnowledgeGraphStateService(
             settings=settings, session_factory=db.session_factory
         ),
-        conversation_reader=_UnavailableConversationReader(),
+        conversation_reader=conversation_reader,
         activity_reader=_UnavailableActivityReader(),
         graph_registry_factory=default_registry_factory,
         openai_client=RealMemoryLLMClient(settings=settings),
@@ -141,6 +156,36 @@ async def _build_runtime(settings: Settings, app: FastAPI) -> ApiRuntime:
         gateway_worker=gateway_worker,
         db=db,
         maintenance_gate=maintenance_gate,
+    )
+
+
+async def _conversation_reader_for_runtime(
+    settings: Settings,
+    stack: AsyncExitStack,
+    memory_session_factory: async_sessionmaker[AsyncSession],
+) -> Any:
+    """装配生产 ConversationReader（方案 §8.5）：真实 Http 实现 + 删除感知包装。
+
+    DeletionAwareConversationReader 需要 Memory 域 source_deletions 表的
+    session factory（删除抑制，§8.5：两个 runtime 都必须包装）。
+    未配置 READER_BASE_URL/token（内部 transport 未批准或功能关闭）时，
+    退回 _UnavailableConversationReader 并维持原语义（§1.3：启用必须等批准）。
+    """
+    from backend.memory.worker.main import _UnavailableConversationReader
+
+    if not settings.conversation_reader_base_url:
+        return _UnavailableConversationReader()
+    from backend.integrations.conversation_reader import HttpConversationReader
+    from backend.memory.readers.filtering import DeletionAwareConversationReader
+
+    http_reader = HttpConversationReader(
+        settings.conversation_reader_base_url,
+        token=settings.conversation_reader_service_token,
+    )
+    await stack.enter_async_context(http_reader)
+    return DeletionAwareConversationReader(
+        inner=http_reader,
+        session_factory=memory_session_factory,
     )
 
 
@@ -290,6 +335,26 @@ def create_app(
             ),
         )
 
+    @app.exception_handler(ConversationError)
+    async def conversation_error_handler(request: Request, exc: ConversationError) -> JSONResponse:
+        """Conversation 域错误（附录 A.8）：复用 PublicError 信封。
+
+        THREAD_VERSION_CONFLICT 时在 error 对象内部携带 current_version（附录 A.4）。
+        """
+        trace_id = getattr(request.state, "trace_id", None) or ""
+        current_version = getattr(exc, "current_version", None)
+        return JSONResponse(
+            status_code=exc.http_status,
+            content=_public_error_body(
+                exc.code,
+                exc.message,
+                retryable=exc.retryable,
+                trace_id=trace_id,
+                field=exc.field,
+                current_version=current_version,
+            ),
+        )
+
     @app.exception_handler(AuthError)
     async def auth_error_handler(request: Request, exc: AuthError) -> JSONResponse:
         trace_id = getattr(request.state, "trace_id", None) or ""
@@ -383,6 +448,17 @@ def create_app(
         except Exception:
             logger.warning("无法解析 auth alembic head revision", exc_info=True)
             app.state.auth_migration_head = None
+        # Conversation 迁移链 head（§17.1：进入 readiness；未装配 Conversation 时跳过）
+        try:
+            from alembic.config import Config
+            from alembic.script import ScriptDirectory
+
+            app.state.conversation_migration_head = ScriptDirectory.from_config(
+                Config("conversation_alembic.ini")
+            ).get_current_head()
+        except Exception:
+            logger.warning("无法解析 conversation alembic head revision", exc_info=True)
+            app.state.conversation_migration_head = None
         app.state.startup_complete = True
 
     @app.on_event("shutdown")
@@ -407,6 +483,42 @@ def create_app(
     app.include_router(graph_states.router)
     app.include_router(notifications.router)
     app.include_router(internal.router)
+    # 内部 source-deletions（方案 §1.1 D5 / §8.6）：独立 system principal + memory:source_delete。
+    # 修复（评审 P2）：默认关闭（§1.3）——只有配置了 source_delete 服务 token 才挂载；
+    # 未获 owner 批准时端点保持关闭（不在 readiness 中启用）。
+    current_runtime = app.state.runtime
+    if current_runtime is not None and current_runtime.session_factory is not None:
+        from backend.memory.api.internal import build_source_deletions_router
+        from backend.memory.readers.handler import RecordingSourceDeletionHandler
+
+        deletion_handler = RecordingSourceDeletionHandler(
+            session_factory=current_runtime.session_factory
+        )
+        deletion_router = build_source_deletions_router(
+            handler=deletion_handler,
+            session_factory=current_runtime.session_factory,
+            enabled=bool(settings.conversation_source_delete_service_token),
+        )
+        if deletion_router is not None:
+            app.include_router(deletion_router)
+    # Conversation Router（方案 §17.1：挂载到现有 FastAPI App）
+    from backend.conversation.api import build_conversation_routers
+
+    conversation_router = build_conversation_routers(app)
+    if conversation_router is not None:
+        app.include_router(conversation_router)
+    # 内部 Reader 端点（方案 §8.2，P0 闭环）：Memory 侧 HttpConversationReader 的
+    # POST /api/v1/internal/conversation-sources/read 目标。
+    # 依赖 conversation DB；未启用 Conversation 时跳过（与 Router 同门控）。
+    reader_db = getattr(app.state, "conversation_db", None)
+    if reader_db is not None:
+        from backend.conversation.api.internal_sources import build_reader_router
+        from backend.conversation.services.source_read_service import (
+            ConversationSourceReadService,
+        )
+
+        reader_service = ConversationSourceReadService(session_factory=reader_db.session_factory)
+        app.include_router(build_reader_router(reader_service))
     # 认证服务（方案 §2.3：内嵌同进程，将来可平移为独立服务）
     app.include_router(auth_router, prefix="/api/v1/auth")
 
@@ -477,6 +589,65 @@ def create_app(
 
         if settings.app_env == "production" and not settings.production_auth_ready():
             failures.append("production_auth_not_configured")
+        # Conversation 迁移链检查（方案 §17.1：Conversation migration 进入 readiness；
+        # 未启用 Conversation 时跳过）
+        conversation_ctx = getattr(request.app.state, "conversation_api_context", None)
+        if conversation_ctx is not None:
+            conversation_db = getattr(request.app.state, "conversation_db", None)
+            if conversation_db is None:
+                failures.append("conversation_database_unavailable")
+            else:
+                if not await conversation_db.ping():
+                    failures.append("conversation_database_unavailable")
+                else:
+                    conversation_head = getattr(
+                        request.app.state, "conversation_migration_head", None
+                    )
+                    if conversation_head is None:
+                        failures.append("conversation_migration_head_unresolved")
+                    else:
+                        try:
+                            async with conversation_db.session_factory() as session:
+                                row = await session.execute(
+                                    text("SELECT version_num FROM conversation_alembic_version")
+                                )
+                                conversation_version = row.scalar_one_or_none()
+                        except Exception:
+                            logger.warning("conversation_alembic_version 查询失败", exc_info=True)
+                            conversation_version = None
+                        if conversation_version != conversation_head:
+                            failures.append("conversation_migration_version_mismatch")
+            # §20.4 / 评审 P1-9：配置开启但依赖未就绪必须失败。
+            # Reader/Source-deletion 内部 transport 启用时：token 缺失 → 失败；
+            # Embedding：模型/维度未配置 → 失败（D15 启动强校验）。
+            if settings.conversation_memory_submit_enabled:
+                if not settings.conversation_reader_base_url:
+                    failures.append("conversation_reader_not_configured")
+                elif not settings.conversation_reader_service_token:
+                    failures.append("conversation_reader_token_missing")
+                if not settings.memory_api_base_url or not settings.memory_agent_token:
+                    failures.append("memory_api_not_configured")
+            if (
+                settings.conversation_agentic_rag_enabled
+                or settings.conversation_memory_read_enabled
+            ):
+                if not settings.embedding_model:
+                    failures.append("embedding_model_not_configured")
+                if not settings.embedding_base_url:
+                    failures.append("embedding_base_url_not_configured")
+                if settings.rag_embedding_dimensions <= 0:
+                    failures.append("embedding_dimensions_invalid")
+            # §19.1（评审 P1-9）：角色模型能力矩阵——agentic RAG 启用时全部角色必须配置
+            if settings.conversation_agentic_rag_enabled:
+                for role_field in (
+                    "openai_rewrite_model",
+                    "openai_evidence_model",
+                    "openai_answer_model",
+                ):
+                    if not getattr(settings, role_field, ""):
+                        failures.append(f"{role_field}_not_configured")
+            if settings.conversation_streaming_enabled and not settings.openai_answer_model:
+                failures.append("openai_answer_model_not_configured")
         # §6.3：readiness 同时检查 memory 与 auth 两条迁移链（fail-closed）
         auth_current: AuthRuntime | None = getattr(request.app.state, "auth_runtime", None)
         if auth_current is None:

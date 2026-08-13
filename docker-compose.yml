@@ -114,6 +114,51 @@ services:
       - ./.local/backups:/backups
     command: uv run --no-sync python -m backend.memory.worker.outbox_consumer
 
+  # Conversation Agentic RAG（方案 §5.4 / 附录 A.9）：
+  # 两个独立运行时角色，不发布端口；与 memory-api 同网络。
+  conversation-worker:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      CONVERSATION_DATABASE_URL: postgresql+psycopg://conversation:conversation@postgres:5432/conversation
+      DATABASE_URL: postgresql+psycopg://memory:memory@postgres:5432/memory
+      MEMORY_STORAGE_ROOT: /data/memory
+      KNOWLEDGE_GRAPH_ROOT: /app/knowledge_graph
+      DEV_AUTH_ENABLED: "true"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-${DEEPSEEK_API_KEY:-}}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-${DEEPSEEK_BASE_URL:-}}
+      OPENAI_REWRITE_MODEL: ${OPENAI_REWRITE_MODEL:-${OPENAI_MEMORY_MODEL:-}}
+      OPENAI_EVIDENCE_MODEL: ${OPENAI_EVIDENCE_MODEL:-${OPENAI_MEMORY_MODEL:-}}
+      OPENAI_ANSWER_MODEL: ${OPENAI_ANSWER_MODEL:-${OPENAI_MEMORY_MODEL:-}}
+      OPENAI_CONVERSATION_SUMMARY_MODEL: ${OPENAI_CONVERSATION_SUMMARY_MODEL:-${OPENAI_MEMORY_MODEL:-}}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      RAG_EMBEDDING_DIMENSIONS: ${RAG_EMBEDDING_DIMENSIONS:-1024}
+      MEMORY_API_BASE_URL: http://memory-api:8000
+      MEMORY_AGENT_TOKEN: ${MEMORY_AGENT_TOKEN:-}
+    volumes:
+      - memory-data:/data/memory
+      - ./knowledge_graph:/app/knowledge_graph:ro
+    command: uv run --no-sync python -m backend.conversation.worker.main
+
+  conversation-outbox-publisher:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      CONVERSATION_DATABASE_URL: postgresql+psycopg://conversation:conversation@postgres:5432/conversation
+      DATABASE_URL: postgresql+psycopg://memory:memory@postgres:5432/memory
+      DEV_AUTH_ENABLED: "true"
+      MEMORY_API_BASE_URL: http://memory-api:8000
+      MEMORY_AGENT_TOKEN: ${MEMORY_AGENT_TOKEN:-}
+    command: uv run --no-sync python -m backend.conversation.publisher.main
+
   frontend:
     profiles: ["frontend"]
     build:

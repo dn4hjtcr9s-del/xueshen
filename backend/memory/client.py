@@ -173,6 +173,40 @@ class MemoryClient:
         )
         return MemoryOperationResult.model_validate(data)
 
+    async def submit_source_deletion(
+        self,
+        *,
+        idempotency_key: str,
+        user_id: UUID,
+        source_ref: str,
+        source_version: str | None = None,
+        event_id: UUID | None = None,
+    ) -> dict[str, str]:
+        """提交来源删除事件（§8.6 步骤 4 / 评审 C7、P2）。
+
+        POST /api/v1/internal/source-deletions，使用独立 system principal 的
+        memory:source_delete scope token（由 MemoryClient 装配方提供）。
+        event_id 由调用方稳定生成（幂等锚点，评审 P2）。
+        """
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        payload = {
+            "event_id": str(event_id or uuid4()),
+            "user_id": str(user_id),
+            "source_system": "conversation",
+            "source_ref": source_ref,
+            "source_version": source_version,
+            "deleted_at": datetime.now(UTC).isoformat(),
+        }
+        data = await self._request(
+            "POST",
+            "/api/v1/internal/source-deletions",
+            json_body=payload,
+            idempotency_key=idempotency_key,
+        )
+        return dict(data)
+
     async def get_operation(self, operation_id: UUID) -> MemoryOperationResult:
         """轮询 operation 状态（§19.3 / §20.3）。"""
         data = await self._request("GET", f"/api/v1/memory/operations/{operation_id}")

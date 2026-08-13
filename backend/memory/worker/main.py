@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.memory.contracts.errors import SourceNotFoundError
 from backend.memory.contracts.evidence import SourceBundle
@@ -78,6 +81,30 @@ def _psycopg_conninfo(settings: Settings) -> str:
     return settings.database_url.replace("postgresql+psycopg://", "postgresql://", 1)
 
 
+def _conversation_reader_for_worker(
+    settings: Settings,
+    memory_session_factory: async_sessionmaker[AsyncSession],
+) -> Any:
+    """Worker runtime 生产 ConversationReader 装配（方案 §8.5 第二装配点）。
+
+    与 API runtime 同规则：未配置 READER_BASE_URL 时退回占位实现；
+    配置后必须带 DeletionAwareConversationReader 删除抑制包装。
+    """
+    if not settings.conversation_reader_base_url:
+        return _UnavailableConversationReader()
+    from backend.integrations.conversation_reader import HttpConversationReader
+    from backend.memory.readers.filtering import DeletionAwareConversationReader
+
+    http_reader = HttpConversationReader(
+        settings.conversation_reader_base_url,
+        token=settings.conversation_reader_service_token,
+    )
+    return DeletionAwareConversationReader(
+        inner=http_reader,
+        session_factory=memory_session_factory,
+    )
+
+
 async def _run() -> None:
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
@@ -91,6 +118,7 @@ async def _run() -> None:
         memory_service = MemoryService(
             settings=settings, session_factory=db.session_factory, store=store
         )
+        conversation_reader = _conversation_reader_for_worker(settings, db.session_factory)
         async with AsyncPostgresSaver.from_conn_string(_psycopg_conninfo(settings)) as saver:
             async with maintenance_gate.traffic():
                 await saver.setup()
@@ -100,7 +128,7 @@ async def _run() -> None:
                 graph_state_service=KnowledgeGraphStateService(
                     settings=settings, session_factory=db.session_factory
                 ),
-                conversation_reader=_UnavailableConversationReader(),
+                conversation_reader=conversation_reader,
                 activity_reader=_UnavailableActivityReader(),
                 graph_registry_factory=default_registry_factory,
                 openai_client=RealMemoryLLMClient(settings=settings),
