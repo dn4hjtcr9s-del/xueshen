@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
@@ -158,3 +158,128 @@ def runtime_context(
 @pytest.fixture()
 def runner(runtime_context: MemoryRuntimeContext) -> LocalLangGraphRunner:
     return LocalLangGraphRunner(context=runtime_context)
+
+
+# ---------------------------------------------------------------------------
+# 认证服务集成测试设施（方案 §11 / 附录 A.6 #20）：auth_test 独立库 + 运行时密钥
+# ---------------------------------------------------------------------------
+
+import os  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+from uuid import uuid4  # noqa: E402
+
+import httpx  # noqa: E402
+from alembic.config import Config as AlembicConfig  # noqa: E402
+from cryptography.hazmat.primitives import serialization  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
+
+from backend.app import create_app  # noqa: E402
+from backend.auth_service.database import AuthDatabase  # noqa: E402
+from backend.auth_service.runtime import build_auth_runtime  # noqa: E402
+from backend.memory.api.dependencies import ApiRuntime  # noqa: E402
+
+
+def _admin_user() -> str:
+    return os.environ.get("POSTGRES_ADMIN_USER", "postgres")
+
+
+def _run_docker(*args: str) -> None:
+    subprocess.run(
+        ["docker", "compose", "exec", "-T", "postgres", *args],
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture(scope="session")
+def auth_database_url() -> Iterator[str]:
+    """auth_test 独立库：管理员创建、auth 角色所有（附录 A.6 #20）。"""
+    if shutil.which("docker") is None:
+        pytest.skip("需要 docker 创建隔离 auth 测试数据库")
+    db_name = f"auth_test_{uuid4().hex[:8]}"
+    base = "postgresql+psycopg://auth:auth@127.0.0.1:55432/"
+    _run_docker("createdb", "-U", _admin_user(), "-O", "auth", db_name)
+    url = base + db_name
+    try:
+        previous = os.environ.get("AUTH_DATABASE_URL")
+        os.environ["AUTH_DATABASE_URL"] = url
+        try:
+            command.upgrade(AlembicConfig("auth_alembic.ini"), "head")
+        finally:
+            if previous is None:
+                os.environ.pop("AUTH_DATABASE_URL", None)
+            else:
+                os.environ["AUTH_DATABASE_URL"] = previous
+        yield url
+    finally:
+        _run_docker("dropdb", "-U", _admin_user(), db_name)
+
+
+@pytest.fixture(scope="session")
+def auth_test_settings(
+    auth_database_url: str, tmp_path_factory: pytest.TempPathFactory
+) -> Settings:
+    """DEV_AUTH_ENABLED=false + 运行时生成的 RSA 2048 密钥对（方案 §11）。"""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("ascii")
+    public_pem = (
+        key.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode("ascii")
+    )
+    keys_dir = tmp_path_factory.mktemp("auth_integration_keys")
+    private_file = keys_dir / "auth_private.pem"
+    private_file.write_text(private_pem, encoding="utf-8")
+    return Settings(
+        app_env="test",
+        dev_auth_enabled=False,
+        dev_auth_allow_scope_override=False,
+        auth_issuer="gewu-auth",
+        auth_audience="memory-api",
+        auth_database_url=auth_database_url,
+        auth_private_key_file=str(private_file),
+        auth_public_key=public_pem,
+    )
+
+
+@pytest.fixture()
+async def auth_session_factory(
+    auth_test_settings: Settings,
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    db = AuthDatabase(auth_test_settings)
+    yield db.session_factory
+    await db.close()
+
+
+@pytest.fixture()
+async def auth_api_client(
+    auth_test_settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    memory_service: MemoryService,
+    runner: LocalLangGraphRunner,
+) -> AsyncIterator[httpx.AsyncClient]:
+    """进程内 app：memory runtime（共享 memory 库）+ auth runtime（auth_test 库）。"""
+    runtime = ApiRuntime(
+        settings=auth_test_settings,
+        session_factory=session_factory,
+        memory_service=memory_service,
+        runner=runner,
+        gateway_worker=None,  # type: ignore[arg-type]  # 认证测试只走读路径
+    )
+    auth_runtime = build_auth_runtime(auth_test_settings, memory_session_factory=session_factory)
+    app = create_app(auth_test_settings, runtime=runtime, auth_runtime=auth_runtime)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            yield client
+    finally:
+        await auth_runtime.database.close()

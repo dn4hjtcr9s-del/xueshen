@@ -175,6 +175,11 @@ def test_production_readiness_fails_without_auth_config(tmp_path: Any, monkeypat
     settings = Settings(
         app_env="production",
         dev_auth_enabled=False,
+        # §6.3：密钥/auth 库缺失已由启动校验拦截（评审 #14）；readiness 的
+        # production_auth_not_configured 现覆盖 issuer 缺失场景
+        auth_private_key_file=str(tmp_path / "auth_private.pem"),
+        auth_public_key="-----BEGIN PUBLIC KEY-----\ndummy\n-----END PUBLIC KEY-----",
+        auth_database_url="postgresql+psycopg://auth:auth@db:5432/auth",
         memory_storage_root=str(tmp_path / "storage"),
     )
     app, *_ = build_test_app(settings, monkeypatch=monkeypatch)
@@ -234,6 +239,9 @@ def _prod_settings(tmp_path: Any, public_pem: str) -> Settings:
         dev_auth_enabled=False,
         auth_issuer="https://auth.example",
         auth_public_key=public_pem,
+        # §6.3 生产配置校验要求（评审 #14）
+        auth_private_key_file=str(tmp_path / "auth_private.pem"),
+        auth_database_url="postgresql+psycopg://auth:auth@db:5432/auth",
         memory_storage_root=str(tmp_path / "storage"),
     )
 
@@ -323,8 +331,10 @@ async def test_prod_jwt_unknown_identity_mapping_rejected(tmp_path: Any, monkeyp
 
 
 async def test_prod_jwt_missing_key_material_rejected(tmp_path: Any, monkeypatch: Any) -> None:
+    # §6.3：生产缺公钥材料直接启动失败；adapter 的"未配置"拒绝路径改由
+    # test/staging 环境验证（生产 Settings 已无法构造出缺失公钥的状态）
     settings = Settings(
-        app_env="production",
+        app_env="test",
         dev_auth_enabled=False,
         auth_issuer="https://auth.example",
         memory_storage_root=str(tmp_path / "storage"),
@@ -589,6 +599,9 @@ async def test_dev_adapter_rejected_in_production(tmp_path: Any, monkeypatch: An
     settings = Settings(
         app_env="production",
         dev_auth_enabled=False,
+        auth_private_key_file=str(tmp_path / "auth_private.pem"),
+        auth_public_key="-----BEGIN PUBLIC KEY-----\ndummy\n-----END PUBLIC KEY-----",
+        auth_database_url="postgresql+psycopg://auth:auth@db:5432/auth",
         memory_storage_root=str(tmp_path / "storage"),
     )
     adapter = DevelopmentAuthAdapter(settings)
@@ -633,6 +646,9 @@ def test_cors_production_default_closed(tmp_path: Any, monkeypatch: Any) -> None
     settings = Settings(
         app_env="production",
         dev_auth_enabled=False,
+        auth_private_key_file=str(tmp_path / "auth_private.pem"),
+        auth_public_key="-----BEGIN PUBLIC KEY-----\ndummy\n-----END PUBLIC KEY-----",
+        auth_database_url="postgresql+psycopg://auth:auth@db:5432/auth",
         memory_storage_root=str(tmp_path / "storage"),
     )
     app, *_ = build_test_app(settings, monkeypatch=monkeypatch)

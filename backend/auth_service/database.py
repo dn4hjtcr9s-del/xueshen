@@ -57,7 +57,7 @@ class AuthDatabase:
             async with self.session_factory() as session:
                 await session.execute(text("SELECT 1"))
             return True
-        except OSError:
+        except Exception:
             return False
 
     async def close(self) -> None:

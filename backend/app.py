@@ -156,6 +156,7 @@ def create_app(
     app.state.runtime = runtime
     app.state.auth_runtime = auth_runtime
     app.state.mapping_consumer_task = None
+    app.state.auth_migration_head = None
     app.state.rate_limiter = FixedWindowRateLimiter()
     app.state.startup_complete = False
     app.state.migration_head = None
@@ -368,6 +369,9 @@ def create_app(
             app.state.migration_head = ScriptDirectory.from_config(
                 Config("alembic.ini")
             ).get_current_head()
+            app.state.auth_migration_head = ScriptDirectory.from_config(
+                Config("auth_alembic.ini")
+            ).get_current_head()
         except Exception:
             logger.warning("无法解析 alembic head revision", exc_info=True)
         app.state.startup_complete = True
@@ -448,6 +452,22 @@ def create_app(
 
         if settings.app_env == "production" and not settings.production_auth_ready():
             failures.append("production_auth_not_configured")
+        # §6.3：readiness 同时检查 memory 与 auth 两条迁移链
+        auth_current: AuthRuntime | None = getattr(request.app.state, "auth_runtime", None)
+        if auth_current is None:
+            failures.append("auth_database_unavailable")
+        elif not await auth_current.database.ping():
+            failures.append("auth_database_unavailable")
+        else:
+            auth_head = getattr(request.app.state, "auth_migration_head", None)
+            if auth_head is not None:
+                async with auth_current.session_factory() as session:
+                    row = await session.execute(
+                        text("SELECT version_num FROM auth_alembic_version")
+                    )
+                    auth_version = row.scalar_one_or_none()
+                    if auth_version != auth_head:
+                        failures.append("auth_migration_version_mismatch")
         if failures:
             return JSONResponse(
                 status_code=503, content={"status": "not_ready", "failures": failures}

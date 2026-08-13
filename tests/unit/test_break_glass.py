@@ -31,6 +31,13 @@ def _settings(tmp_path: Any, **overrides: Any) -> Settings:
         "dev_auth_allow_scope_override": True,
         "memory_storage_root": str(tmp_path / "storage"),
     }
+    # production 覆盖时补齐 §6.3 认证配置，否则 Settings 构造直接失败
+    if overrides.get("app_env") == "production":
+        base["dev_auth_enabled"] = False
+        base["dev_auth_allow_scope_override"] = False
+        base["auth_private_key_file"] = str(tmp_path / "auth_private.pem")
+        base["auth_public_key"] = "-----BEGIN PUBLIC KEY-----\ndummy\n-----END PUBLIC KEY-----"
+        base["auth_database_url"] = "postgresql+psycopg://auth:auth@db:5432/auth"
     base.update(overrides)
     return Settings(**base)
 

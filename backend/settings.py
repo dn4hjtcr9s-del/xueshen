@@ -138,10 +138,20 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_environment_rules(self) -> Settings:
-        """生产环境安全约束（§18.1）。"""
+        """生产环境安全约束（§18.1 / §6.3）。"""
         if self.app_env == "production":
             if self.dev_auth_enabled or self.dev_auth_allow_scope_override:
                 raise ValueError("生产环境禁止 DEV_AUTH_ENABLED / DEV_AUTH_ALLOW_SCOPE_OVERRIDE")
+            # §6.3 评审 #14：签发/验签与 auth 库配置缺失 → 启动直接失败
+            missing: list[str] = []
+            if not self.auth_private_key_file:
+                missing.append("AUTH_PRIVATE_KEY_FILE")
+            if not (self.auth_public_key or self.auth_public_key_file or self.auth_jwks_url):
+                missing.append("AUTH_PUBLIC_KEY_FILE / AUTH_PUBLIC_KEY / AUTH_JWKS_URL")
+            if "auth_database_url" not in self.model_fields_set:
+                missing.append("AUTH_DATABASE_URL")
+            if missing:
+                raise ValueError("生产环境缺少认证服务配置: " + ", ".join(missing))
         return self
 
     @property

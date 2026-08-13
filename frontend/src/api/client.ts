@@ -4,6 +4,9 @@ import { getAccessToken, setAccessToken } from "../auth/tokenStore";
 
 const API_BASE: string = import.meta.env.VITE_MEMORY_API_BASE_URL ?? "/memory-api";
 const V1 = `${API_BASE}/api/v1`;
+// auth 端点固定走 /api/v1 直连路径（与生产同源部署一致，方案 §6.4/§7）：
+// refresh Cookie Path=/api/v1/auth 必须与浏览器 URL 前缀一致，否则浏览器不会回传。
+const AUTH_V1 = "/api/v1";
 
 export interface PublicError {
   code: string;
@@ -55,7 +58,7 @@ async function refreshSession(): Promise<boolean> {
   if (!refreshPromise) {
     refreshPromise = (async () => {
       try {
-        const response = await fetch(`${V1}/auth/refresh`, {
+        const response = await fetch(`${AUTH_V1}/auth/refresh`, {
           method: "POST",
           credentials: "include",
         });
@@ -101,9 +104,10 @@ async function rawFetch(method: string, path: string, options: RequestOptions): 
   if (options.idempotencyKey) headers["Idempotency-Key"] = options.idempotencyKey;
   const token = getAccessToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  const base = path.startsWith("/auth/") ? AUTH_V1 : V1;
   const url = options.query
-    ? `${V1}${path}?${new URLSearchParams(options.query).toString()}`
-    : `${V1}${path}`;
+    ? `${base}${path}?${new URLSearchParams(options.query).toString()}`
+    : `${base}${path}`;
   return fetch(url, {
     method,
     headers,
