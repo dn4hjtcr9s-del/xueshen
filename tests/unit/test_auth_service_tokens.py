@@ -110,3 +110,93 @@ def test_tokens_are_unique_via_jti(keypair: tuple[str, str, str]) -> None:
         issuer="gewu-auth",
     )
     assert first["jti"] != second["jti"]
+
+
+# ---------------------------------------------------------------------------
+# AccessTokenVerifier.verify_sub 严格契约（复审 P3）：与 verifier 对齐
+# ---------------------------------------------------------------------------
+
+
+def _craft_token(
+    private_pem: str,
+    *,
+    sub: str = "sub",
+    actor_type: str = "user",
+    scopes: list[str] | None = None,
+    lifetime: int = 300,
+) -> str:
+    now = int(time.time())
+    return jwt.encode(
+        {
+            "iss": "gewu-auth",
+            "aud": "memory-api",
+            "sub": sub,
+            "actor_type": actor_type,
+            "scopes": scopes if scopes is not None else ["memory:read"],
+            "iat": now,
+            "exp": now + lifetime,
+            "jti": str(uuid4()),
+        },
+        private_pem,
+        algorithm="RS256",
+    )
+
+
+async def _verify(keypair: tuple[str, str, str], token: str) -> None:
+    _private_pem, public_pem, private_file = keypair
+    from backend.auth_service.tokens import AccessTokenVerifier
+
+    await AccessTokenVerifier(_settings(public_pem, private_file)).verify_sub(token)
+
+
+def test_verify_sub_accepts_valid_user_token(keypair: tuple[str, str, str]) -> None:
+    import asyncio
+
+    private_pem, public_pem, private_file = keypair
+    from backend.auth_service.tokens import AccessTokenVerifier
+
+    user_id = uuid4()
+    token = _craft_token(private_pem, sub=str(user_id))
+    result = asyncio.run(AccessTokenVerifier(_settings(public_pem, private_file)).verify_sub(token))
+    assert result == user_id
+
+
+def test_verify_sub_rejects_non_uuid_sub(keypair: tuple[str, str, str]) -> None:
+    """复审 P3：合法签名但 sub 非 UUID（如 agent token）→ InvalidTokenError，不抛 ValueError。"""
+    import asyncio
+
+    private_pem, *_ = keypair
+    token = _craft_token(private_pem, sub="conversation-agent-prod-01")
+    with pytest.raises(jwt.InvalidTokenError):
+        asyncio.run(_verify(keypair, token))
+
+
+def test_verify_sub_rejects_missing_actor_type(keypair: tuple[str, str, str]) -> None:
+    import asyncio
+
+    private_pem, *_ = keypair
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            "iss": "gewu-auth",
+            "aud": "memory-api",
+            "sub": str(uuid4()),
+            "scopes": ["memory:read"],
+            "iat": now,
+            "exp": now + 300,
+            "jti": str(uuid4()),
+        },
+        private_pem,
+        algorithm="RS256",
+    )
+    with pytest.raises(jwt.InvalidTokenError):
+        asyncio.run(_verify(keypair, token))
+
+
+def test_verify_sub_rejects_over_lifetime_cap(keypair: tuple[str, str, str]) -> None:
+    import asyncio
+
+    private_pem, *_ = keypair
+    token = _craft_token(private_pem, sub=str(uuid4()), lifetime=301)
+    with pytest.raises(jwt.InvalidTokenError):
+        asyncio.run(_verify(keypair, token))

@@ -19,6 +19,20 @@ ActorType = Literal[
     "admin",
 ]
 
+#: 合法 actor_type 集合（verifier 与 /me 共用同一契约，复审 P3）
+ACTOR_TYPES: tuple[str, ...] = (
+    "user",
+    "conversation_agent",
+    "activity_agent",
+    "knowledge_graph_ui",
+    "summary_projection",
+    "system",
+    "admin",
+)
+
+#: 缺省 issuer（方案 §6.2：AUTH_ISSUER=gewu-auth 固定值；签发与验签两端共用）
+DEFAULT_AUTH_ISSUER = "gewu-auth"
+
 # 全部 scope（§18.2）
 SCOPE_MEMORY_READ = "memory:read"
 SCOPE_MEMORY_SUBMIT_EVIDENCE = "memory:submit_evidence"

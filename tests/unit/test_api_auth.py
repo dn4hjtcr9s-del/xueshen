@@ -171,15 +171,14 @@ def test_production_rejects_dev_scope_override() -> None:
         Settings(app_env="production", dev_auth_allow_scope_override=True)
 
 
-def test_production_readiness_fails_without_auth_config(tmp_path: Any, monkeypatch: Any) -> None:
-    # §6.3：密钥/auth 库缺失已由启动校验拦截（评审 #14）；readiness 的
-    # production_auth_not_configured 现覆盖 issuer 缺失场景
-    settings = _prod_settings(tmp_path, *_rsa_keys()).model_copy(update={"auth_issuer": None})
+def test_production_ready_with_complete_auth_config(tmp_path: Any, monkeypatch: Any) -> None:
+    # 复审 P3：AUTH_ISSUER 缺失已由启动校验拦截（Settings 构造直接失败）；
+    # 完整生产配置下 readiness 不应再出现 production_auth_not_configured
+    settings = _prod_settings(tmp_path, *_rsa_keys())
     app, *_ = build_test_app(settings, monkeypatch=monkeypatch)
     client = TestClient(app)
     response = client.get("/health/ready")
-    assert response.status_code == 503
-    assert "production_auth_not_configured" in response.json()["failures"]
+    assert "production_auth_not_configured" not in response.json().get("failures", [])
 
 
 # ---------------------------------------------------------------------------

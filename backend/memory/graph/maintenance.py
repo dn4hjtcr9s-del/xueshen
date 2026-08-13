@@ -54,12 +54,12 @@ async def run_maintenance(
             acquired = bool(result.scalar_one())
             if not acquired:
                 detail = {"kind": kind, "status": "busy"}
-                # busy 也回写 run（保持 running），由 Scheduler 稍后重排同 cursor 批次
-                await maintenance_repo.update_run_by_operation(
+                # busy 也回写 run（保持 running），由 Scheduler 稍后重排同 cursor 批次。
+                # 复审 P3：专用 busy 更新不触碰 cursor——避免覆盖持锁实例刚提交的
+                # 新 cursor（last-writer-wins 回退导致同批次重跑）
+                await maintenance_repo.mark_run_busy_by_operation(
                     session,
                     operation_id=operation.operation_id,
-                    status="running",
-                    cursor=payload.cursor,
                     result=detail,
                 )
                 return {

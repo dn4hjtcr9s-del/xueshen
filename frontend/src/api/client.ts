@@ -186,10 +186,10 @@ async function refreshSession(): Promise<boolean> {
           }
           return await doRefreshRequest();
         };
-        if (typeof navigator !== "undefined" && navigator.locks?.request) {
-          return await navigator.locks.request(REFRESH_LOCK_NAME, refreshOrReuse);
-        }
-        return await refreshOrReuse();
+        // 复审 P3：统一经 withRefreshLock——Web Locks 可用时用跨标签页锁，
+        // 不可用时退化为同页互斥队列（logout 与 refresh 同队列串行），
+        // 消除"回退路径绕过互斥"导致同页并发轮换/重放的问题
+        return await withRefreshLock(refreshOrReuse);
       } finally {
         refreshPromise = null;
       }

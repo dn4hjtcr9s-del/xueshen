@@ -16,14 +16,18 @@ from uuid import UUID, uuid4
 
 import jwt
 
-from backend.auth.context import DEV_USER_DEFAULT_SCOPES
+from backend.auth.context import (
+    ACTOR_TYPES,
+    DEFAULT_AUTH_ISSUER,
+    DEV_USER_DEFAULT_SCOPES,
+)
 from backend.settings import Settings
 
 #: 普通用户 access token 的默认 scopes（方案 §4.4，与 dev 用户能力一致）
 USER_DEFAULT_SCOPES: frozenset[str] = frozenset(DEV_USER_DEFAULT_SCOPES)
 
-#: 缺省 issuer（方案 §6.2：AUTH_ISSUER=gewu-auth 固定值）
-DEFAULT_ISSUER = "gewu-auth"
+#: 缺省 issuer（与 verifier 验签端共用同一 fallback，复审 P3）
+DEFAULT_ISSUER = DEFAULT_AUTH_ISSUER
 
 #: access token 有效期（秒）；不得超过 verifier 硬上限
 ACCESS_TOKEN_LIFETIME_SECONDS = 300
@@ -91,7 +95,12 @@ class AccessTokenVerifier:
         self._settings = settings
 
     async def verify_sub(self, token: str) -> UUID:
-        """验签并返回 sub；失败抛 jwt.PyJWTError。"""
+        """验签并返回 sub；失败抛 jwt.PyJWTError（/me 统一映射为 401）。
+
+        复审 P3：与 memory verifier 的严格契约对齐——必需 claims 全集、
+        actor_type 白名单、scopes 类型校验、300 秒最长有效期；
+        sub 非合法 UUID 视为无效 token（不再抛 ValueError 导致 500）。
+        """
         key_file = self._settings.auth_public_key_file
         if key_file:
             try:
@@ -115,6 +124,21 @@ class AccessTokenVerifier:
             algorithms=["RS256", "ES256"],
             audience=self._settings.auth_audience,
             issuer=self._settings.auth_issuer or DEFAULT_ISSUER,
-            options={"require": ["sub", "exp"]},
+            options={"require": ["iss", "aud", "sub", "iat", "exp", "jti", "actor_type", "scopes"]},
         )
-        return UUID(str(claims["sub"]))
+        # 严格 claims schema（与 verifier.py 对齐，复审 P3）
+        actor_raw = claims["actor_type"]
+        if not isinstance(actor_raw, str) or actor_raw not in ACTOR_TYPES:
+            raise jwt.InvalidTokenError("actor_type claim 非法")
+        scopes_raw = claims["scopes"]
+        if not isinstance(scopes_raw, list) or not all(isinstance(s, str) for s in scopes_raw):
+            raise jwt.InvalidTokenError("scopes claim 必须是字符串数组")
+        iat = int(claims["iat"])
+        exp = int(claims["exp"])
+        if exp - iat > self._settings.auth_token_max_lifetime_seconds:
+            raise jwt.InvalidTokenError("token 有效期超过上限")
+        raw_sub = str(claims["sub"])
+        try:
+            return UUID(raw_sub)
+        except ValueError as exc:
+            raise jwt.InvalidTokenError("sub 不是合法 UUID") from exc

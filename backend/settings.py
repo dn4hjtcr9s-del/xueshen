@@ -143,10 +143,12 @@ class Settings(BaseSettings):
         if self.app_env == "production":
             if self.dev_auth_enabled or self.dev_auth_allow_scope_override:
                 raise ValueError("生产环境禁止 DEV_AUTH_ENABLED / DEV_AUTH_ALLOW_SCOPE_OVERRIDE")
-            # §6.3 评审 #14 / 复审 P1-1：签发/验签与 auth 库配置缺失 → 启动直接失败。
+            # §6.3 评审 #14 / 复审 P1-1、P3：签发/验签与 auth 库配置缺失 → 启动直接失败。
             # 第一版 token 不带 kid（方案 §6.2），JWKS 无法选中密钥，
             # 因此生产环境不允许仅配置 AUTH_JWKS_URL，必须提供本地匹配公钥。
             missing: list[str] = []
+            if not self.auth_issuer:
+                missing.append("AUTH_ISSUER")
             if not self.auth_private_key_file:
                 missing.append("AUTH_PRIVATE_KEY_FILE")
             if not (self.auth_public_key or self.auth_public_key_file):
