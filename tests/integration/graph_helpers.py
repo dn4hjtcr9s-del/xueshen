@@ -7,7 +7,13 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from backend.memory.contracts.common import idempotency_payload_hash
+from backend.memory.contracts.commands import MemoryPayload
+from backend.memory.contracts.common import (
+    ActorType,
+    InputKind,
+    OperationType,
+    idempotency_payload_hash,
+)
 from backend.memory.contracts.operations import MemoryOperation
 from backend.memory.persistence.operations import insert_operation
 
@@ -15,11 +21,11 @@ from backend.memory.persistence.operations import insert_operation
 def make_operation(
     *,
     user_id: UUID,
-    actor_type: str,
-    input_kind: str,
-    operation_type: str,
+    actor_type: ActorType,
+    input_kind: InputKind,
+    operation_type: OperationType,
     priority: int,
-    payload,
+    payload: MemoryPayload,
     idempotency_key: str | None = None,
 ) -> MemoryOperation:
     return MemoryOperation(

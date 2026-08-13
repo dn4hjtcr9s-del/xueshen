@@ -18,7 +18,7 @@ def _manifest() -> dict[str, Any]:
         "batch_id": str(uuid4()),
         "created_at": "2026-08-12T00:00:00+00:00",
         "encryption_method": "age-x25519-v1",
-        "migration_revision": "0004",
+        "migration_revision": "0004_account_deletion_ledger",
         "graph_manifest_checksum": None,
         "account_deletion_ledger": [],
         "artifacts": {
@@ -103,3 +103,25 @@ def test_validate_manifest_detects_tampering_without_reseal() -> None:
     manifest["migration_revision"] = "9999"
     with pytest.raises(BackupError, match="自身 checksum 不匹配"):
         _check(manifest)
+
+@pytest.mark.parametrize(
+    "revision",
+    [None, 123, "", "9999_unknown", "0004"],
+)
+def test_validate_manifest_rejects_invalid_migration_revision(revision: object) -> None:
+    """恢复前必须拒绝空值、非字符串、未知值和缩写 revision。"""
+    manifest = _manifest()
+    manifest["migration_revision"] = revision
+    with pytest.raises(BackupError, match="migration_revision"):
+        _check(_reseal(manifest))
+
+
+@pytest.mark.parametrize(
+    "revision",
+    ["0004_account_deletion_ledger", "0006_global_maintenance_gate"],
+)
+def test_validate_manifest_accepts_current_head_and_ancestor(revision: str) -> None:
+    """当前 head 与同一升级链上的祖先 revision 都可用于兼容性升级。"""
+    manifest = _manifest()
+    manifest["migration_revision"] = revision
+    _check(_reseal(manifest))

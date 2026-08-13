@@ -22,6 +22,7 @@ from backend.memory.graph.state import (
     default_registry_factory,
 )
 from backend.memory.logging_config import configure_logging
+from backend.memory.maintenance_gate import MaintenanceGate
 from backend.memory.persistence.database import Database
 from backend.memory.services.graph_state_service import KnowledgeGraphStateService
 from backend.memory.services.memory_service import MemoryService
@@ -84,13 +85,15 @@ async def _run() -> None:
     configure_logging(settings)
     logger = logging.getLogger("memory.worker")
     db = Database(settings)
+    maintenance_gate = MaintenanceGate(db.engine)
     try:
         store = LocalMarkdownStore(settings.memory_storage_root)
         memory_service = MemoryService(
             settings=settings, session_factory=db.session_factory, store=store
         )
         async with AsyncPostgresSaver.from_conn_string(_psycopg_conninfo(settings)) as saver:
-            await saver.setup()
+            async with maintenance_gate.traffic():
+                await saver.setup()
             context = MemoryRuntimeContext(
                 settings=settings,
                 memory_service=memory_service,
@@ -113,6 +116,7 @@ async def _run() -> None:
                 runner=runner,
                 config=_worker_config(settings),
                 logger=logger,
+                maintenance_gate=maintenance_gate,
             )
             worker.install_signal_handlers()
             logger.info("Worker 启动：concurrency=%d", worker.config.concurrency)

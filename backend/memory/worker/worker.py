@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from backend.memory.contracts.errors import LeaseFencedError, MemoryError
 from backend.memory.contracts.operations import MemoryOperation, MemoryOperationResult
 from backend.memory.graph.runner import MemoryGraphRunner
+from backend.memory.maintenance_gate import MaintenanceGate, MaintenanceGateError
 from backend.memory.persistence import operations as ops_repo
 from backend.memory.worker.retry import (
     FailureAction,
@@ -49,6 +50,7 @@ class Worker:
     config: WorkerConfig = field(default_factory=WorkerConfig)
     worker_id: str = field(default_factory=lambda: f"worker-{uuid4().hex[:8]}")
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("memory.worker"))
+    maintenance_gate: MaintenanceGate | None = None
 
     def __post_init__(self) -> None:
         self._stopping = asyncio.Event()
@@ -90,6 +92,17 @@ class Worker:
         free_slots = self.config.concurrency - len(self._tasks)
         if free_slots <= 0:
             return []
+        if self.maintenance_gate is not None:
+            try:
+                async with self.maintenance_gate.traffic():
+                    return await self._claim_available(free_slots)
+            except MaintenanceGateError:
+                self.logger.info("全局维护中，Worker 停止领取 operation")
+                return []
+        return await self._claim_available(free_slots)
+
+    async def _claim_available(self, free_slots: int) -> list[dict[str, Any]]:
+        """在已通过 maintenance gate 后执行实际领取。"""
         async with self.session_factory() as session:
             async with session.begin():
                 return await ops_repo.claim_operation(
@@ -110,7 +123,17 @@ class Worker:
     async def _execute_guarded(self, row: dict[str, Any]) -> None:
         async with self._semaphore:
             try:
-                await self._execute(row)
+                if self.maintenance_gate is None:
+                    await self._execute(row)
+                else:
+                    async with self.maintenance_gate.traffic():
+                        await self._execute(row)
+            except MaintenanceGateError:
+                # operation 已领取时不做任何状态写回，停止心跳后由恢复完成后的
+                # Lease 回收流程重新排队。
+                self.logger.info(
+                    "全局维护中，Worker 放弃执行已领取 operation: %s", row["operation_id"]
+                )
             except Exception:
                 self.logger.exception("operation 执行出现未捕获异常: %s", row["operation_id"])
 

@@ -36,6 +36,7 @@ from backend.memory.contracts.common import (
 )
 from backend.memory.contracts.operations import MemoryOperation
 from backend.memory.logging_config import configure_logging
+from backend.memory.maintenance_gate import MaintenanceGate, MaintenanceGateError
 from backend.memory.persistence import documents as docs_repo
 from backend.memory.persistence import maintenance as maintenance_repo
 from backend.memory.persistence import notifications as notifications_repo
@@ -95,6 +96,7 @@ class Scheduler:
     config: SchedulerConfig = field(default_factory=SchedulerConfig)
     clock: Callable[[], datetime] = _utc_now
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("memory.scheduler"))
+    maintenance_gate: MaintenanceGate | None = None
 
     def __post_init__(self) -> None:
         self._stopping = asyncio.Event()
@@ -134,6 +136,17 @@ class Scheduler:
 
     async def tick(self, now: datetime | None = None) -> list[str]:
         """单次调度 tick：执行所有到期任务，返回执行的任务名。"""
+        if self.maintenance_gate is not None:
+            try:
+                async with self.maintenance_gate.traffic():
+                    return await self._tick_ungated(now)
+            except MaintenanceGateError:
+                self.logger.info("全局维护中，Scheduler 停止调度")
+                return []
+        return await self._tick_ungated(now)
+
+    async def _tick_ungated(self, now: datetime | None = None) -> list[str]:
+        """在已通过 maintenance gate 后执行到期任务。"""
         now = now or self.clock()
         self._ensure_initialized(now)
         ran: list[str] = []
@@ -553,6 +566,7 @@ async def _run() -> None:
     settings = get_settings()
     configure_logging(settings)
     db = Database(settings)
+    maintenance_gate = MaintenanceGate(db.engine)
     try:
         scheduler = Scheduler(
             session_factory=db.session_factory,
@@ -560,6 +574,7 @@ async def _run() -> None:
                 timezone=settings.memory_scheduler_timezone,
                 notification_retention_days=settings.memory_notification_retention_days,
             ),
+            maintenance_gate=maintenance_gate,
         )
         scheduler.install_signal_handlers()
         await scheduler.run_forever()

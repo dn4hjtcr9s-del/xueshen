@@ -27,9 +27,16 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from alembic import command
+from backend.memory.maintenance_gate import (
+    MaintenanceGate,
+    RestoreAbortedError,
+)
 from backend.memory.persistence import account_deletion as deletion_repo
 from backend.memory.persistence import backup_runs as backup_repo
 from backend.settings import Settings
@@ -49,6 +56,8 @@ EXPECTED_ARTIFACT_FILES = {
     "postgres": f"{POSTGRES_DUMP_NAME}.age",
     "markdown": f"{MARKDOWN_TAR_NAME}.age",
 }
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class BackupError(Exception):
@@ -129,6 +138,7 @@ def validate_manifest(
     actual = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
     if declared != actual:
         raise BackupError("manifest 自身 checksum 不匹配")
+    _validate_migration_revision(manifest.get("migration_revision"))
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         raise BackupError("manifest 缺少 artifacts")
@@ -140,6 +150,55 @@ def validate_manifest(
             raise BackupError(
                 f"manifest artifacts.{key}.file 非法: {entry['file']}（仅允许固定相对文件名）"
             )
+
+
+def _alembic_config(*, database_url: str | None = None) -> Config:
+    """构造不依赖当前工作目录的 Alembic 配置。"""
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
+    if database_url is not None:
+        # env.py 优先读取 attributes，避免恢复临时库时误用进程默认 DATABASE_URL。
+        config.attributes["database_url"] = database_url
+    return config
+
+
+def _migration_script() -> ScriptDirectory:
+    return ScriptDirectory.from_config(_alembic_config())
+
+
+def _current_migration_head() -> str:
+    heads = _migration_script().get_heads()
+    if len(heads) != 1:
+        raise BackupError(f"当前 Alembic migration 必须只有一个 head，实际为: {heads}")
+    return heads[0]
+
+
+def _validate_migration_revision(value: object) -> str:
+    """确保备份 revision 是当前唯一 Alembic head 的祖先或 head 本身。"""
+    if not isinstance(value, str) or not value.strip():
+        raise BackupError("manifest migration_revision 必须是非空字符串")
+    revision = value.strip()
+    script = _migration_script()
+    heads = script.get_heads()
+    if len(heads) != 1:
+        raise BackupError(f"当前 Alembic migration 必须只有一个 head，实际为: {heads}")
+    try:
+        resolved = script.get_revision(revision)
+    except Exception as exc:
+        raise BackupError(f"manifest migration_revision 未知: {revision}") from exc
+    if resolved is None or resolved.revision != revision:
+        raise BackupError(f"manifest migration_revision 必须使用完整 revision: {revision}")
+    ancestors = {item.revision for item in script.walk_revisions(base="base", head=heads[0])}
+    if revision not in ancestors:
+        raise BackupError(
+            f"manifest migration_revision 不属于当前 head {heads[0]} 的升级链: {revision}"
+        )
+    return revision
+
+
+def _upgrade_database_to_head(database_url: str) -> None:
+    """在工作线程中把恢复目标升级到当前唯一 Alembic head。"""
+    command.upgrade(_alembic_config(database_url=database_url), "head")
 
 
 def _build_manifest(
@@ -343,6 +402,7 @@ async def create_backup(
             ledger_snapshot = await deletion_repo.list_ledger_entries(session)
             migration_revision = await _current_migration_revision(session)
             graph_manifest_checksum = await _latest_graph_manifest_checksum(session)
+        _validate_migration_revision(migration_revision)
         manifest = await asyncio.to_thread(
             _build_manifest,
             batch_id=batch_id,
@@ -509,10 +569,10 @@ async def restore_backup(
     """恢复一个备份批次（§21.4）。返回实际重放 purge 的 account_deletion_id 列表。
 
     默认只允许恢复到空目标；--force 显式覆盖。manifest/checksum/加密元数据
-    全部校验通过后才写入目标，写入前先重置 public schema 保证 pg_restore
-    面对的是干净库。ops schema（账号删除 ledger）不被重置；恢复后合并
-    ledger/备份快照/恢复出的 manifest 三方删除记录并同步重放 purge，
-    任一失败则整个恢复失败（评审 P0-2）。
+    全部校验及解密通过后才激活全局 maintenance gate。门禁等待已有在线工作
+    排空并独占流量锁，随后重置 public、pg_restore、升级 migration 到当前 head、
+    恢复 Markdown 并同步重放账号删除。全部成功才解锁；任一失败保持门禁激活，
+    数据继续视为不可信（评审二轮 P0-1 / P1-5）。
     """
     _check_encryption_config(settings)
     backup_dir = Path(settings.backup_root) / str(batch_id)
@@ -520,43 +580,16 @@ async def restore_backup(
     if not await asyncio.to_thread(manifest_path.exists):
         raise BackupError(f"manifest 不存在: {manifest_path}")
 
-    # 评审 P0-2：DROP public 前确保 ops schema 存在并快照 ledger
-    # （ops 不被恢复流程删除，ledger 在同环境恢复中存活）
-    async with session_factory() as session:
-        async with session.begin():
-            await deletion_repo.ensure_ops_schema(session)
-            pre_restore_ledger = await deletion_repo.list_ledger_entries(session)
-
-    # 目标环境检查：数据库与存储目录必须为空，除非 --force
-    # 评审 #3：非空检查覆盖 public schema 全部表（不含 alembic_version），
-    # 防止只在两张表为空时误判为空目标而覆盖其他已有数据。
-    async with session_factory() as session:
-        non_empty_tables = await _non_empty_public_tables(session)
-        # backup_runs 行存在时交叉校验（灾难恢复新库可能还没有该行）
-        run: dict[str, Any] | None = None
-        runs_table = await session.execute(
-            text(
-                "SELECT COUNT(*) FROM information_schema.tables "
-                "WHERE table_schema = 'public' AND table_name = 'backup_runs'"
-            )
-        )
-        if int(runs_table.scalar_one()) == 1:
-            run = await backup_repo.get_run(session, batch_id)
-    storage_root = Path(settings.memory_storage_root)
-    if not force and (
-        non_empty_tables or await asyncio.to_thread(_storage_non_empty, storage_root)
-    ):
-        detail = f"非空表: {', '.join(non_empty_tables)}" if non_empty_tables else "存储目录非空"
-        raise BackupError(f"目标非空（{detail}）；覆盖现有环境必须显式 --force")
-    if run is not None:
-        if run["status"] != "succeeded":
-            raise BackupError(f"批次状态非 succeeded: {run['status']}")
-        if await asyncio.to_thread(_sha256, manifest_path) != run["manifest_checksum"]:
-            raise BackupError("manifest checksum 与 backup_runs 不匹配")
-
     with tempfile.TemporaryDirectory(prefix="memory-restore-") as isolated:
         work = Path(isolated)
-        manifest = json.loads(await asyncio.to_thread(manifest_path.read_text, encoding="utf-8"))
+        try:
+            manifest = json.loads(
+                await asyncio.to_thread(manifest_path.read_text, encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise BackupError(f"manifest 读取或解析失败: {exc}") from exc
+        if not isinstance(manifest, dict):
+            raise BackupError("manifest 顶层必须是 JSON object")
         validate_manifest(
             manifest, batch_id=batch_id, encryption_method=settings.backup_encryption_method
         )
@@ -583,59 +616,133 @@ async def restore_backup(
             )
             plain_paths[key] = decrypted
 
-        target = _db_target(settings)
-        # 重置 public schema：pg_restore 面对干净库，避免 "already exists" 报错
-        await _run_command(
-            "docker",
-            "compose",
-            "exec",
-            "-T",
-            "postgres",
-            "psql",
-            "-U",
-            target.user,
-            "-d",
-            target.name,
-            "-v",
-            "ON_ERROR_STOP=1",
-            "-c",
-            "DROP SCHEMA public CASCADE; CREATE SCHEMA public;",
-        )
-        # pg_restore 从 stdin 读取 dump
-        with plain_paths["postgres"].open("rb") as dump_handle:
-            process = await asyncio.create_subprocess_exec(
-                "docker",
-                "compose",
-                "exec",
-                "-T",
-                "postgres",
-                "pg_restore",
-                "-U",
-                target.user,
-                "-d",
-                target.name,
-                "--no-owner",
-                stdin=dump_handle,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await process.communicate()
-        if process.returncode != 0:
-            tail = stderr.decode("utf-8", errors="replace")[-300:].strip()
-            raise BackupError(f"pg_restore 失败: exit={process.returncode} {tail}")
+        engine = session_factory.kw.get("bind")
+        if engine is None:
+            raise BackupError("恢复流程无法取得数据库引擎")
+        gate = MaintenanceGate(engine)
+        try:
+            async with gate.restore(force=force, reason=f"restore-backup:{batch_id}"):
+                # DROP public 前快照环境本地 ledger；ops schema 不参与 pg_restore。
+                async with session_factory() as session:
+                    async with session.begin():
+                        await deletion_repo.ensure_ops_schema(session)
+                        pre_restore_ledger = await deletion_repo.list_ledger_entries(session)
 
-        await asyncio.to_thread(
-            _extract_markdown, plain_paths["markdown"], storage_root, force, work
-        )
+                # 获得排他流量锁后再检查目标，消除检查与覆盖之间的在线写竞态。
+                async with session_factory() as session:
+                    non_empty_tables = await _non_empty_public_tables(session)
+                    run: dict[str, Any] | None = None
+                    runs_table = await session.execute(
+                        text(
+                            "SELECT COUNT(*) FROM information_schema.tables "
+                            "WHERE table_schema = 'public' AND table_name = 'backup_runs'"
+                        )
+                    )
+                    if int(runs_table.scalar_one()) == 1:
+                        run = await backup_repo.get_run(session, batch_id)
+                storage_root = Path(settings.memory_storage_root)
+                if not force and (
+                    non_empty_tables or await asyncio.to_thread(_storage_non_empty, storage_root)
+                ):
+                    detail = (
+                        f"非空表: {', '.join(non_empty_tables)}"
+                        if non_empty_tables
+                        else "存储目录非空"
+                    )
+                    raise RestoreAbortedError(
+                        f"目标非空（{detail}）；覆盖现有环境必须显式 --force"
+                    )
+                if run is not None:
+                    if run["status"] != "succeeded":
+                        raise BackupError(f"批次状态非 succeeded: {run['status']}")
+                    if (
+                        await asyncio.to_thread(_sha256, manifest_path)
+                        != run["manifest_checksum"]
+                    ):
+                        raise BackupError("manifest checksum 与 backup_runs 不匹配")
 
-    # §21.4 / 评审 P0-2：合并 ops ledger、备份内嵌快照与恢复出的 manifest
-    # 三方删除记录，同步重放 purge；全部完成前恢复不算成功。
-    return await _replay_account_deletions(
-        settings=settings,
-        session_factory=session_factory,
-        pre_restore_ledger=pre_restore_ledger,
-        manifest=manifest,
-    )
+                target = _db_target(settings)
+                # 重置 public schema：pg_restore 面对干净库，避免 "already exists" 报错。
+                await _run_command(
+                    "docker",
+                    "compose",
+                    "exec",
+                    "-T",
+                    "postgres",
+                    "psql",
+                    "-U",
+                    target.user,
+                    "-d",
+                    target.name,
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                    "-c",
+                    "DROP SCHEMA public CASCADE; CREATE SCHEMA public;",
+                )
+                # pg_restore 从 stdin 读取 dump。
+                with plain_paths["postgres"].open("rb") as dump_handle:
+                    process = await asyncio.create_subprocess_exec(
+                        "docker",
+                        "compose",
+                        "exec",
+                        "-T",
+                        "postgres",
+                        "pg_restore",
+                        "-U",
+                        target.user,
+                        "-d",
+                        target.name,
+                        "--no-owner",
+                        stdin=dump_handle,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    _, stderr = await process.communicate()
+                if process.returncode != 0:
+                    tail = stderr.decode("utf-8", errors="replace")[-300:].strip()
+                    raise BackupError(f"pg_restore 失败: exit={process.returncode} {tail}")
+
+                declared_revision = _validate_migration_revision(manifest["migration_revision"])
+                async with session_factory() as session:
+                    restored_revision = await _current_migration_revision(session)
+                if restored_revision != declared_revision:
+                    raise BackupError(
+                        "恢复出的 alembic_version 与 manifest 不一致: "
+                        f"database={restored_revision}, manifest={declared_revision}"
+                    )
+
+                await asyncio.to_thread(_upgrade_database_to_head, settings.database_url)
+                head = _current_migration_head()
+                async with session_factory() as session:
+                    upgraded_revision = await _current_migration_revision(session)
+                if upgraded_revision != head:
+                    raise BackupError(
+                        "恢复后 migration 未到当前 head: "
+                        f"database={upgraded_revision}, head={head}"
+                    )
+
+                await asyncio.to_thread(
+                    _extract_markdown, plain_paths["markdown"], storage_root, force, work
+                )
+
+                # 合并 ops ledger、备份内嵌快照与恢复出的 manifest 三方删除记录；
+                # 同步重放全部成功后 maintenance gate 才会解除。
+                return await _replay_account_deletions(
+                    settings=settings,
+                    session_factory=session_factory,
+                    pre_restore_ledger=pre_restore_ledger,
+                    manifest=manifest,
+                )
+        except RestoreAbortedError as exc:
+            raise BackupError(str(exc)) from exc
+        except BackupError as exc:
+            # 只有离开 gate.restore 后才会到这里：若它仍是本次 owner，说明失败发生
+            # 在恢复正文内，门禁已经保持 active；若进入正文前就被拒绝（已有失败
+            # 恢复或并发 restore），不得把对方的维护状态误归因于本次调用。
+            raise BackupError(str(exc)) from exc
+        except Exception as exc:
+            # gate.restore 在正文异常时保持 active；调用方统一得到 BackupError。
+            raise BackupError(f"恢复失败，维护门禁保持激活: {exc}") from exc
 
 
 def _status_rank(status: object) -> int:

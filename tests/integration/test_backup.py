@@ -1,8 +1,8 @@
 """备份/恢复集成测试（§21.4 / §23.3）：真实 pg_dump（docker compose）+ age 加解密。
 
 覆盖：成功批次产物与 backup_runs 记账、失败批次记录、恢复验证状态更新、
-篡改产物被 checksum 校验拦截。restore_backup 的覆盖性恢复不进自动化测试，
-按运维手册手动演练（避免误伤开发库）。
+篡改产物被 checksum 校验拦截；覆盖恢复均在临时数据库内执行，以验证门禁、
+migration 升级与失败 fail-closed 语义，同时避免误伤开发或运行环境。
 """
 
 from __future__ import annotations
@@ -10,15 +10,20 @@ from __future__ import annotations
 import asyncio
 import shutil
 import subprocess
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
+from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from alembic import command
 from backend.memory import backup as backup_module
 from backend.memory.backup import (
     BackupError,
@@ -27,7 +32,12 @@ from backend.memory.backup import (
     validate_manifest,
     verify_backup_restore,
 )
+from backend.memory.maintenance_gate import (
+    MaintenanceActiveError,
+    MaintenanceGate,
+)
 from backend.memory.persistence import backup_runs as backup_repo
+from backend.memory.persistence.database import create_engine, create_session_factory
 from backend.settings import Settings
 
 pytestmark = pytest.mark.skipif(
@@ -63,6 +73,44 @@ def _backup_settings(
     base.update(overrides)
     merged = {**settings.model_dump(), **base}
     return Settings(**merged)
+
+
+@asynccontextmanager
+async def _temporary_restore_environment(
+    settings: Settings,
+    tmp_path: Path,
+    age_keypair: tuple[str, str],
+    *,
+    revision: str = "head",
+) -> AsyncIterator[tuple[Settings, async_sessionmaker[AsyncSession]]]:
+    """创建仅供恢复测试使用的独立数据库，避免触碰开发/运行环境。"""
+    parsed = urlparse(settings.database_url)
+    db_user = parsed.username or "memory"
+    temp_db = f"memory_restore_{uuid4().hex[:8]}"
+    temp_url = settings.database_url.rsplit("/", 1)[0] + f"/{temp_db}"
+    await asyncio.to_thread(
+        subprocess.run,
+        ["docker", "compose", "exec", "-T", "postgres", "createdb", "-U", db_user, temp_db],
+        check=True,
+        capture_output=True,
+    )
+    engine = None
+    try:
+        config = Config("alembic.ini")
+        config.attributes["database_url"] = temp_url
+        await asyncio.to_thread(command.upgrade, config, revision)
+        backup_settings = _backup_settings(settings, tmp_path, age_keypair, database_url=temp_url)
+        engine = create_engine(backup_settings)
+        yield backup_settings, create_session_factory(engine)
+    finally:
+        if engine is not None:
+            await engine.dispose()
+        await asyncio.to_thread(
+            subprocess.run,
+            ["docker", "compose", "exec", "-T", "postgres", "dropdb", "-U", db_user, temp_db],
+            check=False,
+            capture_output=True,
+        )
 
 
 async def test_create_backup_success_and_verify(
@@ -175,19 +223,86 @@ async def test_verify_rejects_unknown_batch(
 
 async def test_restore_rejects_non_empty_target_without_force(
     settings: Settings,
-    session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     age_keypair: tuple[str, str],
 ) -> None:
-    """评审 #3：目标库任意 public 表非空（不止 memory_documents/operations）即拒绝。
+    """非空目标的安全中止不得污染共享开发库，也必须撤销本次维护门禁。"""
+    async with _temporary_restore_environment(settings, tmp_path, age_keypair) as (
+        backup_settings,
+        session_factory,
+    ):
+        batch_id = await create_backup(backup_settings, session_factory)
+        with pytest.raises(BackupError, match="目标非空"):
+            await restore_backup(backup_settings, session_factory, batch_id=batch_id)
 
-    create_backup 本身已写入 backup_runs 行——恢复检查必须把它也算作非空，
-    且在 DROP/写入任何数据之前失败。
-    """
-    backup_settings = _backup_settings(settings, tmp_path, age_keypair)
-    batch_id = await create_backup(backup_settings, session_factory)
-    with pytest.raises(BackupError, match="目标非空"):
-        await restore_backup(backup_settings, session_factory, batch_id=batch_id)
+        engine = session_factory.kw.get("bind")
+        assert engine is not None
+        assert await MaintenanceGate(engine).is_active() is False
+
+
+async def test_restore_upgrade_failure_keeps_gate_active_and_blocks_traffic(
+    settings: Settings,
+    tmp_path: Path,
+    age_keypair: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """恢复已覆盖目标后若迁移失败，隔离库必须继续 fail-closed。"""
+    async with _temporary_restore_environment(settings, tmp_path, age_keypair) as (
+        backup_settings,
+        session_factory,
+    ):
+        batch_id = await create_backup(backup_settings, session_factory)
+
+        def _failing_upgrade(_database_url: str) -> None:
+            raise RuntimeError("injected migration failure")
+
+        monkeypatch.setattr(backup_module, "_upgrade_database_to_head", _failing_upgrade)
+        with pytest.raises(BackupError, match="injected migration failure"):
+            await restore_backup(backup_settings, session_factory, batch_id=batch_id, force=True)
+
+        engine = session_factory.kw.get("bind")
+        assert engine is not None
+        gate = MaintenanceGate(engine)
+        assert await gate.is_active() is True
+        with pytest.raises(MaintenanceActiveError):
+            async with gate.traffic():
+                pass
+
+
+async def test_restore_upgrades_ancestor_revision_before_replay(
+    settings: Settings,
+    tmp_path: Path,
+    age_keypair: tuple[str, str],
+) -> None:
+    """恢复 0004 备份时，必须先升级至当前 head 才能报告成功。"""
+    async with _temporary_restore_environment(
+        settings,
+        tmp_path,
+        age_keypair,
+    ) as (backup_settings, session_factory):
+        legacy_config = Config("alembic.ini")
+        legacy_config.attributes["database_url"] = backup_settings.database_url
+        await asyncio.to_thread(command.downgrade, legacy_config, "0004_account_deletion_ledger")
+
+        batch_id = await create_backup(backup_settings, session_factory)
+
+        current_config = Config("alembic.ini")
+        current_config.attributes["database_url"] = backup_settings.database_url
+        await asyncio.to_thread(command.upgrade, current_config, "head")
+
+        replayed = await restore_backup(
+            backup_settings, session_factory, batch_id=batch_id, force=True
+        )
+        assert replayed == []
+        async with session_factory() as session:
+            version = (
+                await session.execute(text("SELECT version_num FROM alembic_version"))
+            ).scalar_one()
+        assert version == "0006_global_maintenance_gate"
+
+        engine = session_factory.kw.get("bind")
+        assert engine is not None
+        assert await MaintenanceGate(engine).is_active() is False
 
 
 async def test_manifest_contains_spec_fields(
@@ -239,11 +354,8 @@ async def test_restore_replays_completed_account_deletion(
     全程在独立临时数据库中进行（不动开发库）；ops.account_deletion_ledger
     不被恢复重置，恢复后必须自动重放 purge 并再次物理删除该用户数据。
     """
-    from urllib.parse import urlparse
-
     from backend.memory.contracts.common import user_privacy_hash
     from backend.memory.persistence import account_deletion as deletion_repo
-    from backend.memory.persistence.database import create_engine, create_session_factory
     from backend.memory.persistence.identity import IdentityMappingRepository
     from backend.memory.services.account_purge import purge_user_account
     from backend.memory.storage.local_markdown import LocalMarkdownStore

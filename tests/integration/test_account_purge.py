@@ -7,21 +7,42 @@ ops ledger 原子推进、运行中任务 drain 重试、完成后幂等重放�
 from __future__ import annotations
 
 import dataclasses
+import logging
+import shutil
+import subprocess
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import pytest
+from alembic.config import Config
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import CheckpointMetadata, empty_checkpoint
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from alembic import command
 from backend.memory.contracts.commands import MaintenanceCommand
 from backend.memory.contracts.common import user_privacy_hash
+from backend.memory.graph.openai_client import FakeMemoryLLMClient
 from backend.memory.graph.runner import LocalLangGraphRunner
-from backend.memory.graph.state import MemoryRuntimeContext
+from backend.memory.graph.state import (
+    MemoryRuntimeContext,
+    SystemClock,
+    SystemIdGenerator,
+    default_registry_factory,
+)
 from backend.memory.persistence import account_deletion as deletion_repo
+from backend.memory.persistence.database import create_engine, create_session_factory
 from backend.memory.persistence.identity import IdentityMappingRepository
+from backend.memory.readers.testing import FakeActivityReader, FakeConversationReader
 from backend.memory.services.account_purge import AccountPurgeNotDrainedError
+from backend.memory.services.graph_state_service import KnowledgeGraphStateService
+from backend.memory.services.memory_service import MemoryService
+from backend.memory.storage.local_markdown import LocalMarkdownStore
 from backend.memory.worker.checkpoint import (
     CheckpointCleanupAdapter,
     thread_id_for_operation,
@@ -33,18 +54,162 @@ USER = UUID("00000000-0000-0000-0000-00000000b001")
 ADMIN = UUID("00000000-0000-0000-0000-00000000a001")
 HEX64 = "ab" * 32
 
+# 账号删除会执行 advisory lock、真实 checkpoint 清理及破坏性 DDL。此模块仅使用
+# 临时数据库，绝不读取、重置或解锁共享开发/运行数据库的状态。
+pytestmark = pytest.mark.skipif(
+    shutil.which("docker") is None,
+    reason="需要 docker 创建隔离 PostgreSQL 测试数据库",
+)
 
-class _FakeSaver:
-    """记录 adelete_thread 调用的假 checkpointer。"""
+# 保持与 integration/conftest.py 的用户数据清理范围一致。Checkpoint 表由
+# AsyncPostgresSaver.setup() 按需创建，且本模块的首个测试会验证并清理其数据。
+PURGE_TEST_TABLES = (
+    "ops.account_deletion_ledger",
+    "memory_privacy_audit_records",
+    "account_deletion_manifest",
+    "memory_break_glass_audit",
+    "memory_break_glass_grants",
+    "memory_llm_call_metrics",
+    "memory_maintenance_runs",
+    "backup_runs",
+    "memory_user_notifications",
+    "memory_internal_event_log",
+    "memory_outbox_deliveries",
+    "memory_outbox",
+    "source_deletions",
+    "graph_state_audit",
+    "graph_user_node_activity",
+    "graph_activity_seen_events",
+    "graph_user_states",
+    "memory_graph_links",
+    "memory_deleted_evidence_suppressions",
+    "memory_review_candidates",
+    "memory_index_entries",
+    "memory_commits",
+    "memory_documents",
+    "memory_operations",
+    "account_identity_mappings",
+)
 
-    def __init__(self) -> None:
-        self.deleted: list[str] = []
 
-    async def setup(self) -> None:
-        return None
+@pytest.fixture(scope="session", autouse=True)
+def _migrate() -> None:
+    """覆盖父级共享库迁移夹具；本模块迁移仅在独立临时数据库中执行。"""
 
-    async def adelete_thread(self, thread_id: str) -> None:
-        self.deleted.append(thread_id)
+
+@pytest.fixture(scope="module")
+def purge_database_url() -> Iterator[str]:
+    """创建模块专属数据库，规避共享环境中其他进程持有的 purge advisory lock。"""
+    settings = Settings.model_validate({"app_env": "test"})
+    parsed = urlparse(settings.database_url)
+    db_user = parsed.username or "memory"
+    database_name = f"memory_account_purge_{uuid4().hex[:8]}"
+    database_url = settings.database_url.rsplit("/", 1)[0] + f"/{database_name}"
+    subprocess.run(
+        ["docker", "compose", "exec", "-T", "postgres", "createdb", "-U", db_user, database_name],
+        check=True,
+        capture_output=True,
+    )
+    try:
+        config = Config("alembic.ini")
+        config.attributes["database_url"] = database_url
+        command.upgrade(config, "head")
+        yield database_url
+    finally:
+        subprocess.run(
+            ["docker", "compose", "exec", "-T", "postgres", "dropdb", "-U", db_user, database_name],
+            check=False,
+            capture_output=True,
+        )
+
+
+@pytest.fixture()
+def settings(purge_database_url: str, tmp_path: Path) -> Settings:
+    """为每个用例提供隔离的数据库与 Markdown 根目录。"""
+    return Settings.model_validate(
+        {
+            "app_env": "test",
+            "database_url": purge_database_url,
+            "memory_storage_root": str(tmp_path / "storage"),
+        }
+    )
+
+
+@pytest.fixture()
+async def session_factory(
+    settings: Settings,
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """在独立库中清理用户数据，防止测试间相互影响。"""
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(text(f"TRUNCATE {', '.join(PURGE_TEST_TABLES)} CASCADE"))
+    try:
+        yield factory
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture()
+def store(settings: Settings) -> LocalMarkdownStore:
+    """创建指向用例临时目录的 Markdown 存储。"""
+    return LocalMarkdownStore(settings.memory_storage_root)
+
+
+@pytest.fixture()
+def memory_service(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: LocalMarkdownStore,
+) -> MemoryService:
+    """构建账号删除 Graph 所需的记忆服务。"""
+    return MemoryService(settings=settings, session_factory=session_factory, store=store)
+
+
+@pytest.fixture()
+def fake_llm() -> FakeMemoryLLMClient:
+    """账号删除路径不访问外部模型，使用确定性的假客户端。"""
+    return FakeMemoryLLMClient()
+
+
+@pytest.fixture()
+def fake_conversation_reader() -> FakeConversationReader:
+    """提供无外部依赖的会话读取器。"""
+    return FakeConversationReader()
+
+
+@pytest.fixture()
+def fake_activity_reader() -> FakeActivityReader:
+    """提供无外部依赖的活动读取器。"""
+    return FakeActivityReader()
+
+
+@pytest.fixture()
+def runtime_context(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    memory_service: MemoryService,
+    fake_llm: FakeMemoryLLMClient,
+    fake_conversation_reader: FakeConversationReader,
+    fake_activity_reader: FakeActivityReader,
+) -> MemoryRuntimeContext:
+    """组装连接到临时数据库的真实 Graph runtime context。"""
+    return MemoryRuntimeContext(
+        settings=settings,
+        memory_service=memory_service,
+        graph_state_service=KnowledgeGraphStateService(
+            settings=settings, session_factory=session_factory
+        ),
+        conversation_reader=fake_conversation_reader,
+        activity_reader=fake_activity_reader,
+        graph_registry_factory=default_registry_factory,
+        openai_client=fake_llm,
+        session_factory=session_factory,
+        clock=SystemClock(),
+        id_generator=SystemIdGenerator(),
+        logger=logging.getLogger("test.account_purge"),
+    )
 
 
 async def _seed_user_data(
@@ -296,6 +461,40 @@ async def _count_user_rows(session: AsyncSession, user_id: UUID) -> dict[str, in
     return counts
 
 
+async def _seed_checkpoint_thread(saver: AsyncPostgresSaver, thread_id: str) -> None:
+    """写入三张真实 checkpoint 表，确保 purge 校验覆盖最终物理状态。"""
+    config = RunnableConfig(
+        configurable={"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": None}
+    )
+    checkpoint = empty_checkpoint()
+    version = saver.get_next_version(None, None)
+    checkpoint["channel_values"]["operation"] = {"target_user_id": str(USER)}
+    checkpoint["channel_versions"]["operation"] = version
+    metadata = CheckpointMetadata(source="input", step=-1, parents={})
+    next_config = await saver.aput(
+        config, checkpoint, metadata, {"operation": version}
+    )
+    await saver.aput_writes(
+        next_config,
+        [("result", {"target_user_id": str(USER)})],
+        task_id="purge-regression-seed",
+    )
+
+
+async def _count_checkpoint_rows(
+    session: AsyncSession, thread_ids: list[str]
+) -> dict[str, int]:
+    """按目标 thread 汇总 LangGraph 三张表的残留行数。"""
+    counts: dict[str, int] = {}
+    for table in ("checkpoints", "checkpoint_writes", "checkpoint_blobs"):
+        result = await session.execute(
+            text(f"SELECT COUNT(*) FROM {table} WHERE thread_id = ANY(:thread_ids)"),
+            {"thread_ids": thread_ids},
+        )
+        counts[table] = int(result.scalar_one())
+    return counts
+
+
 async def test_purge_account_memory_full_flow(
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
@@ -331,11 +530,27 @@ async def test_purge_account_memory_full_flow(
     )
     await persist_operation(session_factory, purge_op)
 
-    saver = _FakeSaver()
-    context = dataclasses.replace(
-        runtime_context, checkpoint_cleanup=CheckpointCleanupAdapter(saver=saver)
+    checkpoint_threads = [
+        thread_id_for_operation(ids["user_op"]),
+        thread_id_for_operation(purge_op.operation_id),
+    ]
+    conninfo = settings.database_url.replace(
+        "postgresql+psycopg://", "postgresql://", 1
     )
-    result = await LocalLangGraphRunner(context=context).run(purge_op)
+    async with AsyncPostgresSaver.from_conn_string(conninfo) as saver:
+        await saver.setup()
+        for thread_id in checkpoint_threads:
+            await _seed_checkpoint_thread(saver, thread_id)
+        async with session_factory() as session:
+            before = await _count_checkpoint_rows(session, checkpoint_threads)
+        assert all(count > 0 for count in before.values()), before
+
+        context = dataclasses.replace(
+            runtime_context, checkpoint_cleanup=CheckpointCleanupAdapter(saver=saver)
+        )
+        result = await LocalLangGraphRunner(
+            context=context, checkpointer=saver
+        ).run(purge_op)
     assert result.status == "succeeded"
 
     async with session_factory() as session:
@@ -374,9 +589,12 @@ async def test_purge_account_memory_full_flow(
     assert "break_glass.read_body" in actions
 
     assert not user_dir.exists()
-    assert set(saver.deleted) == {
-        thread_id_for_operation(ids["user_op"]),
-        thread_id_for_operation(purge_op.operation_id),
+    async with session_factory() as session:
+        checkpoint_counts = await _count_checkpoint_rows(session, checkpoint_threads)
+    assert checkpoint_counts == {
+        "checkpoints": 0,
+        "checkpoint_writes": 0,
+        "checkpoint_blobs": 0,
     }
 
 
@@ -407,7 +625,6 @@ async def test_purge_waits_for_running_operations(
         payload=MaintenanceCommand(kind="purge_account_memory", target_user_id=USER),
     )
     await persist_operation(session_factory, purge_op)
-
     with pytest.raises(AccountPurgeNotDrainedError):
         await LocalLangGraphRunner(context=runtime_context).run(purge_op)
 

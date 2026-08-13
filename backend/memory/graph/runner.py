@@ -151,6 +151,12 @@ class LocalLangGraphRunner:
     ) -> None:
         self._context = context
         self._graph = build_memory_manager_graph(checkpointer)
+        # purge 节点会删除目标用户全部 checkpoint（含当前 purge thread）。若当前
+        # Graph 自身仍挂 checkpointer，LangGraph 在后续 normalize_result/END 阶段
+        # 会把该 thread 再次写回。专用无 checkpointer 图保证最终物理状态不反弹。
+        self._purge_graph = (
+            build_memory_manager_graph(None) if checkpointer is not None else self._graph
+        )
 
     async def run(
         self, operation: MemoryOperation, *, fencing: dict[str, Any] | None = None
@@ -163,7 +169,12 @@ class LocalLangGraphRunner:
         config = RunnableConfig(
             configurable={"thread_id": thread_id_for_operation(operation.operation_id)}
         )
-        final_state = await self._graph.ainvoke(
+        graph = (
+            self._purge_graph
+            if operation.operation_type == "purge_account_memory"
+            else self._graph
+        )
+        final_state = await graph.ainvoke(
             {"operation": operation.model_dump(mode="json"), "fencing": fencing},
             config=config,
             context=self._context,

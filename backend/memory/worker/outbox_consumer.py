@@ -35,6 +35,7 @@ from backend.memory.contracts.errors import InvalidPayloadError
 from backend.memory.contracts.evidence import GraphProjectionEvidence
 from backend.memory.contracts.operations import MemoryOperation
 from backend.memory.logging_config import configure_logging
+from backend.memory.maintenance_gate import MaintenanceGate, MaintenanceGateError
 from backend.memory.persistence import notifications as notifications_repo
 from backend.memory.persistence import operations as ops_repo
 from backend.memory.persistence import outbox as outbox_repo
@@ -163,6 +164,7 @@ class OutboxConsumer:
     logger: logging.Logger = field(
         default_factory=lambda: logging.getLogger("memory.outbox_consumer")
     )
+    maintenance_gate: MaintenanceGate | None = None
 
     def __post_init__(self) -> None:
         self._stopping = asyncio.Event()
@@ -187,6 +189,17 @@ class OutboxConsumer:
         评审 #8：串行处理期间用批量心跳维持整批 Lease；所有写回按
         owner/generation fencing CAS，Lease 易主后立即停止本行处理。
         """
+        try:
+            if self.maintenance_gate is None:
+                return await self._tick_ungated()
+            async with self.maintenance_gate.traffic():
+                return await self._tick_ungated()
+        except MaintenanceGateError:
+            self.logger.info("全局维护中，Outbox 停止领取")
+            return 0
+
+    async def _tick_ungated(self) -> int:
+        """在已通过 maintenance gate 后领取并处理一整批 Outbox。"""
         async with self.session_factory() as session:
             async with session.begin():
                 rows = await outbox_repo.claim_batch(
@@ -490,9 +503,12 @@ async def _run() -> None:
     settings = get_settings()
     configure_logging(settings)
     db = Database(settings)
+    maintenance_gate = MaintenanceGate(db.engine)
     try:
         consumer = OutboxConsumer(
-            session_factory=db.session_factory, config=_config_from_settings()
+            session_factory=db.session_factory,
+            config=_config_from_settings(),
+            maintenance_gate=maintenance_gate,
         )
         consumer.install_signal_handlers()
         await consumer.run_forever()

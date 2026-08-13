@@ -65,6 +65,7 @@ from backend.memory.contracts.operations import (
     MutationResult,
 )
 from backend.memory.graph.runner import MemoryGraphRunner
+from backend.memory.maintenance_gate import MaintenanceGate
 from backend.memory.persistence import break_glass as bg_repo
 from backend.memory.persistence import operations as ops_repo
 from backend.memory.persistence.database import Database
@@ -93,6 +94,7 @@ class ApiRuntime:
     runner: MemoryGraphRunner
     gateway_worker: Worker
     db: Database | None = None
+    maintenance_gate: MaintenanceGate | None = None
     #: 快速路径超时后继续执行的后台任务强引用（§14.2 第 6 条：不取消 Runner）
     background_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 
@@ -411,6 +413,17 @@ async def _try_fast_path(runtime: ApiRuntime, operation_id: UUID) -> None:
     未领取到 → 立即返回，由 Worker 按同一 claim 规则接管；已领取但 2 秒内
     未完成 → 后台任务继续执行并续约 Lease，HTTP 断开不取消 Runner。
     """
+    # HTTP middleware 虽已覆盖本请求，后台快速路径可能在响应返回后才继续执行；
+    # 因此领取动作自身也必须经 maintenance gate，不能在恢复开始后抢到 Lease。
+    gate = runtime.maintenance_gate
+    if gate is not None:
+        async with gate.traffic():
+            return await _try_fast_path_claimed(runtime, operation_id)
+    return await _try_fast_path_claimed(runtime, operation_id)
+
+
+async def _try_fast_path_claimed(runtime: ApiRuntime, operation_id: UUID) -> None:
+    """在已通过 maintenance gate 后领取并启动 Gateway 快速路径。"""
     worker = runtime.gateway_worker
     async with runtime.session_factory() as session:
         async with session.begin():

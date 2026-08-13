@@ -40,17 +40,33 @@ uv run python -m backend.memory.cli verify-backup-restore --batch-id <uuid>
 
 ```bash
 ./scripts/restore.sh --batch-id <uuid>            # 默认只允许空目标
-./scripts/restore.sh --batch-id <uuid> --force    # 显式覆盖现有环境
+./scripts/restore.sh --batch-id <uuid> --force    # 显式覆盖现有环境或接管失败恢复
 ```
 
-流程：磁盘定位 `{BACKUP_ROOT}/{batch_id}/` → 目标环境检查（数据库行数与存储目录为空，否则要求 `--force`）→ 若目标库已有该 `backup_runs` 行则交叉校验状态与 manifest checksum → 隔离目录解密并校验产物 checksum → 重置 public schema → `pg_restore` → 解出 Markdown 到 `MEMORY_STORAGE_ROOT`。
+恢复入口在写入 live 目标前会完成 manifest、migration revision、加密产物和
+checksum 校验。真正开始覆盖恢复时，它会在数据库级获取全局恢复互斥锁并持久化
+`ops.system_maintenance.active=true`，然后等待已有流量排空。以下所有进程在门禁激活
+期间都 fail-closed：
 
-恢复后必须处理的两件事：
+- API（包括 `/health/live`、`/health/startup`、`/health/ready`）返回 503；
+- Worker 停止领取和执行 operation；
+- Outbox Consumer 停止领取和投递；
+- Scheduler 停止调度维护任务。
 
-1. **账号删除重放（§21.4）**：restore 输出需要重放的 `account_deletion_id` 列表。服务启动后对每个 id 调用 `POST /internal/account-memory/purge` 重放删除，否则旧备份中已删除账号的数据会复活。
-2. **健康检查**：`/health/ready` 全绿后再开放流量（迁移版本以备份内 `alembic_version` 为准，如需升级再跑 `uv run alembic upgrade head`）。
+门禁保持期间，恢复流程依次检查目标、重置 `public` schema、执行 `pg_restore`、确认
+备份 revision 与恢复出的 `alembic_version` 一致、自动 `alembic upgrade head`、再次确认
+当前唯一 head、恢复 Markdown，并同步重放账号删除 ledger。全部步骤和删除重放成功后
+才会清除门禁并开放流量。
+
+任一步骤失败时，门禁会故意保持 active，数据必须视为不可信，不能通过手工直接清除
+`ops.system_maintenance` 来开放流量。确认失败原因并准备完整重做后，使用同批次
+`--force` 接管残留恢复锁状态；接管后仍须从 manifest 校验开始完整执行，不能只手工
+重放 purge 或只执行 migration。
+
+目标非空但未指定 `--force` 属于安全拒绝，不会执行覆盖写入；确认环境后再显式重试。
 
 ## 单用户恢复演练
+
 
 按批次整体恢复后，从恢复环境中按 `user_id` 导出数据库行与对应 Markdown（`users/{id前2位}/{id}/`）即可；第一版不提供独立的单用户恢复命令。
 

@@ -16,10 +16,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("CREATE SCHEMA ops")
+    op.execute("CREATE SCHEMA IF NOT EXISTS ops")
     op.execute(
         """
-        CREATE TABLE ops.account_deletion_ledger (
+        CREATE TABLE IF NOT EXISTS ops.account_deletion_ledger (
             account_deletion_id uuid PRIMARY KEY,
             user_hash char(64) NOT NULL,
             user_hash_key_version varchar(32) NOT NULL,

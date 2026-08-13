@@ -13,6 +13,7 @@ import asyncio
 import logging
 from contextlib import AsyncExitStack
 from pathlib import Path
+from typing import cast
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -38,6 +39,7 @@ from backend.memory.api.dependencies import (
 )
 from backend.memory.contracts.errors import MemoryError, PublicError
 from backend.memory.logging_config import configure_logging
+from backend.memory.maintenance_gate import MaintenanceGate, MaintenanceGateError
 from backend.memory.persistence import break_glass as bg_repo
 from backend.settings import Settings, get_settings
 
@@ -89,6 +91,7 @@ async def _build_runtime(settings: Settings, app: FastAPI) -> ApiRuntime:
     from backend.memory.worker.worker import Worker
 
     db = Database(settings)
+    maintenance_gate = MaintenanceGate(db.engine)
     stack = AsyncExitStack()
     app.state.db_exit_stack = stack
     store = LocalMarkdownStore(settings.memory_storage_root)
@@ -98,7 +101,8 @@ async def _build_runtime(settings: Settings, app: FastAPI) -> ApiRuntime:
     saver = await stack.enter_async_context(
         AsyncPostgresSaver.from_conn_string(_psycopg_conninfo(settings))
     )
-    await saver.setup()
+    async with maintenance_gate.traffic():
+        await saver.setup()
     context = MemoryRuntimeContext(
         settings=settings,
         memory_service=memory_service,
@@ -122,6 +126,7 @@ async def _build_runtime(settings: Settings, app: FastAPI) -> ApiRuntime:
         config=_worker_config(settings),
         worker_id=f"gateway-{id(app):08x}",
         logger=logger,
+        maintenance_gate=maintenance_gate,
     )
     return ApiRuntime(
         settings=settings,
@@ -130,6 +135,7 @@ async def _build_runtime(settings: Settings, app: FastAPI) -> ApiRuntime:
         runner=runner,
         gateway_worker=gateway_worker,
         db=db,
+        maintenance_gate=maintenance_gate,
     )
 
 
@@ -142,6 +148,8 @@ def create_app(settings: Settings | None = None, *, runtime: ApiRuntime | None =
     app.state.rate_limiter = FixedWindowRateLimiter()
     app.state.startup_complete = False
     app.state.migration_head = None
+    if runtime is not None and runtime.maintenance_gate is None and runtime.db is not None:
+        runtime.maintenance_gate = MaintenanceGate(runtime.db.engine)
 
     app.add_middleware(
         CORSMiddleware,
@@ -163,44 +171,69 @@ def create_app(settings: Settings | None = None, *, runtime: ApiRuntime | None =
     @app.middleware("http")
     async def observability(request: Request, call_next):  # type: ignore[no-untyped-def]
         request.state.trace_id = trace_id_from_headers(request.headers)
-        response = await call_next(request)
+        current: ApiRuntime | None = getattr(request.app.state, "runtime", None)
+        gate = current.maintenance_gate if current is not None else None
+
+        async def _serve_request() -> Response:
+            response = cast(Response, await call_next(request))
+            # §13.15：break-glass 会话的所有正文读取/修改必须写审计（fail-closed，
+            # 评审 #10）。审计也属于请求生命周期，必须继续受 maintenance shared
+            # lock 保护，避免 call_next 返回后恢复已开始但审计仍访问 public schema。
+            break_glass = getattr(request.state, "break_glass", None)
+            if (
+                break_glass is not None
+                and request.url.path.startswith("/api/v1/memory")
+                and response.status_code < 400
+            ):
+                try:
+                    await _write_break_glass_body_audit(
+                        request,
+                        break_glass,
+                        action=("read_body" if request.method == "GET" else "modify_body"),
+                        resource_type=(
+                            getattr(request.scope.get("route"), "path", None) or "unmatched"
+                        ),
+                    )
+                except Exception:
+                    logger.error(
+                        "break-glass 正文审计写入失败，按 fail-closed 中止响应: %s %s",
+                        request.method,
+                        request.url.path,
+                        exc_info=True,
+                    )
+                    return JSONResponse(
+                        status_code=500,
+                        content=_public_error_body(
+                            "AUDIT_WRITE_FAILED",
+                            "break-glass 审计写入失败，请求结果已按安全策略中止",
+                            retryable=True,
+                            trace_id=request.state.trace_id,
+                        ),
+                    )
+            return response
+
+        try:
+            if gate is None:
+                response = await _serve_request()
+            else:
+                async with gate.traffic():
+                    response = await _serve_request()
+        except MaintenanceGateError:
+            logger.warning("全局维护门禁拒绝 API 请求: %s %s", request.method, request.url.path)
+            response = JSONResponse(
+                status_code=503,
+                content=_public_error_body(
+                    "MAINTENANCE_MODE",
+                    "系统正在维护，当前请求已按安全策略拒绝",
+                    retryable=True,
+                    trace_id=request.state.trace_id,
+                ),
+            )
         route = request.scope.get("route")
         route_path = getattr(route, "path", None) or "unmatched"
         metrics.memory_http_requests_total.labels(
             route=route_path, method=request.method, status=str(response.status_code)
         ).inc()
-        # §13.15：break-glass 会话的所有正文读取/修改必须写审计（fail-closed，
-        # 评审 #10）：审计写不进去时不得返回敏感正文或确认修改成功；
-        # 审计在响应返回（流式响应首字节发送）前完成
-        break_glass = getattr(request.state, "break_glass", None)
-        if (
-            break_glass is not None
-            and request.url.path.startswith("/api/v1/memory")
-            and response.status_code < 400
-        ):
-            try:
-                await _write_break_glass_body_audit(
-                    request,
-                    break_glass,
-                    action=("read_body" if request.method == "GET" else "modify_body"),
-                    resource_type=route_path,
-                )
-            except Exception:
-                logger.error(
-                    "break-glass 正文审计写入失败，按 fail-closed 中止响应: %s %s",
-                    request.method,
-                    request.url.path,
-                    exc_info=True,
-                )
-                return JSONResponse(
-                    status_code=500,
-                    content=_public_error_body(
-                        "AUDIT_WRITE_FAILED",
-                        "break-glass 审计写入失败，请求结果已按安全策略中止",
-                        retryable=True,
-                        trace_id=request.state.trace_id,
-                    ),
-                )
         return response
 
     async def _write_break_glass_body_audit(
@@ -210,12 +243,13 @@ def create_app(settings: Settings | None = None, *, runtime: ApiRuntime | None =
         action: str,
         resource_type: str,
     ) -> None:
+        """在当前 maintenance traffic lock 生命周期内持久化 break-glass 正文审计。"""
         from uuid import uuid4
 
-        runtime: ApiRuntime | None = getattr(request.app.state, "runtime", None)
-        if runtime is None:
+        current: ApiRuntime | None = getattr(request.app.state, "runtime", None)
+        if current is None:
             raise RuntimeError("API 运行时未初始化，无法写入 break-glass 审计")
-        async with runtime.session_factory() as session:
+        async with current.session_factory() as session:
             await bg_repo.insert_audit(
                 session,
                 audit_id=uuid4(),

@@ -5,17 +5,19 @@ from __future__ import annotations
 import asyncio
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from alembic import context
 from backend.settings import get_settings
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
+database_url = config.attributes.get("database_url")
+if database_url is None:
+    database_url = get_settings().database_url
+config.set_main_option("sqlalchemy.url", str(database_url))
 
 # 第一版以 op.execute 手写 DDL 为准（规格 §13），不使用 ORM autogenerate 目标
 target_metadata = None
