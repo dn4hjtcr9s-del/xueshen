@@ -10,6 +10,8 @@ STAGES=(backend-lint backend-unit backend-integration frontend contracts contain
 
 run_backend_lint() {
   echo "== backend-lint: Ruff + mypy =="
+  # 检查范围明确为 backend/ 与 tests/（复审 nit）：scripts/mineru_ocr/ 等
+  # 遗留工具目录不在门禁范围内（44 处存量错误，另行治理）
   uv run ruff check backend tests
   uv run ruff format --check backend tests
   uv run mypy backend

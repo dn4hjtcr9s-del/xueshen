@@ -56,6 +56,7 @@ def _settings(tmp_path: Any, **overrides: Any) -> Settings:
         )
         base["dev_auth_enabled"] = False
         base["dev_auth_allow_scope_override"] = False
+        base["auth_issuer"] = "https://auth.example"
         base["auth_private_key_file"] = str(private_file)
         base["auth_public_key"] = public_pem
         base["auth_database_url"] = "postgresql+psycopg://auth:auth@db:5432/auth"

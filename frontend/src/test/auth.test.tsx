@@ -2,7 +2,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../auth/AuthContext";
 import { AuthGate } from "../auth/AuthGate";
 import { request } from "../api/client";
@@ -194,5 +194,86 @@ describe("共享请求层 401 → single-flight refresh（§9.3）", () => {
     );
     await expect(request("GET", "/memory/index")).rejects.toMatchObject({ status: 401 });
     expect(getAccessToken()).toBe("valid-token");
+  });
+});
+
+describe("logout epoch 单调性（复审 P1）", () => {
+  const EPOCH_KEY = "gewu-auth-logout-epoch";
+
+  // vitest jsdom 的 localStorage 是空壳（方法缺失）：注入功能性实现供测试使用
+  beforeEach(() => {
+    const backing = new Map<string, string>();
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => backing.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          backing.set(key, String(value));
+        },
+        removeItem: (key: string) => {
+          backing.delete(key);
+        },
+        clear: () => {
+          backing.clear();
+        },
+      },
+    });
+  });
+
+  async function freshTokenStore() {
+    vi.resetModules();
+    return await import("../auth/tokenStore");
+  }
+
+  it("新标签页（memoryEpoch=0）递增前吸收存储值，不回退全局 epoch", async () => {
+    localStorage.setItem(EPOCH_KEY, "5");
+    const store = await freshTokenStore();
+    // 首次读取即吸收存储值
+    expect(store.getLogoutEpoch()).toBe(5);
+    // 递增基于吸收后的值：5 → 6（而非 0 → 1 回退）
+    expect(store.incrementLogoutEpoch()).toBe(6);
+    expect(localStorage.getItem(EPOCH_KEY)).toBe("6");
+  });
+
+  it("接收端 adopt 只取 max，不自行递增", async () => {
+    localStorage.setItem(EPOCH_KEY, "5");
+    const store = await freshTokenStore();
+    // 收到低于当前值的消息：保持 5
+    expect(store.adoptLogoutEpoch(3)).toBe(5);
+    // 收到高于当前值的消息：采用 7
+    expect(store.adoptLogoutEpoch(7)).toBe(7);
+    expect(localStorage.getItem(EPOCH_KEY)).toBe("7");
+  });
+});
+
+describe("refresh 响应后 epoch 复检（复审 P1）", () => {
+  it("refresh 在途时发生 logout，200 响应被丢弃，不写 token 不广播", async () => {
+    setAccessToken(null);
+    let refreshEntered!: () => void;
+    let releaseRefresh!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      refreshEntered = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    server.use(
+      http.post("*/api/v1/auth/refresh", async () => {
+        refreshEntered();
+        await release;
+        return HttpResponse.json({ access_token: "late-token" });
+      }),
+      http.get("*/api/v1/memory/index", () => new HttpResponse(null, { status: 401 })),
+    );
+
+    const pending = request("GET", "/memory/index");
+    await entered; // refresh 已在途（请求被延迟）
+    // 模拟其他标签页 logout 完成：epoch 递增（等价于收到 logout 消息后 adopt）
+    const { incrementLogoutEpoch, adoptLogoutEpoch } = await import("../auth/tokenStore");
+    adoptLogoutEpoch(incrementLogoutEpoch());
+    releaseRefresh(); // 放行 200
+
+    await expect(pending).rejects.toMatchObject({ status: 401 });
+    expect(getAccessToken()).toBeNull(); // 迟到的 200 被丢弃
   });
 });

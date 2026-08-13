@@ -1,6 +1,6 @@
 // 认证 API 客户端（方案 §4.1 / §9.1）。
 import { request, withRefreshLock } from "./client";
-import { getAccessToken, setAccessToken } from "../auth/tokenStore";
+import { getAccessToken, incrementLogoutEpoch, setAccessToken } from "../auth/tokenStore";
 
 export interface AuthUser {
   user_id: string;
@@ -38,11 +38,21 @@ export async function login(identifier: string, password: string): Promise<Token
 }
 
 export async function logout(): Promise<void> {
-  // 复审 P1/P2：logout 与 refresh 共用同一把跨标签页锁（防止竞态残留会话）；
+  // 复审 P1：logout 与 refresh 共用同一把跨标签页锁。epoch 递增必须在
+  // logout **结束时**（锁内、请求之后）完成——任何在 logout 进行中排队等待
+  // 锁的 refresh，其快照必然早于该递增，拿到锁后看到 epoch 变化即中止，
+  // 不会请求 refresh 也不会广播新 access token。
   // 无论服务端成败，本地 access token 必须清除（本地退出语义，评审 P1-3），
-  // 失败时异常照常抛出，由调用方提示用户服务器会话可能仍有效
+  // 失败时异常照常抛出，由调用方提示用户服务器会话可能仍有效。
   try {
-    await withRefreshLock(() => request<void>("POST", "/auth/logout", { auth: true }));
+    await withRefreshLock(async () => {
+      try {
+        await request<void>("POST", "/auth/logout", { auth: true });
+      } finally {
+        incrementLogoutEpoch();
+        setAccessToken(null);
+      }
+    });
   } finally {
     setAccessToken(null);
   }

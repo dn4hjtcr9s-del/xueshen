@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 from sqlalchemy import text
@@ -91,3 +93,36 @@ async def test_expired_token_rejected(
     expired = issuer.issue(user_id=uuid4(), lifetime_seconds=-60)
     resp = await client.get("/api/v1/memory/index", headers={"Authorization": f"Bearer {expired}"})
     assert resp.status_code == 401, resp.text
+
+
+async def test_me_rejects_agent_style_token(
+    client: httpx.AsyncClient, auth_test_settings: Settings
+) -> None:
+    """复审 P3：合法签名但 sub 非 UUID 的 token 打 /me → 401，不得 500。"""
+    import time
+    from pathlib import Path
+    from uuid import uuid4
+
+    import jwt
+
+    private_pem = await asyncio.to_thread(
+        Path(auth_test_settings.auth_private_key_file).read_text, encoding="utf-8"
+    )
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            "iss": "gewu-auth",
+            "aud": "memory-api",
+            "sub": "conversation-agent-prod-01",  # agent 服务主体，非 UUID
+            "actor_type": "conversation_agent",
+            "scopes": ["memory:read"],
+            "iat": now,
+            "exp": now + 300,
+            "jti": str(uuid4()),
+        },
+        private_pem,
+        algorithm="RS256",
+    )
+    resp = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["error"]["code"] == "AUTH_SESSION_INVALID"

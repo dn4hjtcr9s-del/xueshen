@@ -54,6 +54,7 @@ def _base(keys: dict[str, str]) -> dict[str, object]:
     return {
         "app_env": "production",
         "dev_auth_enabled": False,
+        "auth_issuer": "gewu-auth",
         "auth_private_key_file": keys["private_file"],
         "auth_public_key_file": keys["public_file"],
         "auth_database_url": "postgresql+psycopg://auth:auth@db:5432/auth",
@@ -68,6 +69,14 @@ def test_production_missing_private_key_fails(keys: dict[str, str]) -> None:
     base = _base(keys)
     base.pop("auth_private_key_file")
     with pytest.raises(ValueError, match="AUTH_PRIVATE_KEY_FILE"):
+        Settings.model_validate(base)
+
+
+def test_production_missing_issuer_fails(keys: dict[str, str]) -> None:
+    """复审 P3：生产必须显式配置 AUTH_ISSUER（否则 iss 校验被静默跳过）。"""
+    base = _base(keys)
+    base.pop("auth_issuer")
+    with pytest.raises(ValueError, match="AUTH_ISSUER"):
         Settings.model_validate(base)
 
 

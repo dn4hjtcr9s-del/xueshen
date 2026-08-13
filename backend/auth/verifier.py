@@ -18,9 +18,11 @@ from uuid import UUID
 import jwt
 
 from backend.auth.context import (
+    ACTOR_TYPES,
     AGENT_ACTOR_TYPES,
     AGENT_ALLOWED_SCOPES,
     ALL_SCOPES,
+    DEFAULT_AUTH_ISSUER,
     DEV_USER_DEFAULT_SCOPES,
     ActorType,
     AuthContext,
@@ -172,7 +174,8 @@ class ProductionJwtAuthAdapter:
                 decode_key,  # type: ignore[arg-type]
                 algorithms=["RS256", "ES256"],
                 audience=self.settings.auth_audience,
-                issuer=self.settings.auth_issuer,
+                # 复审 P3：与签发端使用同一 fallback，issuer 缺省时不静默跳过 iss 校验
+                issuer=self.settings.auth_issuer or DEFAULT_AUTH_ISSUER,
                 # 评审二轮 #4：actor_type/scopes 同为必需 claims，缺失即拒
                 options={
                     "require": ["iss", "aud", "sub", "iat", "exp", "jti", "actor_type", "scopes"]
@@ -191,15 +194,7 @@ class ProductionJwtAuthAdapter:
         # 严格 claims schema（评审二轮 #4）：类型错误或未知值整体拒绝 token，
         # 不静默修正、不静默过滤
         actor_raw = claims["actor_type"]
-        if not isinstance(actor_raw, str) or actor_raw not in (
-            "user",
-            "conversation_agent",
-            "activity_agent",
-            "knowledge_graph_ui",
-            "summary_projection",
-            "system",
-            "admin",
-        ):
+        if not isinstance(actor_raw, str) or actor_raw not in ACTOR_TYPES:
             raise AuthError("AUTH_REQUIRED", "actor_type claim 非法")
         actor = cast(ActorType, actor_raw)
         scopes_raw = claims["scopes"]

@@ -130,6 +130,42 @@ async def update_run_by_operation(
     )
 
 
+async def mark_run_busy_by_operation(
+    session: AsyncSession,
+    *,
+    operation_id: UUID,
+    result: dict[str, Any],
+) -> None:
+    """busy 分支（§14.3 / 复审 P3）：只保持 running 状态与结果，**不触碰 cursor**。
+
+    修复前 busy 分支回写 cursor=payload.cursor（旧值），若持有锁的实例刚提交了
+    新 cursor，busy 写会后落地并把 cursor 回退，导致同批次重跑（last-writer-wins）。
+    保持 cursor 不动：run 的进度由持锁实例的更新决定，Scheduler 按当前 cursor
+    续排，幂等键兜底重复批次。
+
+    status 守卫（复审 Optional）：仅当 run 仍处于 queued/running 时才置 running——
+    若 busy 写恰好落在持锁实例提交最终状态（succeeded/failed）之后，本更新变为
+    no-op，避免把已收尾的 run 回退成 running 导致整轮按 initial 重排。
+    """
+    await exec_rowcount(
+        session,
+        text(
+            """
+            UPDATE memory_maintenance_runs
+            SET status = 'running',
+                result = CAST(:result AS jsonb),
+                started_at = COALESCE(started_at, now())
+            WHERE operation_id = :operation_id
+              AND status IN ('queued', 'running')
+            """
+        ),
+        {
+            "operation_id": operation_id,
+            "result": json.dumps(result, ensure_ascii=False),
+        },
+    )
+
+
 async def count_dead_letters(session: AsyncSession) -> dict[str, int]:
     """dead letter 指标检查（§14.3）。"""
     result = await session.execute(
