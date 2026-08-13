@@ -142,6 +142,10 @@ async def mark_run_busy_by_operation(
     新 cursor，busy 写会后落地并把 cursor 回退，导致同批次重跑（last-writer-wins）。
     保持 cursor 不动：run 的进度由持锁实例的更新决定，Scheduler 按当前 cursor
     续排，幂等键兜底重复批次。
+
+    status 守卫（复审 Optional）：仅当 run 仍处于 queued/running 时才置 running——
+    若 busy 写恰好落在持锁实例提交最终状态（succeeded/failed）之后，本更新变为
+    no-op，避免把已收尾的 run 回退成 running 导致整轮按 initial 重排。
     """
     await exec_rowcount(
         session,
@@ -152,6 +156,7 @@ async def mark_run_busy_by_operation(
                 result = CAST(:result AS jsonb),
                 started_at = COALESCE(started_at, now())
             WHERE operation_id = :operation_id
+              AND status IN ('queued', 'running')
             """
         ),
         {

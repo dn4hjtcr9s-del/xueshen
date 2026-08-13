@@ -249,8 +249,9 @@ test("无 Web Locks 环境下 logout 后排队 refresh 不得恢复会话（复�
   await page.getByRole("button", { name: "退出登录" }).click();
   await logoutHeld;
 
-  // B reload：无跨标签页锁，refresh 直接发出；logout 完成后 B 通过
-  // 消息携带的 epoch（adopt max）与响应复检，最终不得停留在登录态
+  // B reload：无 Web Locks 时 refresh 经同页互斥队列排在 logout 之后（P3-3 修复），
+  // logout 完成后 B 通过消息携带的 epoch（adopt max）与响应复检，
+  // 最终不得停留在登录态
   await page2.reload();
   await new Promise((resolve) => setTimeout(resolve, 2000));
 

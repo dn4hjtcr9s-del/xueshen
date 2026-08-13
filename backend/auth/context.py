@@ -6,7 +6,7 @@ ProductionJwtAuthAdapter 与 DevelopmentAuthAdapter 都输出同一个 AuthConte
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, get_args
 from uuid import UUID
 
 ActorType = Literal[
@@ -19,16 +19,9 @@ ActorType = Literal[
     "admin",
 ]
 
-#: 合法 actor_type 集合（verifier 与 /me 共用同一契约，复审 P3）
-ACTOR_TYPES: tuple[str, ...] = (
-    "user",
-    "conversation_agent",
-    "activity_agent",
-    "knowledge_graph_ui",
-    "summary_projection",
-    "system",
-    "admin",
-)
+#: 合法 actor_type 集合：由 ActorType Literal 派生（复审 Optional：单一定义，
+#: 新增 actor 时白名单自动跟随，杜绝漏改）
+ACTOR_TYPES: tuple[str, ...] = get_args(ActorType)
 
 #: 缺省 issuer（方案 §6.2：AUTH_ISSUER=gewu-auth 固定值；签发与验签两端共用）
 DEFAULT_AUTH_ISSUER = "gewu-auth"

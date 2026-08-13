@@ -140,3 +140,56 @@ async def test_busy_mark_does_not_touch_cursor(
         run = await maintenance_repo.get_run_by_key(s, idempotency_key=idem_key)
         assert run is not None
         assert run["cursor"] == "u1:m1", "busy 写不得回退 cursor"
+
+
+async def test_busy_mark_noop_after_terminal_status(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """复审 Optional：busy 写落在持锁实例收尾之后必须为 no-op，不得回退 succeeded。"""
+    from uuid import uuid4
+
+    from backend.memory.persistence import maintenance as maintenance_repo
+
+    run_id = uuid4()
+    idem_key = f"lock-terminal-{uuid4().hex[:8]}"
+    operation = make_operation(
+        user_id=UUID(SYSTEM_MAINTENANCE_USER_ID),
+        actor_type="system",
+        input_kind="maintenance",
+        operation_type="verify_checksums",
+        priority=0,
+        payload=MaintenanceCommand(kind="verify_checksums", batch_size=100),
+    )
+    await persist_operation(session_factory, operation)
+    async with session_factory() as s:
+        async with s.begin():
+            await maintenance_repo.create_or_reuse_run(
+                s,
+                run_id=run_id,
+                maintenance_type="verify_checksums",
+                idempotency_key=idem_key,
+            )
+            await maintenance_repo.attach_operation(
+                s, run_id=run_id, operation_id=operation.operation_id
+            )
+            # 持锁实例已收尾：succeeded
+            await maintenance_repo.update_run_by_operation(
+                s,
+                operation_id=operation.operation_id,
+                status="succeeded",
+                cursor=None,
+                result={"kind": "verify_checksums", "status": "done"},
+            )
+    # 迟到的 busy 写
+    async with session_factory() as s:
+        async with s.begin():
+            await maintenance_repo.mark_run_busy_by_operation(
+                s,
+                operation_id=operation.operation_id,
+                result={"kind": "verify_checksums", "status": "busy"},
+            )
+    async with session_factory() as s:
+        run = await maintenance_repo.get_run_by_key(s, idempotency_key=idem_key)
+        assert run is not None
+        assert run["status"] == "succeeded", "busy 写不得回退终态"
+        assert run["result"].get("status") == "done"
