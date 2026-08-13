@@ -42,7 +42,7 @@ from backend.auth_service.errors import (
 from backend.auth_service.runtime import AuthRuntime
 from backend.auth_service.security import (
     DUMMY_PASSWORD_HASH,
-    hash_password,
+    hash_password_async,
     new_refresh_token,
     normalize_email,
     normalize_username,
@@ -50,7 +50,7 @@ from backend.auth_service.security import (
     validate_email,
     validate_password,
     validate_username,
-    verify_password,
+    verify_password_async,
 )
 from backend.auth_service.session import (
     get_token_row_for_update,
@@ -145,35 +145,47 @@ def _family_log_ref(family_id: Any) -> str:
 
 
 async def _ensure_identity_mapping(runtime: AuthRuntime, user_id: Any, issuer: str) -> None:
-    """登录兜底（方案 §3.2 / 附录 A.3 #10）：映射缺失时即时补建，失败 503。"""
+    """登录兜底（方案 §3.2 / 附录 A.3 #10）：映射缺失时即时补建，失败 503。
+
+    评审 P1-6：补建后必须核对归属——(issuer, external_subject) 已指向其他
+    内部用户时拒绝登录（fail-closed），不静默放行。
+    """
     memory_factory = runtime.memory_session_factory
     if memory_factory is None:
         return
     try:
         async with memory_factory() as session:
             async with session.begin():
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO account_identity_mappings (
+                            internal_user_id, issuer, external_subject
+                        ) VALUES (:user_id, :issuer, :sub)
+                        ON CONFLICT (issuer, external_subject) DO NOTHING
+                        """
+                    ),
+                    {"user_id": user_id, "issuer": issuer, "sub": str(user_id)},
+                )
                 result = await session.execute(
                     text(
-                        "SELECT 1 FROM account_identity_mappings "
+                        "SELECT internal_user_id FROM account_identity_mappings "
                         "WHERE issuer = :issuer AND external_subject = :sub"
                     ),
                     {"issuer": issuer, "sub": str(user_id)},
                 )
-                if result.first() is None:
-                    await session.execute(
-                        text(
-                            """
-                            INSERT INTO account_identity_mappings (
-                                internal_user_id, issuer, external_subject
-                            ) VALUES (:user_id, :issuer, :sub)
-                            ON CONFLICT (issuer, external_subject) DO NOTHING
-                            """
-                        ),
-                        {"user_id": user_id, "issuer": issuer, "sub": str(user_id)},
-                    )
+                existing = result.scalar_one_or_none()
     except Exception as exc:
         logger.error("登录时身份映射补建失败 user=%s: %s", user_id, type(exc).__name__)
         raise mapping_pending() from exc
+    if existing is None or str(existing) != str(user_id):
+        logger.error(
+            "登录拒绝：身份映射 (issuer=%s, sub=%s) 指向其他内部用户 %s",
+            issuer,
+            user_id,
+            existing,
+        )
+        raise mapping_pending()
 
 
 @router.post("/register", status_code=201)
@@ -190,7 +202,7 @@ async def register(request: Request, body: RegisterRequest) -> JSONResponse:
     username = validate_username(body.username)
     email = validate_email(body.email) if body.email else None
     validate_password(body.password)
-    password_hash = hash_password(body.password)
+    password_hash = await hash_password_async(body.password)
 
     user_id = uuid4()
     try:
@@ -244,7 +256,7 @@ async def login(request: Request, body: LoginRequest) -> JSONResponse:
         raise auth_db_unavailable() from exc
 
     stored_hash: str | None = row["password_hash"] if row is not None else None
-    password_ok = verify_password(body.password, stored_hash or DUMMY_PASSWORD_HASH)
+    password_ok = await verify_password_async(body.password, stored_hash or DUMMY_PASSWORD_HASH)
     status_ok = row is not None and row["status"] == "active"
     if not password_ok or not status_ok:
         if ip is not None:
@@ -371,7 +383,7 @@ async def me(request: Request) -> JSONResponse:
         raise session_invalid()
     token = authorization.removeprefix("Bearer ").strip()
     try:
-        user_id = runtime.verifier.verify_sub(token)
+        user_id = await runtime.verifier.verify_sub(token)
     except jwt.PyJWTError as exc:
         raise session_invalid() from exc
 

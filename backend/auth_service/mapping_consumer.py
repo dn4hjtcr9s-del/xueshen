@@ -97,13 +97,14 @@ class IdentityMappingConsumer:
         return len(rows)
 
     async def _process(self, auth_session: AsyncSession, row: dict[str, Any]) -> None:
-        """幂等写入 memory 库映射；失败按退避重排，超限转 dead。"""
+        """幂等写入 memory 库映射；冲突必须核对归属（评审 P1-6），失败按退避重排。"""
         event_id = UUID(str(row["event_id"]))
         user_id = UUID(str(row["user_id"]))
         issuer = str(row["issuer"])
         external_subject = str(row["external_subject"])
         attempts = int(row["attempts"]) + 1
 
+        mismatch = False
         failed = False
         try:
             async with self._memory() as session:
@@ -123,9 +124,38 @@ class IdentityMappingConsumer:
                             "external_subject": external_subject,
                         },
                     )
+                    # 评审 P1-6：冲突即视为已存在的前提是归属一致；
+                    # 若 (issuer, external_subject) 已指向其他内部用户，
+                    # 绝不能静默标记成功（会导致解析到错误用户）。
+                    result = await session.execute(
+                        text(
+                            "SELECT internal_user_id FROM account_identity_mappings "
+                            "WHERE issuer = :issuer AND external_subject = :external_subject"
+                        ),
+                        {"issuer": issuer, "external_subject": external_subject},
+                    )
+                    existing = result.scalar_one_or_none()
+                    if existing is None or str(existing) != str(user_id):
+                        mismatch = True
         except IntegrityError:
-            # 并发消费同一事件（极端）：冲突即视为已存在（方案 §3.2）
-            pass
+            # (internal_user_id, issuer) 主键冲突等：同样必须核对归属
+            try:
+                async with self._memory() as session:
+                    result = await session.execute(
+                        text(
+                            "SELECT internal_user_id FROM account_identity_mappings "
+                            "WHERE issuer = :issuer AND external_subject = :external_subject"
+                        ),
+                        {"issuer": issuer, "external_subject": external_subject},
+                    )
+                    existing = result.scalar_one_or_none()
+                if existing is None or str(existing) != str(user_id):
+                    mismatch = True
+            except Exception as exc:
+                failed = True
+                self._logger.warning(
+                    "身份映射冲突后核对失败 event=%s err=%s", event_id, type(exc).__name__
+                )
         except Exception as exc:
             failed = True
             self._logger.warning(
@@ -135,7 +165,23 @@ class IdentityMappingConsumer:
                 type(exc).__name__,
             )
 
-        if failed:
+        if mismatch:
+            # 归属不一致无法通过重试自愈：直接转 dead 并告警，由运维介入
+            await auth_session.execute(
+                text(
+                    "UPDATE identity_mapping_outbox SET status = 'dead', "
+                    "attempts = :attempts, done_at = now() WHERE event_id = :event_id"
+                ),
+                {"attempts": attempts, "event_id": event_id},
+            )
+            self._logger.error(
+                "告警：身份映射 (issuer=%s, sub=%s) 已指向其他内部用户，"
+                "事件转 dead 需运维介入 event=%s",
+                issuer,
+                external_subject,
+                event_id,
+            )
+        elif failed:
             if attempts >= self._max_attempts:
                 await auth_session.execute(
                     text(

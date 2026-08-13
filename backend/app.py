@@ -51,11 +51,12 @@ logger = logging.getLogger("memory.api")
 
 
 def _effective_origins(settings: Settings) -> list[str]:
-    """§18.5：本地开发默认允许 Vite 源；生产只允许显式配置的域名。"""
+    """§18.5：本地开发默认允许 Vite 源（5173 dev / 4173 preview，§9.4）；
+    生产只允许显式配置的域名。"""
     if settings.memory_allowed_origins:
         return list(settings.memory_allowed_origins)
     if settings.app_env in ("development", "test"):
-        return ["http://localhost:5173"]
+        return ["http://localhost:5173", "http://localhost:4173"]
     return []
 
 
@@ -369,11 +370,19 @@ def create_app(
             app.state.migration_head = ScriptDirectory.from_config(
                 Config("alembic.ini")
             ).get_current_head()
+        except Exception:
+            logger.warning("无法解析 alembic head revision", exc_info=True)
+            app.state.migration_head = None
+        try:
+            from alembic.config import Config
+            from alembic.script import ScriptDirectory
+
             app.state.auth_migration_head = ScriptDirectory.from_config(
                 Config("auth_alembic.ini")
             ).get_current_head()
         except Exception:
-            logger.warning("无法解析 alembic head revision", exc_info=True)
+            logger.warning("无法解析 auth alembic head revision", exc_info=True)
+            app.state.auth_migration_head = None
         app.state.startup_complete = True
 
     @app.on_event("shutdown")
@@ -437,22 +446,38 @@ def create_app(
             if not await current.db.ping():
                 failures.append("database_unavailable")
             else:
-                async with current.db.session_factory() as session:
-                    head = request.app.state.migration_head
-                    if head is not None:
-                        row = await session.execute(text("SELECT version_num FROM alembic_version"))
-                        current_version = row.scalar_one_or_none()
-                        if current_version != head:
-                            failures.append("migration_version_mismatch")
-                    count = await session.execute(
-                        text("SELECT COUNT(*) FROM knowledge_graph_nodes")
-                    )
-                    if int(count.scalar_one()) == 0:
-                        failures.append("knowledge_graph_registry_not_loaded")
+                # §6.3 / 评审 P1-5：迁移检查 fail-closed —— head 不可解析、
+                # 版本表缺失、revision 不等于 head 均视为未就绪（503）
+                head = getattr(request.app.state, "migration_head", None)
+                if head is None:
+                    failures.append("migration_head_unresolved")
+                else:
+                    try:
+                        async with current.db.session_factory() as session:
+                            row = await session.execute(
+                                text("SELECT version_num FROM alembic_version")
+                            )
+                            current_version = row.scalar_one_or_none()
+                    except Exception:
+                        logger.warning("memory alembic_version 查询失败", exc_info=True)
+                        current_version = None
+                    if current_version != head:
+                        failures.append("migration_version_mismatch")
+                try:
+                    async with current.db.session_factory() as session:
+                        count = await session.execute(
+                            text("SELECT COUNT(*) FROM knowledge_graph_nodes")
+                        )
+                        graph_count = int(count.scalar_one())
+                except Exception:
+                    logger.warning("knowledge_graph_nodes 查询失败", exc_info=True)
+                    graph_count = 0
+                if graph_count == 0:
+                    failures.append("knowledge_graph_registry_not_loaded")
 
         if settings.app_env == "production" and not settings.production_auth_ready():
             failures.append("production_auth_not_configured")
-        # §6.3：readiness 同时检查 memory 与 auth 两条迁移链
+        # §6.3：readiness 同时检查 memory 与 auth 两条迁移链（fail-closed）
         auth_current: AuthRuntime | None = getattr(request.app.state, "auth_runtime", None)
         if auth_current is None:
             failures.append("auth_database_unavailable")
@@ -460,14 +485,20 @@ def create_app(
             failures.append("auth_database_unavailable")
         else:
             auth_head = getattr(request.app.state, "auth_migration_head", None)
-            if auth_head is not None:
-                async with auth_current.session_factory() as session:
-                    row = await session.execute(
-                        text("SELECT version_num FROM auth_alembic_version")
-                    )
-                    auth_version = row.scalar_one_or_none()
-                    if auth_version != auth_head:
-                        failures.append("auth_migration_version_mismatch")
+            if auth_head is None:
+                failures.append("auth_migration_head_unresolved")
+            else:
+                try:
+                    async with auth_current.session_factory() as session:
+                        row = await session.execute(
+                            text("SELECT version_num FROM auth_alembic_version")
+                        )
+                        auth_version = row.scalar_one_or_none()
+                except Exception:
+                    logger.warning("auth alembic_version 查询失败", exc_info=True)
+                    auth_version = None
+                if auth_version != auth_head:
+                    failures.append("auth_migration_version_mismatch")
         if failures:
             return JSONResponse(
                 status_code=503, content={"status": "not_ready", "failures": failures}

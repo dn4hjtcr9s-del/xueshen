@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -152,7 +153,48 @@ class Settings(BaseSettings):
                 missing.append("AUTH_DATABASE_URL")
             if missing:
                 raise ValueError("生产环境缺少认证服务配置: " + ", ".join(missing))
+            self._validate_auth_keys()
         return self
+
+    def _validate_auth_keys(self) -> None:
+        """评审 P1-4：生产启动时实际校验密钥（存在/可读/合法/公私匹配）。
+
+        JWKS 为合法替代（将来外部 IdP），此时跳过本地公钥校验，验签留待运行时。
+        """
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa as crypto_rsa
+
+        private_path = Path(self.auth_private_key_file or "")
+        if not private_path.is_file():
+            raise ValueError(f"私钥文件不存在或不可读: {private_path}")
+        try:
+            private_key = serialization.load_pem_private_key(
+                private_path.read_bytes(), password=None
+            )
+        except Exception as exc:
+            raise ValueError(f"私钥文件不是合法 PEM 私钥: {private_path}") from exc
+        if not isinstance(private_key, crypto_rsa.RSAPrivateKey):
+            raise ValueError("私钥必须是 RSA 密钥")
+
+        public_pem: str | None = None
+        if self.auth_public_key_file:
+            public_path = Path(self.auth_public_key_file)
+            if not public_path.is_file():
+                raise ValueError(f"公钥文件不存在或不可读: {public_path}")
+            public_pem = public_path.read_text(encoding="utf-8")
+        elif self.auth_public_key:
+            public_pem = self.auth_public_key
+        else:
+            # 仅 JWKS：本地无公钥可比对，验签由运行时 JWKS 客户端完成
+            return
+        try:
+            public_key = serialization.load_pem_public_key(public_pem.encode("ascii"))
+        except Exception as exc:
+            raise ValueError("公钥不是合法 PEM") from exc
+        der = serialization.Encoding.DER
+        fmt = serialization.PublicFormat.SubjectPublicKeyInfo
+        if public_key.public_bytes(der, fmt) != private_key.public_key().public_bytes(der, fmt):
+            raise ValueError("私钥与公钥不匹配")
 
     @property
     def is_development(self) -> bool:

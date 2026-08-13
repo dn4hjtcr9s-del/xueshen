@@ -93,6 +93,7 @@ def test_valid_passwords(password: str) -> None:
         "abcdefghijk",  # 无数字
         "1234567890",  # 无字母
         "密码密码密码密码密码1",  # 非 ASCII 字母
+        "abcdefghij١",  # 评审 P2-10：Unicode 数字不算
         "a1" + "x" * 71,  # UTF-8 超 72 字节
         "a1" + "中" * 30,  # 多字节字符超限
     ],

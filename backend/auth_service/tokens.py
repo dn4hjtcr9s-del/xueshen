@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Collection
 from pathlib import Path
@@ -80,24 +81,35 @@ class AccessTokenIssuer:
 
 
 class AccessTokenVerifier:
-    """验签本服务签发的 access token（/me 用）；不查身份映射。"""
+    """验签本服务签发的 access token（/me 用）；不查身份映射。
+
+    支持本地公钥（文件优先，PEM 文本备选）与 AUTH_JWKS_URL（评审 P1-4：
+    与 memory verifier 的配置组合保持一致，/me 不再因 JWKS-only 配置失败）。
+    """
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
-    def verify_sub(self, token: str) -> UUID:
+    async def verify_sub(self, token: str) -> UUID:
         """验签并返回 sub；失败抛 jwt.PyJWTError。"""
         key_file = self._settings.auth_public_key_file
         if key_file:
             try:
-                decode_key = Path(key_file).read_text(encoding="utf-8")
+                decode_key: str = await asyncio.to_thread(
+                    Path(key_file).read_text, encoding="utf-8"
+                )
             except OSError as exc:
                 raise RuntimeError(f"公钥文件读取失败: {type(exc).__name__}") from exc
         elif self._settings.auth_public_key:
             decode_key = self._settings.auth_public_key
+        elif self._settings.auth_jwks_url:
+            client = jwt.PyJWKClient(self._settings.auth_jwks_url)
+            key_obj = await asyncio.to_thread(client.get_signing_key_from_jwt, token)
+            decode_key = key_obj.key
         else:
             raise RuntimeError("认证公钥未配置")
-        claims = jwt.decode(
+        claims = await asyncio.to_thread(
+            jwt.decode,
             token,
             decode_key,
             algorithms=["RS256", "ES256"],

@@ -158,6 +158,97 @@ async def test_logout_idempotent_and_revokes_session(
     assert resp.status_code == 401, resp.text
 
 
+async def test_mapping_conflict_points_to_other_user_is_dead(
+    auth_api_client: httpx.AsyncClient,
+    auth_session_factory: async_sessionmaker[AsyncSession],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """评审 P1-6：映射已指向其他内部用户时，补偿事件转 dead，绝不静默成功。"""
+    from uuid import uuid4
+
+    client = auth_api_client
+    resp = await client.post(
+        "/api/v1/auth/register",
+        json={"username": USERNAME, "password": PASSWORD},
+    )
+    assert resp.status_code == 201, resp.text
+    user_id = resp.json()["user"]["user_id"]
+
+    # 人为制造冲突：(issuer, external_subject) 已指向另一个内部用户
+    other_user = uuid4()
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                text(
+                    "INSERT INTO account_identity_mappings "
+                    "(internal_user_id, issuer, external_subject) "
+                    "VALUES (:other, :issuer, :sub)"
+                ),
+                {"other": other_user, "issuer": MAPPING_ISSUER, "sub": user_id},
+            )
+
+    consumer = IdentityMappingConsumer(
+        auth_session_factory=auth_session_factory,
+        memory_session_factory=session_factory,
+        poll_interval_seconds=0.01,
+    )
+    processed = await consumer.tick()
+    assert processed == 1
+
+    async with auth_session_factory() as session:
+        row = await session.execute(
+            text("SELECT status FROM identity_mapping_outbox WHERE user_id = :u"),
+            {"u": user_id},
+        )
+        assert row.scalar_one() == "dead"
+
+    # 冲突行保持不变（未被覆盖）
+    async with session_factory() as session:
+        row = await session.execute(
+            text(
+                "SELECT internal_user_id FROM account_identity_mappings "
+                "WHERE issuer = :i AND external_subject = :s"
+            ),
+            {"i": MAPPING_ISSUER, "s": user_id},
+        )
+        assert str(row.scalar_one()) == str(other_user)
+
+
+async def test_login_rejected_when_mapping_points_to_other_user(
+    auth_api_client: httpx.AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """评审 P1-6：登录兜底发现映射归属不一致时拒绝登录（fail-closed）。"""
+    from uuid import uuid4
+
+    client = auth_api_client
+    resp = await client.post(
+        "/api/v1/auth/register",
+        json={"username": USERNAME, "password": PASSWORD},
+    )
+    assert resp.status_code == 201, resp.text
+    user_id = resp.json()["user"]["user_id"]
+
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                text(
+                    "INSERT INTO account_identity_mappings "
+                    "(internal_user_id, issuer, external_subject) "
+                    "VALUES (:other, :issuer, :sub)"
+                ),
+                {"other": uuid4(), "issuer": MAPPING_ISSUER, "sub": user_id},
+            )
+
+    resp = await client.post(
+        "/api/v1/auth/login",
+        json={"identifier": USERNAME, "password": PASSWORD},
+    )
+    assert resp.status_code == 503, resp.text
+    body = resp.json()["error"]
+    assert body["code"] == "AUTH_MAPPING_PENDING"
+
+
 async def test_readiness_503_when_auth_db_unavailable(
     auth_test_settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],

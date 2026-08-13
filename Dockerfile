@@ -16,6 +16,9 @@ RUN uv sync --frozen --no-dev
 COPY backend ./backend
 COPY alembic ./alembic
 COPY alembic.ini ./
+# 认证服务独立迁移链（方案 §5.1 / 评审 P1-5：readiness 需解析 auth head）
+COPY auth_alembic.ini ./
+COPY auth_migrations ./auth_migrations
 COPY knowledge_graph ./knowledge_graph
 
 ENV KNOWLEDGE_GRAPH_ROOT=/app/knowledge_graph \

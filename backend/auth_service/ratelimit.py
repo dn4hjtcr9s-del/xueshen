@@ -23,10 +23,11 @@ _WINDOW_SECONDS = 60
 
 
 def client_ip(request: Request, trusted_proxy_cidrs: list[str]) -> str | None:
-    """解析客户端 IP（附录 A.2 #9）。
+    """解析客户端 IP（附录 A.2 #9 / 评审 P1-7）。
 
-    直连对端位于可信代理 CIDR 内时，采用 X-Forwarded-For 的首个地址；
-    否则仅信任直连地址（忽略伪造转发头）。
+    直连对端位于可信代理 CIDR 内时，从右向左剥离可信代理（X-Forwarded-For
+    链尾追加直连对端），返回**第一个不可信地址**。攻击者伪造的 XFF 前缀位于
+    链左侧，不会影响限流 key；整链均为可信代理时回退直连对端。
     """
     direct = request.client.host if request.client else None
     if not trusted_proxy_cidrs or direct is None:
@@ -44,12 +45,18 @@ def client_ip(request: Request, trusted_proxy_cidrs: list[str]) -> str | None:
     xff = request.headers.get("x-forwarded-for")
     if not xff:
         return direct
-    first = xff.split(",")[0].strip()
-    try:
-        ipaddress.ip_address(first)
-    except ValueError:
-        return direct
-    return first
+    chain: list[str] = [entry.strip() for entry in xff.split(",") if entry.strip()]
+    chain.append(direct)
+    for entry in reversed(chain):
+        try:
+            candidate = ipaddress.ip_address(entry)
+        except ValueError:
+            # 无法解析的链节点不可信：fail-closed 回退直连对端
+            return direct
+        if not any(candidate in net for net in networks):
+            return str(candidate)
+    # 整链都是可信代理：无可信客户端信息，回退直连对端
+    return direct
 
 
 def retry_after_seconds() -> int:

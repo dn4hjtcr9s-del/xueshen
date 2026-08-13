@@ -51,6 +51,8 @@ export default defineConfig(({ mode }) => {
       globals: true,
       setupFiles: ["./src/test/setup.ts"],
       css: false,
+      // 评审 P1-2：排除 Playwright E2E 目录，避免 test() 在 Vitest 环境误执行
+      exclude: ["e2e/**", "dist/**", "node_modules/**"],
     },
   };
 });

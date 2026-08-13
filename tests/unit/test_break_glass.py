@@ -31,12 +31,32 @@ def _settings(tmp_path: Any, **overrides: Any) -> Settings:
         "dev_auth_allow_scope_override": True,
         "memory_storage_root": str(tmp_path / "storage"),
     }
-    # production 覆盖时补齐 §6.3 认证配置，否则 Settings 构造直接失败
+    # production 覆盖时补齐 §6.3 认证配置（评审 P1-4 要求密钥文件真实存在）
     if overrides.get("app_env") == "production":
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        private_file = tmp_path / "auth_private.pem"
+        private_file.write_bytes(
+            key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
+        public_pem = (
+            key.public_key()
+            .public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            .decode()
+        )
         base["dev_auth_enabled"] = False
         base["dev_auth_allow_scope_override"] = False
-        base["auth_private_key_file"] = str(tmp_path / "auth_private.pem")
-        base["auth_public_key"] = "-----BEGIN PUBLIC KEY-----\ndummy\n-----END PUBLIC KEY-----"
+        base["auth_private_key_file"] = str(private_file)
+        base["auth_public_key"] = public_pem
         base["auth_database_url"] = "postgresql+psycopg://auth:auth@db:5432/auth"
     base.update(overrides)
     return Settings(**base)

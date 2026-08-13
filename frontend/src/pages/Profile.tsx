@@ -14,43 +14,44 @@ export function ProfilePage() {
   const { user: authUser, initials, logout } = useAuth();
   return (
     <div className="profile-grid">
-      {SHOW_MOCK && (
-        <div className="card profile-card rise">
-          <div className="mock-badge" data-testid="mock-badge">
-            展示数据 · 非真实统计
-          </div>
-          <div className="profile-avatar">{initials}</div>
-          <div className="profile-name">{authUser?.username ?? ""}</div>
-          <div className="profile-sub">
-            {authUser?.email ?? "未填写"}
-            {" · "}加入 {user.joinedDays} 天（展示数据）
-          </div>
-          <div className="profile-stats">
-            <div className="profile-stat">
-              <div className="n">{user.streakDays}</div>
-              <div className="l">连续学习（天）</div>
+      <div className="card profile-card rise">
+        {/* 评审 P2-9：真实用户名/邮箱/首字在生产环境也必须展示（§9.2 / A.4 #15 #16）；
+            SHOW_MOCK 只控制统计数字、编辑资料等 mock 内容 */}
+        <div className="profile-avatar">{initials}</div>
+        <div className="profile-name">{authUser?.username ?? ""}</div>
+        <div className="profile-sub">{authUser?.email ?? "未填写"}</div>
+        {SHOW_MOCK && (
+          <>
+            <div className="mock-badge" data-testid="mock-badge">
+              展示数据 · 非真实统计
             </div>
-            <div className="profile-stat">
-              <div className="n">186</div>
-              <div className="l">累计提问</div>
+            <div className="profile-stats">
+              <div className="profile-stat">
+                <div className="n">{user.streakDays}</div>
+                <div className="l">连续学习（天）</div>
+              </div>
+              <div className="profile-stat">
+                <div className="n">186</div>
+                <div className="l">累计提问</div>
+              </div>
+              <div className="profile-stat">
+                <div className="n">11</div>
+                <div className="l">已掌握知识点</div>
+              </div>
+              <div className="profile-stat">
+                <div className="n">5</div>
+                <div className="l">错题收藏</div>
+              </div>
             </div>
-            <div className="profile-stat">
-              <div className="n">11</div>
-              <div className="l">已掌握知识点</div>
-            </div>
-            <div className="profile-stat">
-              <div className="n">5</div>
-              <div className="l">错题收藏</div>
-            </div>
-          </div>
-          <button
-            className="btn btn-ghost"
-            style={{ marginTop: 20, width: "100%", justifyContent: "center" }}
-          >
-            <Pencil size={13} /> 编辑资料
-          </button>
-        </div>
-      )}
+            <button
+              className="btn btn-ghost"
+              style={{ marginTop: 20, width: "100%", justifyContent: "center" }}
+            >
+              <Pencil size={13} /> 编辑资料
+            </button>
+          </>
+        )}
+      </div>
 
       <div>
         <SectionHead

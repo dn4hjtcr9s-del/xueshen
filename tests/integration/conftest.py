@@ -1,20 +1,23 @@
 """集成测试基础设施：真实 PostgreSQL 容器 + 临时文件系统（§23.3）。
 
-- 数据库使用 docker compose 的 PostgreSQL（settings 默认 127.0.0.1:55432/memory），
-  与 ci-local.sh backend-integration 阶段一致；alembic upgrade head 幂等执行。
-- 每个测试函数 TRUNCATE 全部用户数据表；图谱注册表（knowledge_graph_*）保留，
-  其数据由 sync-knowledge-graph CLI 管理。
+- 数据库隔离（附录 A.6 #20，评审 P1-1）：必须使用独立测试库
+  memory_test / auth_test（由 scripts/ci-local.sh backend-integration 创建、
+  迁移并以 DATABASE_URL / AUTH_DATABASE_URL 注入），**拒绝任何非测试库**，
+  绝不 TRUNCATE 开发库数据。
+- 每个测试函数 TRUNCATE 全部用户数据表；图谱注册表（knowledge_graph_*）保留。
 - Markdown 存储根使用 pytest tmp_path，测试间完全隔离。
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
 from alembic.config import Config
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from alembic import command
@@ -22,6 +25,22 @@ from backend.memory.persistence.database import create_engine, create_session_fa
 from backend.memory.services.memory_service import MemoryService
 from backend.memory.storage.local_markdown import LocalMarkdownStore
 from backend.settings import Settings
+
+#: 允许连接的测试库名（附录 A.6 #20）：memory_test / auth_test（可带随机后缀）
+_TEST_DB_RE = re.compile(r"^(memory_test|auth_test)(_\w+)?$")
+
+
+def require_test_database(url: str, expected_prefix: str) -> str:
+    """校验数据库 URL 指向允许的测试库；否则拒绝执行（评审 P1-1 fail-closed）。"""
+    name = make_url(url).database or ""
+    if not _TEST_DB_RE.match(name):
+        pytest.fail(
+            f"集成测试拒绝使用非测试数据库 {name!r}（{url}）。"
+            f"请通过 scripts/ci-local.sh backend-integration 运行，或显式注入"
+            f" {expected_prefix}_test 数据库 URL。"
+        )
+    return name
+
 
 # 用户数据表（每测试清空）；图谱注册表 knowledge_graph_* 不在此列。
 USER_TABLES = (
@@ -55,12 +74,19 @@ USER_TABLES = (
 
 @pytest.fixture(scope="session", autouse=True)
 def _migrate() -> None:
-    """幂等执行 alembic upgrade head（CI 已执行时此调用为 no-op）。"""
+    """幂等执行 alembic upgrade head（CI 已执行时此调用为 no-op）。
+
+    迁移前校验目标库是 memory_test（评审 P1-1）：禁止对开发库执行迁移。
+    """
+    from backend.settings import get_settings
+
+    require_test_database(get_settings().database_url, "memory")
     command.upgrade(Config("alembic.ini"), "head")
 
 
 @pytest.fixture()
 def settings(tmp_path: Path) -> Settings:
+    require_test_database(Settings().database_url, "memory")
     return Settings(app_env="test", memory_storage_root=str(tmp_path / "storage"))
 
 
@@ -68,6 +94,7 @@ def settings(tmp_path: Path) -> Settings:
 async def session_factory(
     settings: Settings,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    require_test_database(settings.database_url, "memory")
     engine = create_engine(settings)
     factory = create_session_factory(engine)
     async with factory() as session:
@@ -194,7 +221,16 @@ def _run_docker(*args: str) -> None:
 
 @pytest.fixture(scope="session")
 def auth_database_url() -> Iterator[str]:
-    """auth_test 独立库：管理员创建、auth 角色所有（附录 A.6 #20）。"""
+    """auth_test 独立库（附录 A.6 #20，评审 P1-1）。
+
+    优先使用 ci-local.sh 注入的 AUTH_DATABASE_URL（指向 auth_test）；
+    未注入时本地自建随机 auth_test_* 库（管理员创建、auth 角色所有）。
+    """
+    injected = os.environ.get("AUTH_DATABASE_URL", "").strip()
+    if injected:
+        require_test_database(injected, "auth")
+        yield injected
+        return
     if shutil.which("docker") is None:
         pytest.skip("需要 docker 创建隔离 auth 测试数据库")
     db_name = f"auth_test_{uuid4().hex[:8]}"

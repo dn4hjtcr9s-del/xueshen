@@ -172,16 +172,9 @@ def test_production_rejects_dev_scope_override() -> None:
 
 
 def test_production_readiness_fails_without_auth_config(tmp_path: Any, monkeypatch: Any) -> None:
-    settings = Settings(
-        app_env="production",
-        dev_auth_enabled=False,
-        # §6.3：密钥/auth 库缺失已由启动校验拦截（评审 #14）；readiness 的
-        # production_auth_not_configured 现覆盖 issuer 缺失场景
-        auth_private_key_file=str(tmp_path / "auth_private.pem"),
-        auth_public_key="-----BEGIN PUBLIC KEY-----\ndummy\n-----END PUBLIC KEY-----",
-        auth_database_url="postgresql+psycopg://auth:auth@db:5432/auth",
-        memory_storage_root=str(tmp_path / "storage"),
-    )
+    # §6.3：密钥/auth 库缺失已由启动校验拦截（评审 #14）；readiness 的
+    # production_auth_not_configured 现覆盖 issuer 缺失场景
+    settings = _prod_settings(tmp_path, *_rsa_keys()).model_copy(update={"auth_issuer": None})
     app, *_ = build_test_app(settings, monkeypatch=monkeypatch)
     client = TestClient(app)
     response = client.get("/health/ready")
@@ -233,14 +226,16 @@ def _make_token(private_pem: str, **claims: Any) -> str:
     return jwt.encode(payload, private_pem, algorithm="RS256")
 
 
-def _prod_settings(tmp_path: Any, public_pem: str) -> Settings:
+def _prod_settings(tmp_path: Any, private_pem: str, public_pem: str) -> Settings:
+    # 评审 P1-4：生产启动校验要求私钥文件真实存在且与公钥匹配
+    private_file = tmp_path / "auth_private.pem"
+    private_file.write_text(private_pem, encoding="utf-8")
     return Settings(
         app_env="production",
         dev_auth_enabled=False,
         auth_issuer="https://auth.example",
         auth_public_key=public_pem,
-        # §6.3 生产配置校验要求（评审 #14）
-        auth_private_key_file=str(tmp_path / "auth_private.pem"),
+        auth_private_key_file=str(private_file),
         auth_database_url="postgresql+psycopg://auth:auth@db:5432/auth",
         memory_storage_root=str(tmp_path / "storage"),
     )
@@ -249,7 +244,7 @@ def _prod_settings(tmp_path: Any, public_pem: str) -> Settings:
 async def test_prod_jwt_valid_token_resolves_identity(tmp_path: Any, monkeypatch: Any) -> None:
     private_pem, public_pem = _rsa_keys()
     adapter = ProductionJwtAuthAdapter(
-        settings=_prod_settings(tmp_path, public_pem),
+        settings=_prod_settings(tmp_path, private_pem, public_pem),
         identity_resolver=_StaticResolver(USER_ID),
     )
     token = _make_token(private_pem)
@@ -264,7 +259,7 @@ async def test_prod_jwt_valid_token_resolves_identity(tmp_path: Any, monkeypatch
 async def test_prod_jwt_wrong_audience_rejected(tmp_path: Any, monkeypatch: Any) -> None:
     private_pem, public_pem = _rsa_keys()
     adapter = ProductionJwtAuthAdapter(
-        settings=_prod_settings(tmp_path, public_pem),
+        settings=_prod_settings(tmp_path, private_pem, public_pem),
         identity_resolver=_StaticResolver(USER_ID),
     )
     token = _make_token(private_pem, aud="other-api")
@@ -276,7 +271,7 @@ async def test_prod_jwt_wrong_audience_rejected(tmp_path: Any, monkeypatch: Any)
 async def test_prod_jwt_expired_rejected(tmp_path: Any, monkeypatch: Any) -> None:
     private_pem, public_pem = _rsa_keys()
     adapter = ProductionJwtAuthAdapter(
-        settings=_prod_settings(tmp_path, public_pem),
+        settings=_prod_settings(tmp_path, private_pem, public_pem),
         identity_resolver=_StaticResolver(USER_ID),
     )
     now = int(time.time())
@@ -288,7 +283,7 @@ async def test_prod_jwt_expired_rejected(tmp_path: Any, monkeypatch: Any) -> Non
 async def test_prod_jwt_lifetime_over_5_minutes_rejected(tmp_path: Any, monkeypatch: Any) -> None:
     private_pem, public_pem = _rsa_keys()
     adapter = ProductionJwtAuthAdapter(
-        settings=_prod_settings(tmp_path, public_pem),
+        settings=_prod_settings(tmp_path, private_pem, public_pem),
         identity_resolver=_StaticResolver(USER_ID),
     )
     now = int(time.time())
@@ -300,7 +295,7 @@ async def test_prod_jwt_lifetime_over_5_minutes_rejected(tmp_path: Any, monkeypa
 async def test_prod_jwt_missing_jti_rejected(tmp_path: Any, monkeypatch: Any) -> None:
     private_pem, public_pem = _rsa_keys()
     adapter = ProductionJwtAuthAdapter(
-        settings=_prod_settings(tmp_path, public_pem),
+        settings=_prod_settings(tmp_path, private_pem, public_pem),
         identity_resolver=_StaticResolver(USER_ID),
     )
     now = int(time.time())
@@ -322,7 +317,7 @@ async def test_prod_jwt_missing_jti_rejected(tmp_path: Any, monkeypatch: Any) ->
 async def test_prod_jwt_unknown_identity_mapping_rejected(tmp_path: Any, monkeypatch: Any) -> None:
     private_pem, public_pem = _rsa_keys()
     adapter = ProductionJwtAuthAdapter(
-        settings=_prod_settings(tmp_path, public_pem),
+        settings=_prod_settings(tmp_path, private_pem, public_pem),
         identity_resolver=_StaticResolver(None),
     )
     token = _make_token(private_pem)
@@ -375,7 +370,7 @@ def _agent_token(private_pem: str, **claims: Any) -> str:
 async def test_agent_token_with_delegated_sub_resolves_delegated_user(tmp_path: Any) -> None:
     private_pem, public_pem = _rsa_keys()
     adapter = ProductionJwtAuthAdapter(
-        settings=_prod_settings(tmp_path, public_pem),
+        settings=_prod_settings(tmp_path, private_pem, public_pem),
         identity_resolver=_MappingResolver({"external-subject-1": USER_ID}),
     )
     context = await adapter.authenticate({"authorization": f"Bearer {_agent_token(private_pem)}"})
@@ -389,7 +384,7 @@ async def test_agent_token_with_delegated_sub_resolves_delegated_user(tmp_path: 
 async def test_agent_token_missing_delegated_sub_rejected(tmp_path: Any) -> None:
     private_pem, public_pem = _rsa_keys()
     adapter = ProductionJwtAuthAdapter(
-        settings=_prod_settings(tmp_path, public_pem),
+        settings=_prod_settings(tmp_path, private_pem, public_pem),
         identity_resolver=_MappingResolver({"external-subject-1": USER_ID}),
     )
     now = int(time.time())
@@ -415,7 +410,7 @@ async def test_agent_token_missing_delegated_sub_rejected(tmp_path: Any) -> None
 async def test_agent_token_unresolvable_delegated_sub_rejected(tmp_path: Any) -> None:
     private_pem, public_pem = _rsa_keys()
     adapter = ProductionJwtAuthAdapter(
-        settings=_prod_settings(tmp_path, public_pem),
+        settings=_prod_settings(tmp_path, private_pem, public_pem),
         identity_resolver=_MappingResolver({}),
     )
     with pytest.raises(AuthError, match="身份映射不存在") as exc_info:
@@ -427,7 +422,7 @@ async def test_agent_token_scope_overreach_rejected(tmp_path: Any) -> None:
     """Agent 不得持有委托契约之外的 scope（§18.3 矩阵：删除/纠正均为否）。"""
     private_pem, public_pem = _rsa_keys()
     adapter = ProductionJwtAuthAdapter(
-        settings=_prod_settings(tmp_path, public_pem),
+        settings=_prod_settings(tmp_path, private_pem, public_pem),
         identity_resolver=_MappingResolver({"external-subject-1": USER_ID}),
     )
     token = _agent_token(private_pem, scopes=["memory:read", "memory:delete"])
@@ -441,7 +436,7 @@ async def test_user_token_without_delegation_unaffected(tmp_path: Any) -> None:
     """回归：普通 user token 不需要 delegated_sub，actor_principal 为空。"""
     private_pem, public_pem = _rsa_keys()
     adapter = ProductionJwtAuthAdapter(
-        settings=_prod_settings(tmp_path, public_pem),
+        settings=_prod_settings(tmp_path, private_pem, public_pem),
         identity_resolver=_MappingResolver({"external-subject-1": USER_ID}),
     )
     context = await adapter.authenticate({"authorization": f"Bearer {_make_token(private_pem)}"})
@@ -454,9 +449,9 @@ async def test_user_token_without_delegation_unaffected(tmp_path: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _prod_adapter(tmp_path: Any, public_pem: str) -> ProductionJwtAuthAdapter:
+def _prod_adapter(tmp_path: Any, private_pem: str, public_pem: str) -> ProductionJwtAuthAdapter:
     return ProductionJwtAuthAdapter(
-        settings=_prod_settings(tmp_path, public_pem),
+        settings=_prod_settings(tmp_path, private_pem, public_pem),
         identity_resolver=_MappingResolver({"external-subject-1": USER_ID}),
     )
 
@@ -464,7 +459,7 @@ def _prod_adapter(tmp_path: Any, public_pem: str) -> ProductionJwtAuthAdapter:
 async def _expect_rejected(
     tmp_path: Any, private_pem: str, public_pem: str, **claims: Any
 ) -> AuthError:
-    adapter = _prod_adapter(tmp_path, public_pem)
+    adapter = _prod_adapter(tmp_path, private_pem, public_pem)
     token = _make_token(private_pem, **claims)
     with pytest.raises(AuthError) as exc_info:
         await adapter.authenticate({"authorization": f"Bearer {token}"})
@@ -487,7 +482,7 @@ async def test_missing_actor_type_rejected(tmp_path: Any) -> None:
         private_pem,
         algorithm="RS256",
     )
-    adapter = _prod_adapter(tmp_path, public_pem)
+    adapter = _prod_adapter(tmp_path, private_pem, public_pem)
     with pytest.raises(AuthError) as exc_info:
         await adapter.authenticate({"authorization": f"Bearer {token}"})
     assert exc_info.value.code == "AUTH_REQUIRED"
@@ -509,7 +504,7 @@ async def test_missing_scopes_rejected(tmp_path: Any) -> None:
         private_pem,
         algorithm="RS256",
     )
-    adapter = _prod_adapter(tmp_path, public_pem)
+    adapter = _prod_adapter(tmp_path, private_pem, public_pem)
     with pytest.raises(AuthError) as exc_info:
         await adapter.authenticate({"authorization": f"Bearer {token}"})
     assert exc_info.value.code == "AUTH_REQUIRED"
@@ -596,14 +591,7 @@ async def test_dev_adapter_rejects_external_or_unknown_sources(
 
 
 async def test_dev_adapter_rejected_in_production(tmp_path: Any, monkeypatch: Any) -> None:
-    settings = Settings(
-        app_env="production",
-        dev_auth_enabled=False,
-        auth_private_key_file=str(tmp_path / "auth_private.pem"),
-        auth_public_key="-----BEGIN PUBLIC KEY-----\ndummy\n-----END PUBLIC KEY-----",
-        auth_database_url="postgresql+psycopg://auth:auth@db:5432/auth",
-        memory_storage_root=str(tmp_path / "storage"),
-    )
+    settings = _prod_settings(tmp_path, *_rsa_keys())
     adapter = DevelopmentAuthAdapter(settings)
     with pytest.raises(AuthError):
         await adapter.authenticate({"x-dev-user-id": str(USER_ID)})
@@ -643,14 +631,7 @@ def test_cors_allows_only_configured_origins(tmp_path: Any, monkeypatch: Any) ->
 
 
 def test_cors_production_default_closed(tmp_path: Any, monkeypatch: Any) -> None:
-    settings = Settings(
-        app_env="production",
-        dev_auth_enabled=False,
-        auth_private_key_file=str(tmp_path / "auth_private.pem"),
-        auth_public_key="-----BEGIN PUBLIC KEY-----\ndummy\n-----END PUBLIC KEY-----",
-        auth_database_url="postgresql+psycopg://auth:auth@db:5432/auth",
-        memory_storage_root=str(tmp_path / "storage"),
-    )
+    settings = _prod_settings(tmp_path, *_rsa_keys())
     app, *_ = build_test_app(settings, monkeypatch=monkeypatch)
     client = TestClient(app)
     response = client.options(

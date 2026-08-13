@@ -28,14 +28,31 @@ run_backend_unit() {
 }
 
 run_backend_integration() {
-  echo "== backend-integration: 本地 PostgreSQL 容器 + integration/failure tests =="
+  echo "== backend-integration: 本地 PostgreSQL 容器 + memory_test/auth_test 独立测试库 =="
   docker compose up -d postgres
-  uv run alembic upgrade head
+  # 测试库隔离（附录 A.6 #20 / 评审 P1-1）：管理员创建、迁移后经环境变量注入，
+  # 绝不触碰开发库 memory / auth
+  local admin="${POSTGRES_ADMIN_USER:-postgres}"
+  ensure_test_database() {
+    local db="$1" owner="$2"
+    if ! docker compose exec -T postgres psql -U "$admin" -tAc \
+      "SELECT 1 FROM pg_database WHERE datname = '$db'" | grep -q 1; then
+      docker compose exec -T postgres createdb -U "$admin" -O "$owner" "$db"
+    fi
+  }
+  ensure_test_database memory_test memory
+  ensure_test_database auth_test auth
+  DATABASE_URL="postgresql+psycopg://memory:memory@127.0.0.1:55432/memory_test" \
+    uv run alembic upgrade head
+  AUTH_DATABASE_URL="postgresql+psycopg://auth:auth@127.0.0.1:55432/auth_test" \
+    uv run alembic -c auth_alembic.ini upgrade head
   FAILURE_TESTS=()
   if [[ -d tests/failure_recovery ]]; then
     FAILURE_TESTS=(tests/failure_recovery)
   fi
-  uv run pytest tests/integration ${FAILURE_TESTS[@]+"${FAILURE_TESTS[@]}"}
+  DATABASE_URL="postgresql+psycopg://memory:memory@127.0.0.1:55432/memory_test" \
+  AUTH_DATABASE_URL="postgresql+psycopg://auth:auth@127.0.0.1:55432/auth_test" \
+    uv run pytest tests/integration ${FAILURE_TESTS[@]+"${FAILURE_TESTS[@]}"}
 }
 
 run_frontend() {
