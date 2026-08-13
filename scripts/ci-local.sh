@@ -28,10 +28,11 @@ run_backend_unit() {
 }
 
 run_backend_integration() {
-  echo "== backend-integration: 本地 PostgreSQL 容器 + memory_test/auth_test 独立测试库 =="
-  docker compose up -d postgres
+  echo "== backend-integration: 本地 PostgreSQL 容器 + memory/auth/conversation_test 独立测试库 =="
+  # 干净环境首次启动时必须等待 initdb 与 healthcheck 完成，避免迁移抢跑。
+  docker compose up -d --wait postgres
   # 测试库隔离（附录 A.6 #20 / 评审 P1-1）：管理员创建、迁移后经环境变量注入，
-  # 绝不触碰开发库 memory / auth
+  # 绝不触碰开发库 memory / auth / conversation
   local admin="${POSTGRES_ADMIN_USER:-postgres}"
   ensure_test_database() {
     local db="$1" owner="$2"
@@ -42,17 +43,28 @@ run_backend_integration() {
   }
   ensure_test_database memory_test memory
   ensure_test_database auth_test auth
+  ensure_test_database conversation_test conversation
   DATABASE_URL="postgresql+psycopg://memory:memory@127.0.0.1:55432/memory_test" \
     uv run alembic upgrade head
   AUTH_DATABASE_URL="postgresql+psycopg://auth:auth@127.0.0.1:55432/auth_test" \
     uv run alembic -c auth_alembic.ini upgrade head
+  CONVERSATION_DATABASE_URL="postgresql+psycopg://conversation:conversation@127.0.0.1:55432/conversation_test" \
+    uv run alembic -c conversation_alembic.ini upgrade head
+  # Graph 集成测试依赖只读注册表；迁移只建表，需按启动契约显式同步权威图谱。
+  DATABASE_URL="postgresql+psycopg://memory:memory@127.0.0.1:55432/memory_test" \
+    uv run python -m backend.memory.cli sync-knowledge-graph --apply
   FAILURE_TESTS=()
   if [[ -d tests/failure_recovery ]]; then
     FAILURE_TESTS=(tests/failure_recovery)
   fi
+  CONVERSION_TESTS=()
+  if [[ -d tests/conversation ]]; then
+    CONVERSION_TESTS=(tests/conversation)
+  fi
   DATABASE_URL="postgresql+psycopg://memory:memory@127.0.0.1:55432/memory_test" \
   AUTH_DATABASE_URL="postgresql+psycopg://auth:auth@127.0.0.1:55432/auth_test" \
-    uv run pytest tests/integration ${FAILURE_TESTS[@]+"${FAILURE_TESTS[@]}"}
+  CONVERSATION_DATABASE_URL="postgresql+psycopg://conversation:conversation@127.0.0.1:55432/conversation_test" \
+    uv run pytest tests/integration ${FAILURE_TESTS[@]+"${FAILURE_TESTS[@]}"} ${CONVERSION_TESTS[@]+"${CONVERSION_TESTS[@]}"}
 }
 
 run_frontend() {

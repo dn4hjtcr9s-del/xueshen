@@ -246,6 +246,66 @@
         "title": "CandidateContentView",
         "type": "object"
       },
+      "ConversationDetailResponse": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/MessageView"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "archived",
+              "deleting",
+              "deleted"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "thread_id": {
+            "format": "uuid",
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 0.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "thread_id",
+          "title",
+          "version",
+          "status",
+          "messages",
+          "has_more"
+        ],
+        "title": "ConversationDetailResponse",
+        "type": "object"
+      },
       "ConversationEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -318,6 +378,38 @@
         "title": "ConversationEvidence",
         "type": "object"
       },
+      "ConversationListResponse": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ThreadListItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "has_more"
+        ],
+        "title": "ConversationListResponse",
+        "type": "object"
+      },
       "CorrectMemoryCommand": {
         "additionalProperties": false,
         "properties": {
@@ -375,6 +467,105 @@
           "replacement"
         ],
         "title": "CorrectMemoryCommand",
+        "type": "object"
+      },
+      "CreateConversationResponse": {
+        "properties": {
+          "thread_id": {
+            "format": "uuid",
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 0.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "thread_id",
+          "version"
+        ],
+        "title": "CreateConversationResponse",
+        "type": "object"
+      },
+      "CreateTurnRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "client_request_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Client Request Id",
+            "type": "string"
+          },
+          "content": {
+            "maxLength": 10000,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "expected_thread_version": {
+            "minimum": 0.0,
+            "title": "Expected Thread Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "client_request_id",
+          "content",
+          "expected_thread_version"
+        ],
+        "title": "CreateTurnRequest",
+        "type": "object"
+      },
+      "CreateTurnResponse": {
+        "properties": {
+          "event_stream_path": {
+            "title": "Event Stream Path",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "accepted",
+              "running",
+              "cancelling",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "thread_id": {
+            "format": "uuid",
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "thread_version": {
+            "minimum": 0.0,
+            "title": "Thread Version",
+            "type": "integer"
+          },
+          "turn_id": {
+            "format": "uuid",
+            "title": "Turn Id",
+            "type": "string"
+          },
+          "user_message_id": {
+            "format": "uuid",
+            "title": "User Message Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "turn_id",
+          "user_message_id",
+          "thread_version",
+          "status",
+          "event_stream_path"
+        ],
+        "title": "CreateTurnResponse",
         "type": "object"
       },
       "CursorPage_DeletedMemoryItem_": {
@@ -2158,6 +2349,81 @@
         "title": "MemorySearchRequest",
         "type": "object"
       },
+      "MessageView": {
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "message_id": {
+            "format": "uuid",
+            "title": "Message Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "sequence": {
+            "minimum": 1.0,
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "cancelled",
+              "failed",
+              "deleted"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "thread_id": {
+            "format": "uuid",
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "turn_id": {
+            "format": "uuid",
+            "title": "Turn Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "thread_id",
+          "turn_id",
+          "role",
+          "content",
+          "status",
+          "sequence",
+          "occurred_at"
+        ],
+        "title": "MessageView",
+        "type": "object"
+      },
       "MutationResult": {
         "properties": {
           "action": {
@@ -2301,6 +2567,17 @@
           "code": {
             "title": "Code",
             "type": "string"
+          },
+          "current_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version"
           },
           "field": {
             "anyOf": [
@@ -2636,6 +2913,232 @@
         "title": "ReviewDecisionRequest",
         "type": "object"
       },
+      "SourceBundle": {
+        "additionalProperties": false,
+        "properties": {
+          "deleted_refs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deleted Refs",
+            "type": "array"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SourceItem"
+            },
+            "maxItems": 200,
+            "title": "Items",
+            "type": "array"
+          },
+          "total_utf8_bytes": {
+            "maximum": 80000.0,
+            "minimum": 0.0,
+            "title": "Total Utf8 Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total_utf8_bytes"
+        ],
+        "title": "SourceBundle",
+        "type": "object"
+      },
+      "SourceItem": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "maxLength": 20000,
+            "title": "Content",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "user",
+              "assistant",
+              "tool",
+              "activity"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "source_ref": {
+            "title": "Source Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_ref",
+          "role",
+          "content",
+          "occurred_at"
+        ],
+        "title": "SourceItem",
+        "type": "object"
+      },
+      "SourceReadRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint_id": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checkpoint Id"
+          },
+          "message_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Message Ids",
+            "type": "array"
+          },
+          "thread_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "thread_id",
+          "message_ids"
+        ],
+        "title": "SourceReadRequest",
+        "type": "object"
+      },
+      "ThreadListItem": {
+        "properties": {
+          "status": {
+            "enum": [
+              "active",
+              "archived",
+              "deleting",
+              "deleted"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "thread_id": {
+            "format": "uuid",
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 0.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "thread_id",
+          "title",
+          "status",
+          "version",
+          "updated_at"
+        ],
+        "title": "ThreadListItem",
+        "type": "object"
+      },
+      "TurnStatusResponse": {
+        "properties": {
+          "assistant_message_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assistant Message Id"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublicError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_stream_path": {
+            "title": "Event Stream Path",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "accepted",
+              "running",
+              "cancelling",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "thread_id": {
+            "format": "uuid",
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "thread_version": {
+            "minimum": 0.0,
+            "title": "Thread Version",
+            "type": "integer"
+          },
+          "turn_id": {
+            "format": "uuid",
+            "title": "Turn Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "turn_id",
+          "thread_id",
+          "status",
+          "thread_version",
+          "event_stream_path"
+        ],
+        "title": "TurnStatusResponse",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -2848,6 +3351,424 @@
         ]
       }
     },
+    "/api/v1/conversations": {
+      "get": {
+        "description": "会话列表（§17.1 cursor 分页：updated_at DESC, thread_id DESC）。",
+        "operationId": "list_conversations_api_v1_conversations_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 500,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Conversations",
+        "tags": [
+          "conversations"
+        ]
+      },
+      "post": {
+        "description": "创建会话（§17.1）。",
+        "operationId": "create_conversation_api_v1_conversations_post",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateConversationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Conversation",
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/api/v1/conversations/{thread_id}": {
+      "delete": {
+        "description": "删除会话（§8.6 步骤 1）：事务置 deleting，触发可靠本地清理和 source deletion。",
+        "operationId": "delete_conversation_api_v1_conversations__thread_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Thread Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Delete Conversation Api V1 Conversations  Thread Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Conversation",
+        "tags": [
+          "conversations"
+        ]
+      },
+      "get": {
+        "description": "会话详情与分页消息（§17.1：before_sequence 向历史方向，响应正序）。",
+        "operationId": "get_conversation_detail_api_v1_conversations__thread_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before_sequence",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before Sequence"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Conversation Detail",
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/api/v1/conversations/{thread_id}/turns": {
+      "post": {
+        "description": "幂等创建 Turn（§17.2/§17.3）；限流默认 10 次/分钟/用户（Q13/评审 P1-3）。\n\n- 限流值取配置 CONVERSATION_TURN_RATE_LIMIT_PER_MINUTE（不硬编码）；\n- 幂等命中不重复计数（Q13）：先做只读幂等预检，命中则直接返回不计数。",
+        "operationId": "create_turn_api_v1_conversations__thread_id__turns_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Thread Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTurnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateTurnResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Turn",
+        "tags": [
+          "conversation-turns"
+        ]
+      }
+    },
+    "/api/v1/conversations/{thread_id}/turns/{turn_id}": {
+      "delete": {
+        "description": "请求取消生成（R2：accepted 直接转 cancelled；running 转 cancelling）。",
+        "operationId": "cancel_turn_api_v1_conversations__thread_id__turns__turn_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "turn_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Turn Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Cancel Turn Api V1 Conversations  Thread Id  Turns  Turn Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Turn",
+        "tags": [
+          "conversation-turns"
+        ]
+      },
+      "get": {
+        "description": "查询 Turn 当前状态（§17.1）。",
+        "operationId": "get_turn_status_api_v1_conversations__thread_id__turns__turn_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "turn_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Turn Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Turn Status",
+        "tags": [
+          "conversation-turns"
+        ]
+      }
+    },
+    "/api/v1/conversations/{thread_id}/turns/{turn_id}/events": {
+      "get": {
+        "description": "SSE 流与重放（§17.5）。",
+        "operationId": "stream_turn_events_api_v1_conversations__thread_id__turns__turn_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "turn_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Turn Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stream Turn Events",
+        "tags": [
+          "conversation-events"
+        ]
+      }
+    },
     "/api/v1/internal/account-memory/purge": {
       "post": {
         "description": "创建 purge_account_memory operation + manifest + Outbox（同一事务）。",
@@ -2887,6 +3808,48 @@
         "summary": "Purge Account Memory",
         "tags": [
           "internal"
+        ]
+      }
+    },
+    "/api/v1/internal/conversation-sources/read": {
+      "post": {
+        "description": "读取来源快照（§8.2）。目标 user_id 来自请求体，服务端完整归属校验。",
+        "operationId": "read_sources_api_v1_internal_conversation_sources_read_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceReadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceBundle"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Sources",
+        "tags": [
+          "internal-conversation"
         ]
       }
     },
