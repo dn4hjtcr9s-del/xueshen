@@ -284,17 +284,29 @@ class FixedWindowRateLimiter:
     def __init__(self) -> None:
         self._counters: dict[tuple[str, str], tuple[int, int]] = {}
 
-    def hit(self, bucket: str, principal: str, limit: int) -> bool:
+    def _current(self, bucket: str, principal: str) -> tuple[int, int]:
         window = int(time.time() // 60)
-        key = (bucket, principal)
-        stored_window, count = self._counters.get(key, (window, 0))
+        stored_window, count = self._counters.get((bucket, principal), (window, 0))
         if stored_window != window:
             stored_window, count = window, 0
+        return stored_window, count
+
+    def hit(self, bucket: str, principal: str, limit: int) -> bool:
+        window, count = self._current(bucket, principal)
         count += 1
-        self._counters[key] = (stored_window, count)
+        self._counters[(bucket, principal)] = (window, count)
         if len(self._counters) > 10_000:
             self._counters = {k: v for k, v in self._counters.items() if v[0] >= window - 1}
         return count <= limit
+
+    def is_limited(self, bucket: str, principal: str, limit: int) -> bool:
+        """只读探测是否已超限（不计数），供预检避免昂贵操作（如 bcrypt）。"""
+        _, count = self._current(bucket, principal)
+        return count >= limit
+
+    def clear(self, bucket: str, principal: str) -> None:
+        """清除桶计数（方案 §10.1：成功登录清除账号桶）。"""
+        self._counters.pop((bucket, principal), None)
 
 
 #: 限流 bucket → settings 字段（§18.5：写 30/min、搜索 60/min、图谱标记 30/min）

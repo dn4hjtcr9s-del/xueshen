@@ -38,6 +38,11 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-${DEEPSEEK_BASE_URL:-}}
       OPENAI_MEMORY_MODEL: ${OPENAI_MEMORY_MODEL:-${DEEPSEEK_MODEL:-gpt-5.6-luna}}
       OPENAI_REASONING_EFFORT: ${OPENAI_REASONING_EFFORT:-none}
+      # 认证服务（方案 §6.2 / 附录 A.1 #6）：仅 memory-api 持有私钥并验签
+      AUTH_DATABASE_URL: postgresql+psycopg://auth:auth@postgres:5432/auth
+      AUTH_ISSUER: gewu-auth
+      AUTH_PRIVATE_KEY_FILE: /secrets/auth_private.pem
+      AUTH_PUBLIC_KEY_FILE: /secrets/auth_public.pem
     ports:
       # 评审 #9：仅绑定 loopback，Dev Auth 不暴露到局域网
       - "127.0.0.1:8001:8000"
@@ -45,6 +50,8 @@ services:
       - memory-data:/data/memory
       - ./knowledge_graph:/app/knowledge_graph:ro
       - ./.local/backups:/backups
+      # 密钥只读挂载（附录 A.1 #6）；本地由 scripts/generate_auth_keys.sh 生成
+      - ./.local/keys:/secrets:ro
     command: uv run --no-sync uvicorn backend.app:app --host 0.0.0.0 --port 8000
 
   memory-worker:

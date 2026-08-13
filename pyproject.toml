@@ -19,6 +19,7 @@ dependencies = [
     "prometheus-client>=0.22,<1",
     "pyjwt[crypto]>=2.10,<3.0",
     "httpx>=0.28,<1.0",
+    "bcrypt>=4.2,<6.0",
 ]
 
 [project.optional-dependencies]

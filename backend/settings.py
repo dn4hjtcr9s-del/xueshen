@@ -81,6 +81,16 @@ class Settings(BaseSettings):
     service_token_audience: str = Field(default="memory-api", alias="SERVICE_TOKEN_AUDIENCE")
     auth_token_max_lifetime_seconds: int = Field(default=300)
 
+    # 认证服务（签发方，方案 §6.2 / 附录 A.1 #5 / A.2 #9）
+    auth_database_url: str = Field(
+        default="postgresql+psycopg://auth:auth@127.0.0.1:55432/auth",
+        alias="AUTH_DATABASE_URL",
+    )
+    # 可信代理 CIDR 白名单；默认空 = 认证端点仅信任直连地址
+    auth_trusted_proxy_cidrs: list[str] = Field(
+        default_factory=list, alias="AUTH_TRUSTED_PROXY_CIDRS"
+    )
+
     # Dev Auth（仅 development；§18.1）
     dev_auth_enabled: bool = Field(default=True, alias="DEV_AUTH_ENABLED")
     dev_auth_allow_scope_override: bool = Field(

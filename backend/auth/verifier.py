@@ -157,9 +157,7 @@ class ProductionJwtAuthAdapter:
                     Path(self.settings.auth_public_key_file).read_text, encoding="utf-8"
                 )
             except OSError as exc:
-                raise AuthError(
-                    "AUTH_REQUIRED", f"公钥文件读取失败: {type(exc).__name__}"
-                ) from exc
+                raise AuthError("AUTH_REQUIRED", f"公钥文件读取失败: {type(exc).__name__}") from exc
         elif self.settings.auth_public_key:
             decode_key = self.settings.auth_public_key
         elif self.settings.auth_jwks_url:

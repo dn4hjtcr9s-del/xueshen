@@ -23,6 +23,9 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
 
 from backend.auth.verifier import AuthError
+from backend.auth_service.api import router as auth_router
+from backend.auth_service.errors import AuthServiceError
+from backend.auth_service.runtime import AuthRuntime, build_auth_runtime
 from backend.memory import metrics
 from backend.memory.api import (
     graph_states,
@@ -139,12 +142,18 @@ async def _build_runtime(settings: Settings, app: FastAPI) -> ApiRuntime:
     )
 
 
-def create_app(settings: Settings | None = None, *, runtime: ApiRuntime | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    runtime: ApiRuntime | None = None,
+    auth_runtime: AuthRuntime | None = None,
+) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings)
     app = FastAPI(title="MemoryManagerGraph API", version="0.1.0")
     app.state.settings = settings
     app.state.runtime = runtime
+    app.state.auth_runtime = auth_runtime
     app.state.rate_limiter = FixedWindowRateLimiter()
     app.state.startup_complete = False
     app.state.migration_head = None
@@ -285,6 +294,23 @@ def create_app(settings: Settings | None = None, *, runtime: ApiRuntime | None =
             content=_public_error_body(exc.code, str(exc), retryable=False, trace_id=trace_id),
         )
 
+    @app.exception_handler(AuthServiceError)
+    async def auth_service_error_handler(request: Request, exc: AuthServiceError) -> JSONResponse:
+        """认证服务错误（方案 §4.2）：PublicError 体 + 429 时带 Retry-After。"""
+        trace_id = getattr(request.state, "trace_id", None) or ""
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+        return JSONResponse(
+            status_code=exc.http_status,
+            content=_public_error_body(
+                exc.code,
+                exc.message,
+                retryable=exc.retryable,
+                trace_id=trace_id,
+                field=exc.field,
+            ),
+            headers=headers,
+        )
+
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
         request: Request, exc: RequestValidationError
@@ -319,6 +345,9 @@ def create_app(settings: Settings | None = None, *, runtime: ApiRuntime | None =
     async def _startup() -> None:
         if app.state.runtime is None:
             app.state.runtime = await _build_runtime(settings, app)
+        if app.state.auth_runtime is None:
+            # 认证服务与 memory-api 同进程（方案 §2.3）：独立 auth 库连接池 + 签发器
+            app.state.auth_runtime = build_auth_runtime(settings)
         try:
             from alembic.config import Config
             from alembic.script import ScriptDirectory
@@ -338,6 +367,9 @@ def create_app(settings: Settings | None = None, *, runtime: ApiRuntime | None =
         current: ApiRuntime | None = app.state.runtime
         if current is not None and current.db is not None:
             await current.db.close()
+        auth_current: AuthRuntime | None = app.state.auth_runtime
+        if auth_current is not None:
+            await auth_current.database.close()
 
     app.include_router(memories.router)
     app.include_router(reviews.router)
@@ -345,6 +377,8 @@ def create_app(settings: Settings | None = None, *, runtime: ApiRuntime | None =
     app.include_router(graph_states.router)
     app.include_router(notifications.router)
     app.include_router(internal.router)
+    # 认证服务（方案 §2.3：内嵌同进程，将来可平移为独立服务）
+    app.include_router(auth_router, prefix="/api/v1/auth")
 
     @app.get("/health/live")
     async def health_live() -> dict[str, str]:
