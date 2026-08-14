@@ -3,6 +3,19 @@
 与 backend/memory/metrics.py 同模式：prometheus-client 注册到同一默认
 REGISTRY，/metrics 出口不动（backend/app.py 已挂载）。指标名均为
 community_ 前缀，与 memory_ 无冲突。
+
+§12.3 的 8 项指标发射点（记账，2026-08-14 残余修复补齐）：
+- community_outbox_pending_total / community_outbox_oldest_age_seconds：
+  ActivityPublisher 每轮轮询更新（activity_publisher._update_outbox_gauges）；
+- community_activity_publish_total / community_activity_publish_latency_seconds：
+  Publisher 投递后（_poll_once）；
+- community_memory_source_read_total：内部 Reader 端点（internal_sources）；
+- community_source_deletion_lag_seconds：Publisher source deletion 投递成功时
+  （_deliver_source_deletion；此前缺口已补齐）；
+- community_post_created_total / community_reply_created_total：写服务事务内
+  （post_command_service / reply_service）；
+- community_api_requests_total：app.py observability middleware 对
+  /api/v1/community 前缀计数。
 """
 
 from __future__ import annotations

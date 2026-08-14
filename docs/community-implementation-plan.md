@@ -1108,6 +1108,12 @@ MVP 边界：
 - 复用 PublicError、trace middleware、CORS、认证依赖和 `app.state.rate_limiter`；
 - readiness 增加 Community 检查（D25）：镜像现有 Conversation 检查（app.py:592-619）——未配置 `COMMUNITY_DATABASE_URL` 时不挂载 Community 路由（含写路径），readiness 不报错；已配置但 ping 失败或 `community_alembic_version` 不等于 head 时，报 `community_database_unavailable` / `community_migration_version_mismatch`，fail-closed。
 
+  > 执行期扩展（2026-08-14 残余修复，超出 §13.1 冻结清单的合理补充）：链路依赖校验错误串
+  > `community_reader_not_configured` / `community_reader_token_missing`（submit 链路）、
+  > `community_source_delete_token_missing` / `memory_api_not_configured`（deletion 链路，
+  > 与 §13.2 显式 bool 与 token presence 分离语义一致）；`community_migration_head_unresolved`
+  > 同 conversation 先例。错误串仅用于 readiness 诊断，不影响公共 API 契约。
+
 Memory 的两个 runtime 装配点 `backend/app.py` 与 `backend/memory/worker/main.py` 都注册 `HttpActivityReader`，替换 `_UnavailableActivityReader`；这里的 `backend/memory/worker/main.py` 是现有 Memory Worker，不代表新增 Community Worker。配置不完整时明确记录 disabled/fail-closed 状态。
 
 ### 13.2 Settings

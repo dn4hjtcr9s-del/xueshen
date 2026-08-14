@@ -25,6 +25,7 @@ import asyncio
 import logging
 import random
 import time
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -147,8 +148,6 @@ class ActivityPublisher:
 
     async def _update_outbox_gauges(self) -> None:
         """§12.3：每轮更新 pending 计数与最老事件年龄 gauge。"""
-        from datetime import UTC, datetime
-
         async with self._session_factory() as session:
             rows = (
                 (
@@ -278,11 +277,13 @@ class ActivityPublisher:
         async with self._session_factory() as session:
             async with session.begin():
                 await outbox_repo.mark_delivered(
-                    session,
-                    row["event_id"],
-                    worker_id=self.worker_id,
+                    session, row["event_id"], worker_id=self.worker_id,
                     delivery_result="published",
                 )
+        # §12.3：source deletion 投递延迟（事件创建到投递成功）
+        metrics.community_source_deletion_lag_seconds.observe(
+            max(0.0, (datetime.now(UTC) - row["created_at"]).total_seconds())
+        )
         return "published"
 
     # ------------------------------------------------------------------
@@ -369,7 +370,5 @@ class ActivityPublisher:
                 )
 
 
-def _epoch_to_dt(epoch: float) -> Any:
-    from datetime import UTC, datetime
-
+def _epoch_to_dt(epoch: float) -> datetime:
     return datetime.fromtimestamp(epoch, tz=UTC)
