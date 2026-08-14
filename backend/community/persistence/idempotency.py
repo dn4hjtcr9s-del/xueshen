@@ -105,7 +105,13 @@ async def delete_expired(session: AsyncSession, *, batch_size: int) -> int:
     return await exec_rowcount(
         session,
         text(
-            "DELETE FROM community_idempotency_requests WHERE expires_at <= :now LIMIT :batch_size"
+            "DELETE FROM community_idempotency_requests "
+            "WHERE ctid IN ("
+            "  SELECT ctid FROM community_idempotency_requests "
+            "  WHERE expires_at <= :now "
+            "  ORDER BY expires_at "
+            "  LIMIT :batch_size"
+            ")"
         ),
         {"now": now, "batch_size": batch_size},
     )
