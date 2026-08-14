@@ -120,6 +120,18 @@ async def mark_read(
     return dict(row) if row else None
 
 
+async def mark_all_read(session: AsyncSession, *, user_id: UUID) -> int:
+    """全部已读（D14：只更新当前认证用户的未读记录；幂等）。"""
+    return await exec_rowcount(
+        session,
+        text(
+            "UPDATE memory_user_notifications SET read_at = now() "
+            "WHERE user_id = :user_id AND read_at IS NULL"
+        ),
+        {"user_id": user_id},
+    )
+
+
 async def purge_older_than(session: AsyncSession, *, cutoff: datetime, batch_size: int) -> int:
     """清理超过 90 天的通知；不影响 Outbox delivery 和最小审计（§13.13）。"""
     rowcount = await exec_rowcount(

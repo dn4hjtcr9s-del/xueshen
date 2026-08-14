@@ -400,3 +400,11 @@ export function markNotificationRead(notificationId: string): Promise<MemoryNoti
     { body: {}, idempotencyKey: idempotencyKey() },
   );
 }
+
+// D14：Memory 域 read-all（与 Community 域 read-all 对称；响应 {"unread_count": 0}）
+export function markAllMemoryNotificationsRead(): Promise<{ unread_count: number }> {
+  return request<{ unread_count: number }>("POST", "/memory/notifications/read-all", {
+    body: {},
+    idempotencyKey: idempotencyKey(),
+  });
+}

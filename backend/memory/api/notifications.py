@@ -11,6 +11,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, ConfigDict
 
 from backend.auth.context import SCOPE_MEMORY_READ, AuthContext
 from backend.memory.api.dependencies import (
@@ -116,3 +117,24 @@ async def mark_notification_read(
     if row is None:
         raise NotificationNotFoundError("通知不存在")
     return _notification_view(row)
+
+
+class MemoryNotificationReadAllResponse(BaseModel):
+    """read-all 统一响应（方案 community §8.6 冻结：{"unread_count": 0}）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    unread_count: int
+
+
+@router.post("/read-all", response_model=MemoryNotificationReadAllResponse)
+async def mark_all_notifications_read(
+    auth: AuthContext = Depends(require(actors=_USER_ONLY, scope=SCOPE_MEMORY_READ)),
+    runtime: ApiRuntime = Depends(get_runtime),
+) -> MemoryNotificationReadAllResponse:
+    """全部已读（D14：只更新当前认证用户的未读记录；重复调用返回 200 与当前计数）。"""
+    async with runtime.session_factory() as session:
+        async with session.begin():
+            await notifications_repo.mark_all_read(session, user_id=auth.user_id)
+            unread = await notifications_repo.unread_count(session, user_id=auth.user_id)
+    return MemoryNotificationReadAllResponse(unread_count=unread)

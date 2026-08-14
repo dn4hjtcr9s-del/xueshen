@@ -1,4 +1,5 @@
 // 生产前端样例骨架：左侧图标窄轨 + 顶部工具条 + 页面切换 + 通知面板。
+// 通知面板（方案 §6.5/§6.6）：Memory + Community 双域合并展示。
 import { useCallback, useEffect, useState } from "react";
 import {
   Bell,
@@ -14,9 +15,14 @@ import type { PageKey } from "./data";
 import { useAuth } from "./auth/AuthContext";
 import {
   listNotifications,
-  markNotificationRead,
+  markAllMemoryNotificationsRead,
   type MemoryNotification,
 } from "./api/memory";
+import {
+  listCommunityNotifications,
+  markAllCommunityNotificationsRead,
+  type CommunityNotification,
+} from "./api/community";
 import { Masthead } from "./ui";
 import { HomePage } from "./pages/Home";
 import { ChatPage } from "./pages/Chat";
@@ -45,17 +51,58 @@ const MASTHEADS: Record<PageKey, { kicker: string; title: string; aside: string[
   profile: { kicker: "Profile · 君子慎独", title: "个人中心", aside: ["记忆透明可管"] },
 };
 
-// 通知面板（§20.2）：真实 API；系统按新证据调整状态时在此显示，可查看简短依据。
+// §6.6 冻结的统一展示模型
+type UnifiedNotification = {
+  source: "memory" | "community";
+  notification_id: string;
+  event_type: string;
+  title: string;
+  body: string;
+  read_at: string | null;
+  created_at: string;
+  post_id?: string;
+  reply_id?: string;
+};
+
+function toUnified(
+  n: MemoryNotification,
+  source: "memory",
+): UnifiedNotification;
+function toUnified(
+  n: CommunityNotification,
+  source: "community",
+): UnifiedNotification;
+function toUnified(
+  n: MemoryNotification | CommunityNotification,
+  source: "memory" | "community",
+): UnifiedNotification {
+  const community = source === "community" ? (n as CommunityNotification) : undefined;
+  return {
+    source,
+    notification_id: n.notification_id,
+    event_type: n.event_type,
+    title: n.title,
+    body: n.body,
+    read_at: n.read_at,
+    created_at: n.created_at,
+    post_id: community?.post_id ?? undefined,
+    reply_id: community?.reply_id ?? undefined,
+  };
+}
+
+// 通知面板（§6.5）：双域并行加载、局部失败仍展示另一域、按 created_at DESC 稳定排序。
 function NotifPanel({
   items,
   error,
   onClose,
   onReadAll,
+  onOpenPost,
 }: {
-  items: MemoryNotification[];
+  items: UnifiedNotification[];
   error: string | null;
   onClose: () => void;
   onReadAll: () => void;
+  onOpenPost: (postId: string) => void;
 }) {
   return (
     <>
@@ -71,7 +118,14 @@ function NotifPanel({
         {error && <div className="notif-time">{error}</div>}
         {!error && items.length === 0 && <div className="notif-time">暂无通知</div>}
         {items.map((n) => (
-          <div key={n.notification_id} className={`notif-item ${n.read_at ? "" : "unread"}`}>
+          <div
+            key={`${n.source}:${n.notification_id}`}
+            className={`notif-item ${n.read_at ? "" : "unread"}`}
+            style={n.source === "community" && n.post_id ? { cursor: "pointer" } : undefined}
+            onClick={() => {
+              if (n.source === "community" && n.post_id) onOpenPost(n.post_id);
+            }}
+          >
             <div className="notif-ico">
               <Bell size={14} />
             </div>
@@ -80,7 +134,10 @@ function NotifPanel({
                 {n.title}
                 {n.body ? ` — ${n.body}` : ""}
               </div>
-              <div className="notif-time">{new Date(n.created_at).toLocaleString("zh-CN", { hour12: false })}</div>
+              <div className="notif-time">
+                {n.source === "community" ? "社区 · " : ""}
+                {new Date(n.created_at).toLocaleString("zh-CN", { hour12: false })}
+              </div>
             </div>
           </div>
         ))}
@@ -93,17 +150,39 @@ export default function App() {
   const { initials } = useAuth();
   const [page, setPage] = useState<PageKey>("home");
   const [showNotif, setShowNotif] = useState(false);
-  const [notifications, setNotifications] = useState<MemoryNotification[]>([]);
+  const [notifications, setNotifications] = useState<UnifiedNotification[]>([]);
   const [notifError, setNotifError] = useState<string | null>(null);
-  const unread = notifications.some((n) => !n.read_at);
+  const [unreadTotal, setUnreadTotal] = useState(0);
+  // §6.5：Community 通知点击 → 切社区 Tab 并打开详情；详情打开/关闭后清空
+  const [communityTargetPostId, setCommunityTargetPostId] = useState<string | null>(null);
 
   const loadNotifications = useCallback(async () => {
-    try {
-      const page = await listNotifications();
-      setNotifications(page.items);
+    // §6.5：Promise.allSettled 并行读取；任一域失败仍展示另一域 + 局部错误提示
+    const [memoryResult, communityResult] = await Promise.allSettled([
+      listNotifications(),
+      listCommunityNotifications(),
+    ]);
+    const memoryOk = memoryResult.status === "fulfilled";
+    const communityOk = communityResult.status === "fulfilled";
+    const memoryItems = memoryOk ? memoryResult.value.items : [];
+    const communityItems = communityOk ? communityResult.value.items : [];
+    const merged = [
+      ...memoryItems.map((n) => toUnified(n, "memory")),
+      ...communityItems.map((n) => toUnified(n, "community")),
+    ].sort((a, b) => b.created_at.localeCompare(a.created_at));
+    setNotifications(merged);
+    // 未读红点使用两个 API 返回的 unread_count 之和（§6.5 #3）
+    const memoryUnread = memoryOk ? memoryResult.value.unread_count : 0;
+    const communityUnread = communityOk ? communityResult.value.unread_count : 0;
+    setUnreadTotal(memoryUnread + communityUnread);
+    if (memoryOk && communityOk) {
       setNotifError(null);
-    } catch {
-      setNotifError("通知加载失败");
+    } else {
+      setNotifError(
+        (memoryOk ? "" : "Memory 通知加载失败；") +
+          (communityOk ? "" : "社区通知加载失败；") +
+          "已展示部分结果",
+      );
     }
   }, []);
 
@@ -119,14 +198,26 @@ export default function App() {
   };
 
   const readAll = async () => {
-    const unreadItems = notifications.filter((n) => !n.read_at);
-    await Promise.allSettled(unreadItems.map((n) => markNotificationRead(n.notification_id)));
+    // §6.5 #4：并发调用两个域的 read-all；部分失败后刷新两域并提示
+    const [memoryResult, communityResult] = await Promise.allSettled([
+      markAllMemoryNotificationsRead(),
+      markAllCommunityNotificationsRead(),
+    ]);
     await loadNotifications();
+    if (memoryResult.status === "rejected" || communityResult.status === "rejected") {
+      setNotifError("部分通知标记失败");
+    }
   };
 
   // 页面间联动：知识地图/计划里的"去问 AI"跳转到对话页。
   const goChat = () => setPage("chat");
   const masthead = MASTHEADS[page];
+
+  const openCommunityPost = (postId: string) => {
+    setShowNotif(false);
+    setPage("community");
+    setCommunityTargetPostId(postId);
+  };
 
   return (
     <div className="app">
@@ -157,7 +248,7 @@ export default function App() {
           </div>
           <button className="icon-btn" onClick={toggleNotif} aria-label="通知">
             <Bell size={15} strokeWidth={1.8} />
-            {unread && <span className="dot" />}
+            {unreadTotal > 0 && <span className="dot" />}
           </button>
           <button className="avatar-btn" onClick={() => setPage("profile")} aria-label="个人中心">
             {initials || "格"}
@@ -180,7 +271,12 @@ export default function App() {
             {page === "plan" && <PlanPage goChat={goChat} />}
             {page === "map" && <KnowledgeMapPage goChat={goChat} />}
             {page === "notebook" && <NotebookPage />}
-            {page === "community" && <CommunityPage />}
+            {page === "community" && (
+              <CommunityPage
+                targetPostId={communityTargetPostId}
+                onTargetConsumed={() => setCommunityTargetPostId(null)}
+              />
+            )}
             {page === "profile" && <ProfilePage />}
           </div>
         </main>
@@ -192,6 +288,7 @@ export default function App() {
           error={notifError}
           onClose={() => setShowNotif(false)}
           onReadAll={() => void readAll()}
+          onOpenPost={openCommunityPost}
         />
       )}
     </div>
