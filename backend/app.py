@@ -14,6 +14,7 @@ import logging
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -28,6 +29,7 @@ from backend.auth_service.api import router as auth_router
 from backend.auth_service.errors import AuthServiceError
 from backend.auth_service.mapping_consumer import IdentityMappingConsumer
 from backend.auth_service.runtime import AuthRuntime, build_auth_runtime
+from backend.community.contracts.errors import CommunityError
 from backend.conversation.contracts.errors import ConversationError
 from backend.memory import metrics
 from backend.memory.api import (
@@ -48,6 +50,7 @@ from backend.memory.logging_config import configure_logging
 from backend.memory.maintenance_gate import MaintenanceGate, MaintenanceGateError
 from backend.memory.persistence import break_glass as bg_repo
 from backend.settings import Settings, get_settings
+from backend.shared.auth_context import AuthRuntimeUnavailableError
 
 logger = logging.getLogger("memory.api")
 
@@ -123,6 +126,24 @@ async def _build_runtime(settings: Settings, app: FastAPI) -> ApiRuntime:
     conversation_reader = await _conversation_reader_for_runtime(
         settings, stack, db.session_factory
     )
+    # Community（§13.1）：HttpActivityReader 同时装配到 app.py 与 memory worker，
+    # 必须带 DeletionAwareActivityReader 删除抑制包装（§10.4 第 6 条/§15.4：
+    # deletion read suppression = 100%；与 conversation 侧同规则）。
+    # 配置不完整（无 base_url/token）时退回 _UnavailableActivityReader。
+    activity_reader: Any = _UnavailableActivityReader()
+    if settings.community_reader_base_url and settings.community_reader_service_token:
+        from backend.integrations.activity_reader import HttpActivityReader
+        from backend.memory.readers.filtering import DeletionAwareActivityReader
+
+        http_reader = HttpActivityReader(
+            settings.community_reader_base_url,
+            token=settings.community_reader_service_token,
+        )
+        await stack.enter_async_context(http_reader)
+        activity_reader = DeletionAwareActivityReader(
+            inner=http_reader,
+            session_factory=db.session_factory,
+        )
     context = MemoryRuntimeContext(
         settings=settings,
         memory_service=memory_service,
@@ -130,7 +151,7 @@ async def _build_runtime(settings: Settings, app: FastAPI) -> ApiRuntime:
             settings=settings, session_factory=db.session_factory
         ),
         conversation_reader=conversation_reader,
-        activity_reader=_UnavailableActivityReader(),
+        activity_reader=activity_reader,
         graph_registry_factory=default_registry_factory,
         openai_client=RealMemoryLLMClient(settings=settings),
         session_factory=db.session_factory,
@@ -189,6 +210,22 @@ async def _conversation_reader_for_runtime(
     )
 
 
+def _issue_community_agent_token(agent_subject: str, delegated_sub: str, scopes: list[str]) -> str:
+    """为 Community Publisher 签发短期 delegated activity_agent token（§10.3）。
+
+    actor_type=activity_agent、delegated_sub=事件所属 user_id、
+    scope=memory:submit_evidence；token 不返回浏览器、不落库、不写日志。
+    """
+    from backend.auth_service.agent_tokens import issue_agent_token
+
+    return issue_agent_token(
+        agent_subject=agent_subject,
+        delegated_sub=delegated_sub,
+        actor_type="activity_agent",
+        requested_scopes=scopes,
+    )
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -206,6 +243,26 @@ def create_app(
     app.state.rate_limiter = FixedWindowRateLimiter()
     app.state.startup_complete = False
     app.state.migration_head = None
+    # D29：shared/auth_context 只依赖 app.state 注入的身份映射工厂与
+    # break-glass 存储/校验器（shared 不 import memory persistence 实现）。
+    from backend.memory.break_glass import validate_grant_for_use
+    from backend.memory.persistence.identity import IdentityMappingRepository
+
+    app.state.identity_resolver_factory = IdentityMappingRepository
+    app.state.break_glass_validator = validate_grant_for_use
+
+    class _BreakGlassStore:
+        async def get_grant(self, session: AsyncSession, grant_id: UUID) -> Any:
+            return await bg_repo.get_grant(session, grant_id)
+
+        async def insert_audit(self, session: AsyncSession, **kwargs: Any) -> None:
+            await bg_repo.insert_audit(session, **kwargs)
+
+    app.state.break_glass_store = _BreakGlassStore()
+    # Community（§4.2/D25）：未配置 COMMUNITY_DATABASE_URL 时保持 None，
+    # 不挂载路由、readiness 跳过；启动时按配置构建独立连接池。
+    app.state.community_db = None
+    app.state.community_migration_head = None
     if runtime is not None and runtime.maintenance_gate is None and runtime.db is not None:
         runtime.maintenance_gate = MaintenanceGate(runtime.db.engine)
 
@@ -292,6 +349,13 @@ def create_app(
         metrics.memory_http_requests_total.labels(
             route=route_path, method=request.method, status=str(response.status_code)
         ).inc()
+        if request.url.path.startswith("/api/v1/community"):
+            # §12.3：community_api_requests_total（D42：同一 REGISTRY）
+            from backend.community import metrics as community_metrics
+
+            community_metrics.community_api_requests_total.labels(
+                route=route_path, status=str(response.status_code)
+            ).inc()
         return response
 
     async def _write_break_glass_body_audit(
@@ -352,6 +416,40 @@ def create_app(
                 trace_id=trace_id,
                 field=exc.field,
                 current_version=current_version,
+            ),
+        )
+
+    @app.exception_handler(CommunityError)
+    async def community_error_handler(request: Request, exc: CommunityError) -> JSONResponse:
+        """Community 域错误（§8.7）：复用 PublicError 信封；429 时带 Retry-After。"""
+        trace_id = getattr(request.state, "trace_id", None) or ""
+        retry_after = getattr(exc, "retry_after", None)
+        headers = {"Retry-After": str(retry_after)} if retry_after else None
+        return JSONResponse(
+            status_code=exc.http_status,
+            content=_public_error_body(
+                exc.code,
+                exc.message,
+                retryable=exc.retryable,
+                trace_id=trace_id,
+                field=exc.field,
+            ),
+            headers=headers,
+        )
+
+    @app.exception_handler(AuthRuntimeUnavailableError)
+    async def auth_runtime_unavailable_handler(
+        request: Request, exc: AuthRuntimeUnavailableError
+    ) -> JSONResponse:
+        """共享认证入口的运行时缺失（D29）：与原 DatabaseUnavailableError 同语义 503。"""
+        trace_id = getattr(request.state, "trace_id", None) or ""
+        return JSONResponse(
+            status_code=503,
+            content=_public_error_body(
+                "DATABASE_UNAVAILABLE",
+                str(exc),
+                retryable=True,
+                trace_id=trace_id,
             ),
         )
 
@@ -459,6 +557,72 @@ def create_app(
         except Exception:
             logger.warning("无法解析 conversation alembic head revision", exc_info=True)
             app.state.conversation_migration_head = None
+        # Community（§13.1/D25）：CommunityDatabase 与路由由
+        # build_community_routers 在 create_app 时同步装配（对齐 Conversation）；
+        # 此处仅解析迁移链 head 供 readiness 使用。未配置时保持 None。
+        if app.state.community_db is not None:
+            try:
+                from alembic.config import Config
+                from alembic.script import ScriptDirectory
+
+                app.state.community_migration_head = ScriptDirectory.from_config(
+                    Config("community_alembic.ini")
+                ).get_current_head()
+            except Exception:
+                logger.warning("无法解析 community alembic head revision", exc_info=True)
+                app.state.community_migration_head = None
+        # Community Publisher 与维护任务（§12.1/§12.4）：lifespan background task。
+        # 配置了社区库且 COMMUNITY_PUBLISHER_ENABLED=true 才启动 Publisher；
+        # 维护清理任务独立低频运行（间隔 COMMUNITY_MAINTENANCE_INTERVAL_SECONDS）。
+        app.state.community_publisher_task = None
+        app.state.community_maintenance_task = None
+        community_runtime = getattr(app.state, "community_runtime", None)
+        if community_runtime is not None:
+            if settings.community_publisher_enabled:
+                from backend.community.services.activity_publisher import (
+                    ActivityPublisher,
+                    ActivityPublisherConfig,
+                )
+                from backend.memory.client import MemoryClient
+
+                source_delete_client = None
+                if settings.community_source_delete_service_token:
+                    source_delete_client = MemoryClient(
+                        settings.memory_api_base_url,
+                        token=settings.community_source_delete_service_token,
+                        timeout=30.0,
+                    )
+                publisher = ActivityPublisher(
+                    session_factory=community_runtime.database.session_factory,
+                    config=ActivityPublisherConfig(settings),
+                    source_delete_client=source_delete_client,
+                    agent_token_factory=(
+                        lambda subj, delegated, scopes: _issue_community_agent_token(
+                            subj, delegated, scopes
+                        )
+                    ),
+                    worker_id=f"community-publisher-{id(app):08x}",
+                )
+                # §10.3：evidence 每次请求按事件 user_id 签发短期 delegated
+                # activity_agent token（token_provider 依赖 publisher 实例）
+                memory_client = MemoryClient(
+                    settings.memory_api_base_url,
+                    token_provider=publisher._agent_token,
+                    timeout=30.0,
+                )
+                publisher.set_memory_client(memory_client)
+                app.state.community_publisher_task = asyncio.create_task(publisher.run_forever())
+            if settings.community_maintenance_interval_seconds > 0:
+                from backend.community.services.maintenance import CommunityMaintenance
+
+                maintenance = CommunityMaintenance(
+                    session_factory=community_runtime.database.session_factory,
+                    interval_seconds=settings.community_maintenance_interval_seconds,
+                    settings=settings,
+                )
+                app.state.community_maintenance_task = asyncio.create_task(
+                    maintenance.run_forever()
+                )
         app.state.startup_complete = True
 
     @app.on_event("shutdown")
@@ -467,6 +631,18 @@ def create_app(
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        publisher_task: asyncio.Task[None] | None = getattr(
+            app.state, "community_publisher_task", None
+        )
+        if publisher_task is not None:
+            publisher_task.cancel()
+            await asyncio.gather(publisher_task, return_exceptions=True)
+        maintenance_task: asyncio.Task[None] | None = getattr(
+            app.state, "community_maintenance_task", None
+        )
+        if maintenance_task is not None:
+            maintenance_task.cancel()
+            await asyncio.gather(maintenance_task, return_exceptions=True)
         stack: AsyncExitStack | None = getattr(app.state, "db_exit_stack", None)
         if stack is not None:
             await stack.aclose()
@@ -476,6 +652,9 @@ def create_app(
         auth_current: AuthRuntime | None = app.state.auth_runtime
         if auth_current is not None:
             await auth_current.database.close()
+        community_db = app.state.community_db
+        if community_db is not None:
+            await community_db.close()
 
     app.include_router(memories.router)
     app.include_router(reviews.router)
@@ -507,6 +686,33 @@ def create_app(
     conversation_router = build_conversation_routers(app)
     if conversation_router is not None:
         app.include_router(conversation_router)
+    # Community Router（§13.1/D25：未配置 COMMUNITY_DATABASE_URL 时不挂载，
+    # 含写路径与内部 Reader/purge；readiness 不报错、进程正常启动）
+    from backend.community.api import build_community_routers
+
+    community_router = build_community_routers(app)
+    if community_router is not None:
+        app.include_router(community_router)
+        # 内部账号 purge（§8.8/D36）：仅配置了 purge 服务 token 才挂载（fail-closed）。
+        # 未配置 community:account_purge token 时端点保持关闭。
+        if settings.community_account_purge_service_token:
+            from backend.community.api.internal_accounts import router as purge_router
+
+            app.include_router(purge_router)
+        # 内部 Source Reader（§10.4）：仅配置了 reader 服务 token 才挂载（fail-closed）。
+        # community:source_read scope 加入 ALL_SCOPES 但不授予普通用户（§13.3）。
+        if settings.community_reader_service_token:
+            from backend.community.api.internal_sources import (
+                build_reader_router as build_community_reader_router,
+            )
+            from backend.community.services.source_read_service import (
+                CommunitySourceReadService,
+            )
+
+            community_reader_service = CommunitySourceReadService(
+                session_factory=app.state.community_runtime.database.session_factory
+            )
+            app.include_router(build_community_reader_router(community_reader_service))
     # 内部 Reader 端点（方案 §8.2，P0 闭环）：Memory 侧 HttpConversationReader 的
     # POST /api/v1/internal/conversation-sources/read 目标。
     # 依赖 conversation DB；未启用 Conversation 时跳过（与 Router 同门控）。
@@ -648,6 +854,42 @@ def create_app(
                         failures.append(f"{role_field}_not_configured")
             if settings.conversation_streaming_enabled and not settings.openai_answer_model:
                 failures.append("openai_answer_model_not_configured")
+        # Community 迁移链检查（§13.1/D25）：未配置 COMMUNITY_DATABASE_URL 时
+        # community_db 为 None，跳过检查（本地无社区库不影响其余域）；已配置但
+        # ping 失败或迁移版本不一致 → fail-closed。
+        community_db = getattr(request.app.state, "community_db", None)
+        if community_db is not None:
+            if not await community_db.ping():
+                failures.append("community_database_unavailable")
+            else:
+                community_head = getattr(request.app.state, "community_migration_head", None)
+                if community_head is None:
+                    failures.append("community_migration_head_unresolved")
+                else:
+                    try:
+                        async with community_db.session_factory() as session:
+                            row = await session.execute(
+                                text("SELECT version_num FROM community_alembic_version")
+                            )
+                            community_version = row.scalar_one_or_none()
+                    except Exception:
+                        logger.warning("community_alembic_version 查询失败", exc_info=True)
+                        community_version = None
+                    if community_version != community_head:
+                        failures.append("community_migration_version_mismatch")
+            # §13.2/D46：evidence/删除链路开启时 Reader base URL 与 token 必须齐备
+            # §13.2/D46：submit 与 deletion 链路各自校验依赖（token 与 bool 分离；
+            # deletion 消耗的是 source_delete token，非 reader token）
+            if settings.community_memory_submit_enabled:
+                if not settings.community_reader_base_url:
+                    failures.append("community_reader_not_configured")
+                if not settings.community_reader_service_token:
+                    failures.append("community_reader_token_missing")
+            if settings.community_source_deletion_enabled:
+                if not settings.community_source_delete_service_token:
+                    failures.append("community_source_delete_token_missing")
+                if not settings.memory_api_base_url:
+                    failures.append("memory_api_not_configured")
         # §6.3：readiness 同时检查 memory 与 auth 两条迁移链（fail-closed）
         auth_current: AuthRuntime | None = getattr(request.app.state, "auth_runtime", None)
         if auth_current is None:

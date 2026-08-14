@@ -751,6 +751,72 @@ body::before {
 .post-meta { display: flex; gap: 10px; align-items: center; margin-top: 7px; font-size: 12px; color: var(--ink-faint); flex-wrap: wrap; }
 .post-stats { display: flex; gap: 14px; font-family: var(--mono); font-size: 11px; color: var(--ink-faint); flex-shrink: 0; }
 
+/* 讨论区工具栏（板块筛选 / 排序，§6.1） */
+.comm-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 10px 0 4px; flex-wrap: wrap; }
+.comm-filters, .comm-sort { display: flex; gap: 8px; flex-wrap: wrap; }
+.comm-chip {
+  border: 1px solid var(--line); background: none; border-radius: 999px;
+  font-size: 12px; color: var(--ink-faint); padding: 5px 13px; cursor: pointer;
+  font-family: var(--serif); letter-spacing: 0.3px;
+}
+.comm-chip:hover { border-color: var(--ink-faint); color: var(--ink); }
+.comm-chip.active { border-color: var(--cinnabar); color: var(--cinnabar-deep); background: var(--cinnabar-wash); }
+
+/* 骨架屏 / 空态 / 错误重试 / 加载更多（§6.1） */
+.skeleton-line { display: block; height: 13px; border-radius: 4px; background: linear-gradient(90deg, var(--line) 25%, #ece8e0 50%, var(--line) 75%); background-size: 200% 100%; animation: shimmer 1.3s infinite; }
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+.comm-empty { text-align: center; color: var(--ink-faint); padding: 46px 0; font-family: var(--serif); font-size: 14.5px; letter-spacing: 0.5px; display: flex; flex-direction: column; gap: 14px; align-items: center; }
+.comm-loadmore { text-align: center; padding: 18px 0 4px; }
+.comm-loadmore .btn:disabled { opacity: 0.5; cursor: wait; }
+
+/* 帖子详情（§6.3） */
+.comm-back { display: inline-flex; align-items: center; gap: 6px; border: none; background: none; color: var(--ink-faint); font-size: 12.5px; cursor: pointer; padding: 4px 0 14px; font-family: var(--serif); }
+.comm-back:hover { color: var(--cinnabar); }
+.comm-detail { max-width: 720px; }
+.comm-detail-title { font-family: var(--serif); font-size: 22px; font-weight: 700; line-height: 1.5; letter-spacing: 0.5px; }
+.comm-detail-body { white-space: pre-wrap; font-size: 14.5px; line-height: 1.9; color: var(--ink); margin: 16px 0 26px; }
+.comm-replies-head { display: flex; align-items: center; gap: 7px; font-family: var(--serif); font-weight: 700; font-size: 14px; padding: 14px 0 4px; border-top: var(--hairline); margin-top: 10px; }
+.comm-reply { padding: 15px 0; border-bottom: 1px solid var(--line); }
+.comm-reply-body { white-space: pre-wrap; font-size: 14px; line-height: 1.85; margin-top: 8px; }
+.comm-detail-loading { display: flex; justify-content: center; padding: 60px 0; }
+.spin { animation: comm-spin 0.9s linear infinite; }
+@keyframes comm-spin { to { transform: rotate(360deg); } }
+.tag-solved { border-color: var(--pine); color: var(--pine); }
+
+/* 发帖面板（§6.2） */
+.comm-compose { padding: 20px 22px; margin: 14px 0; display: flex; flex-direction: column; gap: 10px; max-width: 680px; }
+.comm-compose-title { font-family: var(--serif); font-size: 16px; font-weight: 700; letter-spacing: 0.5px; }
+.comm-input {
+  border: 1px solid var(--line); background: var(--paper); border-radius: 6px;
+  padding: 9px 12px; font-size: 13.5px; color: var(--ink); font-family: var(--serif);
+  width: 100%;
+}
+.comm-input:focus { outline: none; border-color: var(--cinnabar); }
+.comm-textarea { min-height: 110px; resize: vertical; line-height: 1.7; white-space: pre-wrap; }
+.comm-compose-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.comm-memory-hint { font-size: 11.5px; color: var(--ink-faint); line-height: 1.6; margin: 2px 0 0; }
+.comm-error { font-size: 12.5px; color: var(--cinnabar-deep); }
+
+/* 详情操作（点赞/删除/回复） */
+.comm-detail-actions { display: flex; gap: 10px; margin: 4px 0 18px; align-items: center; }
+.comm-action {
+  display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line);
+  background: none; border-radius: 999px; padding: 6px 14px; font-size: 12.5px;
+  color: var(--ink-faint); cursor: pointer; font-family: var(--serif);
+}
+.comm-action:hover { border-color: var(--ink-faint); color: var(--ink); }
+.comm-action.liked { border-color: var(--cinnabar); color: var(--cinnabar-deep); background: var(--cinnabar-wash); }
+.comm-action.danger:hover { border-color: var(--cinnabar); color: var(--cinnabar-deep); }
+.comm-reply-box { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; align-items: flex-end; }
+.comm-reply-box .comm-textarea { min-height: 80px; }
+
+/* 删除确认弹层（§6.6 冻结文案：确认删除/取消） */
+.comm-confirm-mask { position: fixed; inset: 0; background: rgba(30, 25, 15, 0.35); z-index: 60; display: flex; align-items: center; justify-content: center; }
+.comm-confirm { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 22px 24px; width: min(360px, 86vw); box-shadow: 0 14px 40px rgba(0, 0, 0, 0.14); }
+.comm-confirm-title { font-family: var(--serif); font-size: 16px; font-weight: 700; letter-spacing: 0.4px; }
+.comm-confirm-body { font-size: 13px; color: var(--ink-faint); margin: 10px 0 18px; line-height: 1.7; }
+.comm-confirm-actions { display: flex; justify-content: flex-end; gap: 10px; }
+
 .group-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 16px; }
 .group-card { padding: 20px; display: flex; flex-direction: column; gap: 9px; transition: transform 0.15s, box-shadow 0.15s; }
 .group-card:hover { transform: translate(2px, 2px); box-shadow: 3px 3px 0 rgba(34, 28, 18, 0.14); }
