@@ -105,6 +105,30 @@ def _conversation_reader_for_worker(
     )
 
 
+def _activity_reader_for_worker(
+    settings: Settings, memory_session_factory: async_sessionmaker[AsyncSession]
+) -> Any:
+    """Worker runtime 生产 ActivityReader 装配（方案 community §13.1 第二装配点）。
+
+    与 API runtime 同规则：必须带 DeletionAwareActivityReader 删除抑制包装
+    （§10.4 第 6 条/§15.4，与 conversation 侧 worker 同规则）；未配置
+    COMMUNITY_READER_BASE_URL/token 时退回 _UnavailableActivityReader。
+    """
+    if not settings.community_reader_base_url or not settings.community_reader_service_token:
+        return _UnavailableActivityReader()
+    from backend.integrations.activity_reader import HttpActivityReader
+    from backend.memory.readers.filtering import DeletionAwareActivityReader
+
+    http_reader = HttpActivityReader(
+        settings.community_reader_base_url,
+        token=settings.community_reader_service_token,
+    )
+    return DeletionAwareActivityReader(
+        inner=http_reader,
+        session_factory=memory_session_factory,
+    )
+
+
 async def _run() -> None:
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
@@ -119,6 +143,7 @@ async def _run() -> None:
             settings=settings, session_factory=db.session_factory, store=store
         )
         conversation_reader = _conversation_reader_for_worker(settings, db.session_factory)
+        activity_reader = _activity_reader_for_worker(settings, db.session_factory)
         async with AsyncPostgresSaver.from_conn_string(_psycopg_conninfo(settings)) as saver:
             async with maintenance_gate.traffic():
                 await saver.setup()
@@ -129,7 +154,7 @@ async def _run() -> None:
                     settings=settings, session_factory=db.session_factory
                 ),
                 conversation_reader=conversation_reader,
-                activity_reader=_UnavailableActivityReader(),
+                activity_reader=activity_reader,
                 graph_registry_factory=default_registry_factory,
                 openai_client=RealMemoryLLMClient(settings=settings),
                 session_factory=db.session_factory,

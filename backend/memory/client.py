@@ -181,12 +181,15 @@ class MemoryClient:
         source_ref: str,
         source_version: str | None = None,
         event_id: UUID | None = None,
+        source_system: Literal["conversation", "activity"] = "conversation",
     ) -> dict[str, str]:
-        """提交来源删除事件（§8.6 步骤 4 / 评审 C7、P2）。
+        """提交来源删除事件（§8.6 步骤 4 / 评审 C7、P2 / Community §11.2）。
 
         POST /api/v1/internal/source-deletions，使用独立 system principal 的
         memory:source_delete scope token（由 MemoryClient 装配方提供）。
         event_id 由调用方稳定生成（幂等锚点，评审 P2）。
+        source_system（Community §11.2 冻结）：Conversation 调用继续传
+        "conversation"（默认保持既有行为）；Community Publisher 传 "activity"。
         """
         from datetime import UTC, datetime
         from uuid import uuid4
@@ -194,7 +197,7 @@ class MemoryClient:
         payload = {
             "event_id": str(event_id or uuid4()),
             "user_id": str(user_id),
-            "source_system": "conversation",
+            "source_system": source_system,
             "source_ref": source_ref,
             "source_version": source_version,
             "deleted_at": datetime.now(UTC).isoformat(),

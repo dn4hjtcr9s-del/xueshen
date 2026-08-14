@@ -254,7 +254,8 @@ async def test_login_rate_limit_account_bucket_shared_across_identifiers(
 ) -> None:
     """复审 P2-7：用户名与邮箱共用同一个账号限流桶（key=user_id）。"""
     # 固定限流器时钟窗口：避免测试跨分钟边界时窗口重置导致 429 偶发缺席
-    monkeypatch.setattr("backend.memory.api.dependencies.time.time", lambda: 1_700_000_000.0)
+    # D24：FixedWindowRateLimiter 已提取至 backend/shared/ratelimit.py（原位置 re-export）
+    monkeypatch.setattr("backend.shared.ratelimit.time.time", lambda: 1_700_000_000.0)
     client = auth_api_client
     resp = await client.post(
         "/api/v1/auth/register",

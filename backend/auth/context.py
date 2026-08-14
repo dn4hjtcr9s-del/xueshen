@@ -42,6 +42,10 @@ SCOPE_MEMORY_BREAK_GLASS = "memory:break_glass"
 # 两个独立 system principal，不授予普通用户与 delegated Agent
 SCOPE_CONVERSATION_SOURCE_READ = "conversation:source_read"
 SCOPE_MEMORY_SOURCE_DELETE = "memory:source_delete"
+# Community 域内部 scope（方案 community §10.3/§13.3，v1.6 冻结）：
+# 独立 system principal（D36），加入 ALL_SCOPES 但不加入 AGENT_ALLOWED_SCOPES
+SCOPE_COMMUNITY_SOURCE_READ = "community:source_read"
+SCOPE_COMMUNITY_ACCOUNT_PURGE = "community:account_purge"
 
 ALL_SCOPES: frozenset[str] = frozenset(
     {
@@ -58,6 +62,8 @@ ALL_SCOPES: frozenset[str] = frozenset(
         SCOPE_MEMORY_BREAK_GLASS,
         SCOPE_CONVERSATION_SOURCE_READ,
         SCOPE_MEMORY_SOURCE_DELETE,
+        SCOPE_COMMUNITY_SOURCE_READ,
+        SCOPE_COMMUNITY_ACCOUNT_PURGE,
     }
 )
 
