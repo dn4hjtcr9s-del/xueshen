@@ -78,18 +78,6 @@ export interface NoteItem {
   mastery: "薄弱" | "巩固中" | "已掌握";
 }
 
-export interface CommunityPost {
-  id: string;
-  board: string;
-  title: string;
-  author: string;
-  replies: number;
-  likes: number;
-  time: string;
-  pinned?: boolean;
-  solved?: boolean;
-}
-
 export interface StudyGroup {
   id: string;
   name: string;
@@ -299,14 +287,6 @@ export const notes: NoteItem[] = [
     reviewStage: 4,
     mastery: "已掌握",
   },
-];
-
-export const communityPosts: CommunityPost[] = [
-  { id: "p1", board: "线性代数", title: "大家都是怎么建立特征值的直觉的？书上的定义太抽象了", author: "正方形骑士", replies: 23, likes: 45, time: "20 分钟前", pinned: true },
-  { id: "p2", board: "线性代数", title: "【已解决】rank(AB) ≤ min(rank A, rank B) 这个方向我理解反了吗？", author: "秩不平", replies: 8, likes: 12, time: "1 小时前", solved: true },
-  { id: "p3", board: "微积分", title: "泰勒展开到底要展开到第几项？有没有判断的套路", author: "洛必达不洛", replies: 15, likes: 31, time: "3 小时前" },
-  { id: "p4", board: "概率论", title: "三门问题用贝叶斯怎么严格写？总觉得换门 2/3 反直觉", author: "蒙提霍尔", replies: 41, likes: 67, time: "5 小时前" },
-  { id: "p5", board: "学习方法", title: "用间隔重复复习数学概念的第 30 天，分享我的卡片模板", author: "艾宾浩斯本斯", replies: 19, likes: 88, time: "昨天" },
 ];
 
 export const studyGroups: StudyGroup[] = [
