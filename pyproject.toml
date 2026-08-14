@@ -59,6 +59,8 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 # 框架标准用法，B008 函数调用默认值在此为有意为之
 "backend/memory/api/**" = ["B008"]
 "backend/conversation/api/**" = ["B008"]
+"backend/shared/auth_context.py" = ["B008"]
+"backend/community/api/**" = ["B008"]
 
 [tool.mypy]
 python_version = "3.13"

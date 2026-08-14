@@ -12,8 +12,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
-from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -22,31 +20,15 @@ from uuid import UUID, uuid4
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from backend.auth.context import (
-    ALL_SCOPES,
-    SCOPE_MEMORY_BREAK_GLASS,
-    AuthContext,
-)
-from backend.auth.verifier import (
-    AuthError,
-    CompositeAuthVerifier,
-    DevelopmentAuthAdapter,
-    ProductionJwtAuthAdapter,
-)
-from backend.memory.break_glass import validate_grant_for_use
+from backend.auth.context import AuthContext
 from backend.memory.contracts.commands import MemoryPayload
 from backend.memory.contracts.common import (
     OPERATION_ROUTING,
     PRIORITY_P1,
     TERMINAL_STATUSES,
-    CursorError,
-    cursor_principal_hash,
     idempotency_payload_hash,
     new_trace_id,
-    sign_cursor,
-    user_log_hash,
     user_privacy_hash,
-    verify_cursor,
 )
 from backend.memory.contracts.errors import (
     AccountPurgeInProgressError,
@@ -66,20 +48,31 @@ from backend.memory.contracts.operations import (
 )
 from backend.memory.graph.runner import MemoryGraphRunner
 from backend.memory.maintenance_gate import MaintenanceGate
-from backend.memory.persistence import break_glass as bg_repo
 from backend.memory.persistence import operations as ops_repo
 from backend.memory.persistence.database import Database
-from backend.memory.persistence.identity import IdentityMappingRepository
 from backend.memory.services.memory_service import MemoryService
 from backend.memory.worker.checkpoint import thread_id_for_operation
 from backend.memory.worker.worker import Worker
 from backend.settings import Settings
 
+# D24/D29 共享化：认证依赖、cursor 签发、固定窗口限流实现位于 backend/shared，
+# 本模块保留 re-export 与错误映射，既有引用点不受影响。
+from backend.shared.auth_context import (
+    BREAK_GLASS_HEADER as BREAK_GLASS_HEADER,
+)
+from backend.shared.auth_context import (
+    get_auth_context as get_auth_context,
+)
+from backend.shared.auth_context import (
+    require as require,
+)
+from backend.shared.cursor import CursorError as CursorError
+from backend.shared.cursor import issue_cursor as issue_cursor
+from backend.shared.cursor import resolve_cursor as _shared_resolve_cursor
+from backend.shared.ratelimit import FixedWindowRateLimiter as FixedWindowRateLimiter
+
 #: P0/P1 快速路径同步等待窗口（§14.2 第 3–4 条）
 FAST_PATH_TIMEOUT_SECONDS = 2.0
-
-#: Break-glass grant 请求头（§13.15）
-BREAK_GLASS_HEADER = "x-break-glass-grant-id"
 
 logger = logging.getLogger("memory.api")
 
@@ -138,176 +131,16 @@ def get_trace_id(request: Request) -> str:
 
 # ---------------------------------------------------------------------------
 # 认证与授权（§18.1–§18.3）
+# D29：get_auth_context / require 实现已提取至 backend/shared/auth_context.py，
+# 本模块从 shared 导入（见顶部 import），保持既有 API 签名与引用点兼容。
 # ---------------------------------------------------------------------------
-
-
-async def get_auth_context(request: Request) -> AuthContext:
-    """认证入口：development 优先 dev auth，其余走生产 JWT（§18.1）。
-
-    携带 X-Break-Glass-Grant-Id 时走 §13.15 校验：限 admin、限 grant 属主、
-    限时、限目标用户；校验通过则本次请求以目标用户身份执行并写使用审计。
-    """
-    settings = get_settings(request)
-    runtime = get_runtime(request)
-    headers = {k.lower(): v for k, v in request.headers.items()}
-    # Dev Auth 来源限制（§18.1 / 评审 #9）：把客户端地址传给认证适配器
-    client_host = request.client.host if request.client else None
-    async with runtime.session_factory() as session:
-        resolver = IdentityMappingRepository(session)
-        verifier = CompositeAuthVerifier(
-            settings=settings,
-            dev_adapter=DevelopmentAuthAdapter(settings),
-            prod_adapter=ProductionJwtAuthAdapter(settings=settings, identity_resolver=resolver),
-        )
-        auth = await verifier.authenticate(headers, client_host=client_host)
-        raw_grant = headers.get(BREAK_GLASS_HEADER)
-        if raw_grant is None:
-            return auth
-        return await _apply_break_glass(request, settings, session, auth, raw_grant)
-
-
-async def _apply_break_glass(
-    request: Request,
-    settings: Settings,
-    session: AsyncSession,
-    auth: AuthContext,
-    raw_grant: str,
-) -> AuthContext:
-    """校验 break-glass grant 并构造以目标用户身份执行的 AuthContext。"""
-    trace_id = get_trace_id(request)
-    if auth.actor_type != "admin" or not auth.has_scope(SCOPE_MEMORY_BREAK_GLASS):
-        raise AuthError(
-            "AUTH_FORBIDDEN",
-            "break-glass 仅限持有 memory:break_glass scope 的 admin 使用",
-            forbidden=True,
-        )
-    try:
-        grant_id = UUID(raw_grant)
-    except ValueError as exc:
-        raise AuthError("AUTH_FORBIDDEN", "grant_id 不是合法 UUID", forbidden=True) from exc
-
-    grant = await bg_repo.get_grant(session, grant_id)
-    now = datetime.now(UTC)
-    reason = validate_grant_for_use(
-        settings=settings, grant=grant, admin_user_id=auth.user_id, now=now
-    )
-    if reason is not None:
-        if reason == "expired" and grant is not None:
-            await bg_repo.insert_audit(
-                session,
-                audit_id=uuid4(),
-                grant_id=grant["grant_id"],
-                admin_user_id=grant["admin_user_id"],
-                target_user_id=grant["target_user_id"],
-                action="expired_check",
-                resource_type="auth_context",
-                resource_id=None,
-                trace_id=trace_id,
-            )
-            await session.commit()
-        raise AuthError("AUTH_FORBIDDEN", f"break-glass grant 不可用: {reason}", forbidden=True)
-    assert grant is not None  # reason is None 时 grant 必然存在
-
-    await bg_repo.insert_audit(
-        session,
-        audit_id=uuid4(),
-        grant_id=grant["grant_id"],
-        admin_user_id=grant["admin_user_id"],
-        target_user_id=grant["target_user_id"],
-        action="use",
-        resource_type="auth_context",
-        resource_id=None,
-        trace_id=trace_id,
-    )
-    await session.commit()
-    request.state.break_glass = {
-        "grant_id": grant["grant_id"],
-        "admin_user_id": auth.user_id,
-        "target_user_id": grant["target_user_id"],
-    }
-    logger.info(
-        "break-glass 使用: admin=%s target=%s grant=%s",
-        user_log_hash(settings.log_hmac_key, str(auth.user_id)),
-        user_log_hash(settings.log_hmac_key, str(grant["target_user_id"])),
-        grant["grant_id"],
-    )
-    scopes = frozenset(s for s in grant["scopes"] if s in ALL_SCOPES)
-    return AuthContext(
-        user_id=grant["target_user_id"],
-        actor_type="admin",
-        scopes=scopes,
-        issuer=auth.issuer,
-        external_subject=auth.external_subject,
-        break_glass_grant_id=grant["grant_id"],
-    )
-
-
-def require(
-    *,
-    actors: Collection[str],
-    scope: str | None = None,
-    any_scopes: tuple[str, ...] = (),
-) -> Any:
-    """权限矩阵依赖工厂：actor_type 白名单 + scope 检查（§18.2/§18.3）。
-
-    scope 为必须持有的单个 scope；any_scopes 非空时持有其一即可。
-    """
-
-    async def _dep(auth: AuthContext = Depends(get_auth_context)) -> AuthContext:
-        if auth.actor_type not in actors:
-            # §13.15：持有效 break-glass grant 的 admin 以目标用户身份放行
-            if not (auth.actor_type == "admin" and auth.break_glass_grant_id is not None):
-                raise AuthError(
-                    "AUTH_FORBIDDEN",
-                    f"actor_type={auth.actor_type} 无权访问该接口",
-                    forbidden=True,
-                )
-        if scope is not None and not auth.has_scope(scope):
-            raise AuthError("AUTH_FORBIDDEN", f"缺少 scope: {scope}", forbidden=True)
-        if any_scopes and not any(auth.has_scope(s) for s in any_scopes):
-            raise AuthError(
-                "AUTH_FORBIDDEN", f"缺少 scope（任一即可）: {list(any_scopes)}", forbidden=True
-            )
-        return auth
-
-    return _dep
 
 
 # ---------------------------------------------------------------------------
 # 进程内固定窗口限流（§18.5）
+# D12/D24：FixedWindowRateLimiter 实现已提取至 backend/shared/ratelimit.py，
+# 支持 window_seconds 参数（默认 60），本模块从 shared 导入。
 # ---------------------------------------------------------------------------
-
-
-class FixedWindowRateLimiter:
-    """每用户每分钟固定窗口计数；进程内实现（§18.5）。"""
-
-    def __init__(self) -> None:
-        self._counters: dict[tuple[str, str], tuple[int, int]] = {}
-
-    def _current(self, bucket: str, principal: str) -> tuple[int, int]:
-        window = int(time.time() // 60)
-        stored_window, count = self._counters.get((bucket, principal), (window, 0))
-        if stored_window != window:
-            stored_window, count = window, 0
-        return stored_window, count
-
-    def hit(self, bucket: str, principal: str, limit: int) -> bool:
-        window, count = self._current(bucket, principal)
-        count += 1
-        self._counters[(bucket, principal)] = (window, count)
-        if len(self._counters) > 10_000:
-            self._counters = {k: v for k, v in self._counters.items() if v[0] >= window - 1}
-        return count <= limit
-
-    def is_limited(self, bucket: str, principal: str, limit: int) -> bool:
-        """只读探测是否已超限（不计数），供预检避免昂贵操作（如 bcrypt）。"""
-        _, count = self._current(bucket, principal)
-        return count >= limit
-
-    def clear(self, bucket: str, principal: str) -> None:
-        """清除桶计数（方案 §10.1：成功登录清除账号桶）。"""
-        self._counters.pop((bucket, principal), None)
-
 
 #: 限流 bucket → settings 字段（§18.5：写 30/min、搜索 60/min、图谱标记 30/min）
 _BUCKET_SETTING = {
@@ -499,26 +332,9 @@ def status_code_for_row(row: dict[str, Any]) -> int:
 
 # ---------------------------------------------------------------------------
 # 不透明 cursor（§19.9）
+# D24：issue_cursor 实现位于 backend/shared/cursor.py（含 D13 bind_principal 扩展），
+# 本模块 re-export；resolve_cursor 保留 CursorError → Memory 公共错误码的映射。
 # ---------------------------------------------------------------------------
-
-
-def issue_cursor(
-    settings: Settings,
-    *,
-    route: str,
-    user_id: UUID,
-    filters: dict[str, Any],
-    sort_key: list[Any],
-) -> str:
-    payload = {
-        "cursor_version": 1,
-        "route": route,
-        "principal_hash": cursor_principal_hash(settings.cursor_hmac_key, str(user_id)),
-        "normalized_filters": filters,
-        "sort_key": sort_key,
-        "expires_at": time.time() + settings.cursor_ttl_seconds,
-    }
-    return sign_cursor(settings.cursor_hmac_key, payload)
 
 
 def resolve_cursor(
@@ -528,16 +344,21 @@ def resolve_cursor(
     route: str,
     user_id: UUID,
     filters: dict[str, Any],
+    bind_principal: bool = True,
 ) -> dict[str, Any]:
-    """验签并绑定路由/主体/筛选/过期；返回 payload（含 sort_key）。"""
+    """验签并绑定路由/主体/筛选/过期；返回 payload（含 sort_key）。
+
+    D13：公共游标（帖子列表/详情回复分页）传 bind_principal=False，
+    payload 不绑定 principal_hash。
+    """
     try:
-        return verify_cursor(
-            settings.cursor_hmac_key,
+        return _shared_resolve_cursor(
+            settings,
             token,
             route=route,
-            principal_hash=cursor_principal_hash(settings.cursor_hmac_key, str(user_id)),
-            normalized_filters=filters,
-            now_epoch=time.time(),
+            user_id=user_id,
+            filters=filters,
+            bind_principal=bind_principal,
         )
     except CursorError as exc:
         if exc.code == "CURSOR_EXPIRED":

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 存量 postgres-data volume 的三账号隔离升级脚本（方案 §6.1 / 附录 A.1 #4）。
+# 存量 postgres-data volume 的四账号隔离升级脚本（方案 §6.1 / 附录 A.1 #4，Community §4.2）。
 # 全新部署无需运行：docker-entrypoint-initdb.d 首次启动自动执行同一套初始化。
 # 幂等：已升级的 volume 重复执行不产生副作用；不删除、不修改任何业务数据。
 #
@@ -53,6 +53,12 @@ IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'conversation') THEN
 END IF; END \$\$;"
 psql_as postgres template1 \
   -c "ALTER ROLE conversation WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD 'conversation';"
+psql_as postgres template1 -c "DO \$\$ BEGIN
+IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'community') THEN
+    CREATE ROLE community LOGIN PASSWORD 'community';
+END IF; END \$\$;"
+psql_as postgres template1 \
+  -c "ALTER ROLE community WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD 'community';"
 
 # 3. 按 memory 角色当前状态分类处理
 STATE="$(psql_as postgres template1 -tAc "SELECT CASE
@@ -134,12 +140,16 @@ SELECT 'CREATE DATABASE auth OWNER auth'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'auth')\gexec
 SELECT 'CREATE DATABASE conversation OWNER conversation'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'conversation')\gexec
+SELECT 'CREATE DATABASE community OWNER community'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'community')\gexec
 REVOKE CONNECT ON DATABASE memory FROM PUBLIC;
 GRANT CONNECT ON DATABASE memory TO memory;
 REVOKE CONNECT ON DATABASE auth FROM PUBLIC;
 GRANT CONNECT ON DATABASE auth TO auth;
 REVOKE CONNECT ON DATABASE conversation FROM PUBLIC;
 GRANT CONNECT ON DATABASE conversation TO conversation;
+REVOKE CONNECT ON DATABASE community FROM PUBLIC;
+GRANT CONNECT ON DATABASE community TO community;
 SQL
 
-echo "四账号隔离升级完成：管理员=postgres；应用账号=memory、auth、conversation（均为非超级用户）"
+echo "五个账号隔离升级完成：管理员=postgres；应用账号=memory、auth、conversation、community（均为非超级用户）"

@@ -30,11 +30,11 @@ run_backend_unit() {
 }
 
 run_backend_integration() {
-  echo "== backend-integration: 本地 PostgreSQL 容器 + memory/auth/conversation_test 独立测试库 =="
+  echo "== backend-integration: 本地 PostgreSQL 容器 + memory/auth/conversation/community_test 独立测试库 =="
   # 干净环境首次启动时必须等待 initdb 与 healthcheck 完成，避免迁移抢跑。
   docker compose up -d --wait postgres
   # 测试库隔离（附录 A.6 #20 / 评审 P1-1）：管理员创建、迁移后经环境变量注入，
-  # 绝不触碰开发库 memory / auth / conversation
+  # 绝不触碰开发库 memory / auth / conversation / community
   local admin="${POSTGRES_ADMIN_USER:-postgres}"
   ensure_test_database() {
     local db="$1" owner="$2"
@@ -46,12 +46,15 @@ run_backend_integration() {
   ensure_test_database memory_test memory
   ensure_test_database auth_test auth
   ensure_test_database conversation_test conversation
+  ensure_test_database community_test community
   DATABASE_URL="postgresql+psycopg://memory:memory@127.0.0.1:55432/memory_test" \
     uv run alembic upgrade head
   AUTH_DATABASE_URL="postgresql+psycopg://auth:auth@127.0.0.1:55432/auth_test" \
     uv run alembic -c auth_alembic.ini upgrade head
   CONVERSATION_DATABASE_URL="postgresql+psycopg://conversation:conversation@127.0.0.1:55432/conversation_test" \
     uv run alembic -c conversation_alembic.ini upgrade head
+  COMMUNITY_DATABASE_URL="postgresql+psycopg://community:community@127.0.0.1:55432/community_test" \
+    uv run alembic -c community_alembic.ini upgrade head
   # Graph 集成测试依赖只读注册表；迁移只建表，需按启动契约显式同步权威图谱。
   DATABASE_URL="postgresql+psycopg://memory:memory@127.0.0.1:55432/memory_test" \
     uv run python -m backend.memory.cli sync-knowledge-graph --apply
@@ -63,10 +66,15 @@ run_backend_integration() {
   if [[ -d tests/conversation ]]; then
     CONVERSION_TESTS=(tests/conversation)
   fi
+  COMMUNITY_TESTS=()
+  if [[ -d tests/community ]]; then
+    COMMUNITY_TESTS=(tests/community)
+  fi
   DATABASE_URL="postgresql+psycopg://memory:memory@127.0.0.1:55432/memory_test" \
   AUTH_DATABASE_URL="postgresql+psycopg://auth:auth@127.0.0.1:55432/auth_test" \
   CONVERSATION_DATABASE_URL="postgresql+psycopg://conversation:conversation@127.0.0.1:55432/conversation_test" \
-    uv run pytest tests/integration ${FAILURE_TESTS[@]+"${FAILURE_TESTS[@]}"} ${CONVERSION_TESTS[@]+"${CONVERSION_TESTS[@]}"}
+  COMMUNITY_DATABASE_URL="postgresql+psycopg://community:community@127.0.0.1:55432/community_test" \
+    uv run pytest tests/integration ${FAILURE_TESTS[@]+"${FAILURE_TESTS[@]}"} ${CONVERSION_TESTS[@]+"${CONVERSION_TESTS[@]}"} ${COMMUNITY_TESTS[@]+"${COMMUNITY_TESTS[@]}"}
 }
 
 run_frontend() {

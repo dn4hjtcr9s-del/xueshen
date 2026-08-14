@@ -2,18 +2,36 @@
 
 对应规格 §4（标识符/时间/幂等）、§5.1（枚举）、§5.2（优先级）、
 §18.1（HMAC 域分离）、§19.9（cursor 签名契约）。
+
+v1.6（D24）：canonical_json/cursor 签名与校验已提取到 backend/shared/cursor.py，
+此处保留 re-export，既有引用点不受影响。
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
-import math
 import re
 import secrets
 import unicodedata
 from typing import Any, Literal
+
+# D24 共享化：确定性 JSON、cursor 签名/校验与 CursorError（见 backend/shared/cursor.py）
+from backend.shared.cursor import (  # re-export
+    CursorError as CursorError,
+)
+from backend.shared.cursor import (
+    canonical_json as canonical_json,
+)
+from backend.shared.cursor import (
+    cursor_principal_hash as cursor_principal_hash,
+)
+from backend.shared.cursor import (
+    sign_cursor as sign_cursor,
+)
+from backend.shared.cursor import (
+    verify_cursor as verify_cursor,
+)
 
 # ---------------------------------------------------------------------------
 # 枚举（§5.1）
@@ -206,72 +224,8 @@ def validate_existing_topic_key(key: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# RFC 8785 JSON Canonicalization（§4.5）
+# 候选匹配键与删除抑制键（§8.8 / §8.7）
 # ---------------------------------------------------------------------------
-
-_JCS_ESCAPES = {
-    '"': '\\"',
-    "\\": "\\\\",
-    "\b": "\\b",
-    "\f": "\\f",
-    "\n": "\\n",
-    "\r": "\\r",
-    "\t": "\\t",
-}
-
-
-def _jcs_string(value: str) -> str:
-    parts = ['"']
-    for ch in value:
-        if ch in _JCS_ESCAPES:
-            parts.append(_JCS_ESCAPES[ch])
-        elif ord(ch) < 0x20:
-            parts.append(f"\\u{ord(ch):04x}")
-        else:
-            parts.append(ch)
-    parts.append('"')
-    return "".join(parts)
-
-
-def _jcs_number(value: float) -> str:
-    if not math.isfinite(value):
-        raise ValueError("JCS 不支持非有限浮点数")
-    if value == int(value) and abs(value) < 1e21:
-        return str(int(value))
-    text = repr(value)
-    if "e" in text or "E" in text:
-        mantissa, _, exponent = text.lower().partition("e")
-        sign = ""
-        if exponent.startswith("+"):
-            exponent = exponent[1:]
-        elif exponent.startswith("-"):
-            sign = "-"
-            exponent = exponent[1:]
-        exponent = exponent.lstrip("0") or "0"
-        text = f"{mantissa}e{sign}{exponent}"
-    return text
-
-
-def canonical_json(value: Any) -> str:
-    """RFC 8785 JSON Canonicalization Scheme 序列化。"""
-    if value is None:
-        return "null"
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        return _jcs_number(value)
-    if isinstance(value, str):
-        return _jcs_string(value)
-    if isinstance(value, (list, tuple)):
-        return "[" + ",".join(canonical_json(item) for item in value) + "]"
-    if isinstance(value, dict):
-        items = sorted(value.items(), key=lambda kv: [ord(c) for c in str(kv[0])])
-        return "{" + ",".join(f"{_jcs_string(str(k))}:{canonical_json(v)}" for k, v in items) + "}"
-    raise TypeError(f"JCS 不支持的类型: {type(value).__name__}")
 
 
 def idempotency_payload_hash(payload: Any) -> str:
@@ -306,70 +260,6 @@ def evidence_ref_hash(key: str, ref: str) -> str:
 
 def source_ref_hash(key: str, ref: str) -> str:
     return hmac_hex(key, "source-ref:v1", ref)
-
-
-def cursor_principal_hash(key: str, user_id: str) -> str:
-    """cursor 专用短期 principal 摘要，不复用隐私域（§19.9）。"""
-    return hmac_hex(key, "cursor-principal:v1", user_id)
-
-
-# ---------------------------------------------------------------------------
-# 不透明 cursor（§19.9）
-# ---------------------------------------------------------------------------
-
-
-def sign_cursor(key: str, payload: dict[str, Any]) -> str:
-    """canonical JSON payload → base64url，追加独立 HMAC 签名。"""
-    body = canonical_json(payload).encode("utf-8")
-    body_b64 = base64.urlsafe_b64encode(body).decode("ascii").rstrip("=")
-    signature = hmac_hex(key, "cursor:v1", body_b64)
-    return f"{body_b64}.{signature}"
-
-
-class CursorError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-
-
-def verify_cursor(
-    key: str,
-    token: str,
-    *,
-    route: str,
-    principal_hash: str,
-    normalized_filters: dict[str, Any],
-    now_epoch: float,
-) -> dict[str, Any]:
-    """验签并绑定路由、主体、筛选器和过期时间。"""
-    try:
-        body_b64, signature = token.rsplit(".", 1)
-    except ValueError as exc:
-        raise CursorError("CURSOR_INVALID", "cursor 结构非法") from exc
-    expected = hmac_hex(key, "cursor:v1", body_b64)
-    if not hmac.compare_digest(expected, signature):
-        raise CursorError("CURSOR_INVALID", "cursor 签名不匹配")
-    padding = "=" * (-len(body_b64) % 4)
-    try:
-        import json
-
-        payload: dict[str, Any] = json.loads(
-            base64.urlsafe_b64decode(body_b64 + padding).decode("utf-8")
-        )
-    except Exception as exc:
-        raise CursorError("CURSOR_INVALID", "cursor payload 无法解析") from exc
-    if payload.get("route") != route:
-        raise CursorError("CURSOR_INVALID", "cursor 路由不匹配")
-    if payload.get("principal_hash") != principal_hash:
-        raise CursorError("CURSOR_INVALID", "cursor 主体不匹配")
-    if payload.get("normalized_filters") != normalized_filters:
-        raise CursorError("CURSOR_INVALID", "cursor 筛选条件不匹配")
-    expires_at = payload.get("expires_at")
-    if not isinstance(expires_at, (int, float)):
-        raise CursorError("CURSOR_INVALID", "cursor 缺少过期时间")
-    if now_epoch > float(expires_at):
-        raise CursorError("CURSOR_EXPIRED", "cursor 已过期")
-    return payload
 
 
 # ---------------------------------------------------------------------------

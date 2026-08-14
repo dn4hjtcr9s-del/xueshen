@@ -278,6 +278,80 @@ class Settings(BaseSettings):
         default="", alias="OPENAI_CONVERSATION_SUMMARY_MODEL"
     )
 
+    # ------------------------------------------------------------------
+    # Community 社区（方案 community-implementation-plan.md v1.6，§4.2/§13.2）
+    # ------------------------------------------------------------------
+
+    # D25：默认空 = 未配置时不挂载 Community 路由（含写路径与内部 Reader/purge），
+    # readiness 不报错、进程不启动失败；显式配置后按 readiness fail-closed。
+    community_database_url: str = Field(default="", alias="COMMUNITY_DATABASE_URL")
+    community_reader_base_url: str = Field(default="", alias="COMMUNITY_READER_BASE_URL")
+    community_reader_service_token: str | None = Field(
+        default=None, alias="COMMUNITY_READER_SERVICE_TOKEN"
+    )
+    community_source_delete_service_token: str | None = Field(
+        default=None, alias="COMMUNITY_SOURCE_DELETE_SERVICE_TOKEN"
+    )
+    community_account_purge_service_token: str | None = Field(
+        default=None, alias="COMMUNITY_ACCOUNT_PURGE_SERVICE_TOKEN"
+    )
+    # Feature Flags（§10.1/D7：初始默认关闭，按 deletion→evidence 顺序灰度；
+    # 存在 token 不代表已批准启用链路）
+    community_publisher_enabled: bool = Field(default=False, alias="COMMUNITY_PUBLISHER_ENABLED")
+    community_memory_submit_enabled: bool = Field(
+        default=False, alias="COMMUNITY_MEMORY_SUBMIT_ENABLED"
+    )
+    community_source_deletion_enabled: bool = Field(
+        default=False, alias="COMMUNITY_SOURCE_DELETION_ENABLED"
+    )
+    # Outbox Publisher 与维护任务（D38：与 conversation 默认值对齐）
+    community_outbox_poll_seconds: float = Field(default=1.0, alias="COMMUNITY_OUTBOX_POLL_SECONDS")
+    community_outbox_lease_seconds: int = Field(default=60, alias="COMMUNITY_OUTBOX_LEASE_SECONDS")
+    community_outbox_max_attempts: int = Field(default=10, alias="COMMUNITY_OUTBOX_MAX_ATTEMPTS")
+    community_outbox_batch_size: int = Field(default=50, alias="COMMUNITY_OUTBOX_BATCH_SIZE")
+    community_maintenance_interval_seconds: int = Field(
+        default=3600, alias="COMMUNITY_MAINTENANCE_INTERVAL_SECONDS"
+    )
+    # 保留与清理（§12.4）
+    community_idempotency_retention_days: int = Field(
+        default=7, alias="COMMUNITY_IDEMPOTENCY_RETENTION_DAYS"
+    )
+    community_outbox_delivered_retention_days: int = Field(
+        default=30, alias="COMMUNITY_OUTBOX_DELIVERED_RETENTION_DAYS"
+    )
+    community_outbox_dead_letter_retention_days: int = Field(
+        default=90, alias="COMMUNITY_OUTBOX_DEAD_LETTER_RETENTION_DAYS"
+    )
+    community_notification_retention_days: int = Field(
+        default=90, alias="COMMUNITY_NOTIFICATION_RETENTION_DAYS"
+    )
+    community_cleanup_batch_size: int = Field(default=500, alias="COMMUNITY_CLEANUP_BATCH_SIZE")
+    # 内容限制（§6.2）
+    community_post_body_max_length: int = Field(
+        default=19_500, alias="COMMUNITY_POST_BODY_MAX_LENGTH"
+    )
+    community_reply_max_length: int = Field(default=19_500, alias="COMMUNITY_REPLY_MAX_LENGTH")
+    # 限流（§9.3：墙钟固定窗口，D19 接受边界突发）
+    community_rate_limit_post_per_hour: int = Field(
+        default=10, alias="COMMUNITY_RATE_LIMIT_POST_PER_HOUR"
+    )
+    community_rate_limit_reply_per_minute: int = Field(
+        default=5, alias="COMMUNITY_RATE_LIMIT_REPLY_PER_MINUTE"
+    )
+    community_rate_limit_reply_per_hour: int = Field(
+        default=60, alias="COMMUNITY_RATE_LIMIT_REPLY_PER_HOUR"
+    )
+    community_rate_limit_like_per_minute: int = Field(
+        default=60, alias="COMMUNITY_RATE_LIMIT_LIKE_PER_MINUTE"
+    )
+    community_rate_limit_read_per_minute: int = Field(
+        default=120, alias="COMMUNITY_RATE_LIMIT_READ_PER_MINUTE"
+    )
+    # 可信代理 CIDR（D18：默认空 = 只信任直连对端）
+    community_trusted_proxy_cidrs: list[str] = Field(
+        default_factory=list, alias="COMMUNITY_TRUSTED_PROXY_CIDRS"
+    )
+
     # Embedding 复用现有配置（§20.2 / D15：不新增重复凭证）
     embedding_base_url: str | None = Field(default=None, alias="EMBEDDING_BASE_URL")
     embedding_api_key: str | None = Field(default=None, alias="EMBEDDING_API_KEY")
@@ -387,6 +461,32 @@ class Settings(BaseSettings):
                 ):
                     if not getattr(self, role_field, ""):
                         raise ValueError(f"生产环境启用 Agentic RAG 必须配置 {role_field}")
+            # D46（镜像 conversation 规则）：显式配置 Community 且 submit/删除链路
+            # 开启时，各自依赖必须齐备（§13.2 显式 bool 与 token presence 分离）：
+            # - submit：Memory 需读社区来源 → reader base url + reader token；
+            # - deletion：投递删除事实到本进程 Memory API → source_delete token
+            #   + MEMORY_API_BASE_URL（投递目标地址）。
+            # COMMUNITY_DATABASE_URL 缺失不强制（D25 不挂载语义，由 readiness 兜底）。
+            if "community_database_url" in self.model_fields_set:
+                if self.community_memory_submit_enabled:
+                    if not self.community_reader_base_url:
+                        raise ValueError(
+                            "生产环境启用 Community 证据链路必须配置 COMMUNITY_READER_BASE_URL"
+                        )
+                    if not self.community_reader_service_token:
+                        raise ValueError(
+                            "生产环境启用 Community 证据链路必须配置 COMMUNITY_READER_SERVICE_TOKEN"
+                        )
+                if self.community_source_deletion_enabled:
+                    if not self.community_source_delete_service_token:
+                        raise ValueError(
+                            "生产环境启用 Community 删除链路必须配置"
+                            " COMMUNITY_SOURCE_DELETE_SERVICE_TOKEN"
+                        )
+                    if not self.memory_api_base_url:
+                        raise ValueError(
+                            "生产环境启用 Community 删除链路必须配置 MEMORY_API_BASE_URL"
+                        )
         return self
 
     def _validate_auth_keys(self) -> None:
