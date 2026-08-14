@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,13 +21,21 @@ class RAGSettings(BaseSettings):
     embedding_model: Literal["text-embedding-v4"] = Field(
         default="text-embedding-v4", alias="RAG_EMBEDDING_MODEL"
     )
-    embedding_dimensions: Literal[1024] = Field(default=1024, alias="RAG_EMBEDDING_DIMENSIONS")
+    embedding_dimensions: int = Field(default=1024, alias="RAG_EMBEDDING_DIMENSIONS")
     lexical_pipeline_version: Literal["zh-bigram-formula/v1"] = Field(
         default="zh-bigram-formula/v1", alias="RAG_LEXICAL_PIPELINE_VERSION"
     )
     import_batch_size: int = Field(default=100, alias="RAG_IMPORT_BATCH_SIZE")
     hnsw_ef_search: int = Field(default=100, alias="RAG_HNSW_EF_SEARCH")
     rrf_k: int = Field(default=60, alias="RAG_RRF_K")
+
+    @field_validator("embedding_dimensions")
+    @classmethod
+    def validate_embedding_dimensions(cls, value: int) -> int:
+        """环境变量先解析为整数，再强制保持数据库固定的 1024 维约束。"""
+        if value != 1024:
+            raise ValueError("RAG_EMBEDDING_DIMENSIONS 必须为 1024")
+        return value
 
 
 @lru_cache

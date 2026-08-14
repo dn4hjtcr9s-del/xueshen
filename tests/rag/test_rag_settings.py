@@ -24,6 +24,7 @@ def test_rag_settings_parse_rag_only_values(monkeypatch: pytest.MonkeyPatch) -> 
     url = "postgresql+psycopg://rag:rag@127.0.0.1:55433/rag"
     monkeypatch.setenv("RAG_DATABASE_URL", url)
     monkeypatch.setenv("RAG_HNSW_EF_SEARCH", "120")
+    monkeypatch.setenv("RAG_EMBEDDING_DIMENSIONS", "1024")
 
     settings = RAGSettings(_env_file=None)
     engine = create_rag_engine(settings)
