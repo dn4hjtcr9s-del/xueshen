@@ -19,6 +19,11 @@ COPY alembic.ini ./
 # 认证服务独立迁移链（方案 §5.1 / 评审 P1-5：readiness 需解析 auth head）
 COPY auth_alembic.ini ./
 COPY auth_migrations ./auth_migrations
+# Conversation 与 Community 使用独立迁移链；readiness 需要在镜像内解析各自 head。
+COPY conversation_alembic.ini ./
+COPY conversation_migrations ./conversation_migrations
+COPY community_alembic.ini ./
+COPY community_migrations ./community_migrations
 COPY knowledge_graph ./knowledge_graph
 
 ENV KNOWLEDGE_GRAPH_ROOT=/app/knowledge_graph \
