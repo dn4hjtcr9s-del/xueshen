@@ -59,6 +59,12 @@ IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'community') THEN
 END IF; END \$\$;"
 psql_as postgres template1 \
   -c "ALTER ROLE community WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD 'community';"
+psql_as postgres template1 -c "DO \$\$ BEGIN
+IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'study') THEN
+    CREATE ROLE study LOGIN PASSWORD 'study';
+END IF; END \$\$;"
+psql_as postgres template1 \
+  -c "ALTER ROLE study WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD 'study';"
 
 # 3. 按 memory 角色当前状态分类处理
 STATE="$(psql_as postgres template1 -tAc "SELECT CASE
@@ -142,6 +148,8 @@ SELECT 'CREATE DATABASE conversation OWNER conversation'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'conversation')\gexec
 SELECT 'CREATE DATABASE community OWNER community'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'community')\gexec
+SELECT 'CREATE DATABASE study OWNER study'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'study')\gexec
 REVOKE CONNECT ON DATABASE memory FROM PUBLIC;
 GRANT CONNECT ON DATABASE memory TO memory;
 REVOKE CONNECT ON DATABASE auth FROM PUBLIC;
@@ -150,6 +158,8 @@ REVOKE CONNECT ON DATABASE conversation FROM PUBLIC;
 GRANT CONNECT ON DATABASE conversation TO conversation;
 REVOKE CONNECT ON DATABASE community FROM PUBLIC;
 GRANT CONNECT ON DATABASE community TO community;
+REVOKE CONNECT ON DATABASE study FROM PUBLIC;
+GRANT CONNECT ON DATABASE study TO study;
 SQL
 
-echo "五个账号隔离升级完成：管理员=postgres；应用账号=memory、auth、conversation、community（均为非超级用户）"
+echo "六个账号隔离升级完成：管理员=postgres；应用账号=memory、auth、conversation、community、study（均为非超级用户）"

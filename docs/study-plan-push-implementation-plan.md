@@ -1195,6 +1195,7 @@ Memory、Conversation 和 Study 之间不做跨数据库事务，统一通过 Ou
 - `STUDY_PLAN_NOT_FOUND`；
 - `STUDY_INTAKE_EXPIRED`；
 - `STUDY_INTAKE_LIMIT_EXCEEDED`；
+- `STUDY_INTAKE_NOT_FOUND`（实现期补充，v1.2：intake 不存在或不属于当前用户 → 404，与 §17 HTTP 语义一致）；
 - `ACTIVE_STUDY_PLAN_EXISTS`；
 - `STUDY_PLAN_VERSION_CONFLICT`；
 - `STUDY_TASK_VERSION_CONFLICT`；
@@ -1211,7 +1212,8 @@ Memory、Conversation 和 Study 之间不做跨数据库事务，统一通过 Ou
 - `STUDY_REVISION_NOT_FOUND`；
 - `STUDY_INVALID_REVISION_TRANSITION`；
 - `STUDY_SESSION_CONFLICT`；
-- `STUDY_OPERATION_NOT_FOUND`。
+- `STUDY_OPERATION_NOT_FOUND`；
+- `STUDY_INVALID_PLAN_TRANSITION`（实现期补充，v1.2：计划生命周期 activate/pause/resume/archive 的状态转移错误；与 D21 的 revision 转移错误分离）。
 
 继续使用统一 PublicError：
 

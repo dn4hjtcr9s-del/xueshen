@@ -16,13 +16,13 @@ MemoryManagerGraph（xueshen-math）：数学教材长期记忆 + 知识图谱 +
 ## 数据库与迁移
 
 - 本地 PostgreSQL 端口 **55432**（非默认 5432）；RAG 独立库在 **55433**（`docker-compose.rag.yml`）
-- 五条独立 Alembic 链，各有 ini：`alembic.ini`(memory)、`auth_alembic.ini`、`conversation_alembic.ini`、`community_alembic.ini`，另 `rag_alembic.ini` + `rag_migrations/`。默认 `uv run alembic upgrade head` 只迁 memory 链
+- 六条独立 Alembic 链，各有 ini：`alembic.ini`(memory)、`auth_alembic.ini`、`conversation_alembic.ini`、`community_alembic.ini`、`study_alembic.ini`，另 `rag_alembic.ini` + `rag_migrations/`。默认 `uv run alembic upgrade head` 只迁 memory 链；Study 链迁移：`STUDY_DATABASE_URL=...study uv run alembic -c study_alembic.ini upgrade head`
 - 首次初始化顺序：postgres → 各链 upgrade head → `uv run python -m backend.memory.cli sync-knowledge-graph --apply`（否则 /health/ready 报 knowledge_graph_registry_not_loaded）→ 启动各进程
 
 ## 启动（本地开发）
 
 - memory-api：`uv run uvicorn backend.app:app --port 8000`；backend/app.py 是唯一入口，按配置条件挂载 conversation/community 路由
-- 后台进程：`uv run python -m backend.memory.worker.main` / `.scheduler` / `.outbox_consumer`；Conversation：`backend.conversation.worker.main` / `backend.conversation.publisher.main`
+- 后台进程：`uv run python -m backend.memory.worker.main` / `.scheduler` / `.outbox_consumer`；Conversation：`backend.conversation.worker.main` / `backend.conversation.publisher.main`；Study（STUDY_DOMAIN_ENABLED=true 时）：`backend.study.worker.main` / `backend.study.scheduler.main` / `backend.study.publisher.main`
 - 开发认证默认开启（DEV_AUTH_ENABLED=true），用 `X-Dev-User-Id` 头模拟身份；生产下 Settings 构造强校验（RSA2048 私钥、0600 权限等），缺配置直接抛错
 - 运维细节：docs/ops/startup.md、failure-runbook.md、backup-restore.md
 
@@ -33,6 +33,7 @@ MemoryManagerGraph（xueshen-math）：数学教材长期记忆 + 知识图谱 +
 - `backend/conversation/`：Agentic RAG 对话域，独立 conversation 库 + 独立 worker/publisher，SSE 流式
 - `backend/community/`：社区域，独立 community 库；未配置 COMMUNITY_DATABASE_URL 时不挂载路由、readiness 不报错
 - `backend/rag/`：RAG 导入/检索库（独立 rag 库），被 conversation 检索复用
+- `backend/study/`：学习编排域（docs/study-plan-push-implementation-plan.md v1.2），独立 study 库；未启用 STUDY_DOMAIN_ENABLED 时不挂载路由、readiness 不报错
 - 错误：各域 `contracts/errors.py` 定义域错误，统一 PublicError 信封（code/message/retryable/trace_id）；422 区分 REQUEST_EXTRA_FIELD / INVALID_PAYLOAD
 
 ## 约定
