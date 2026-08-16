@@ -39,6 +39,19 @@ Stage 5 · 表格与图片
 删 10 个空表格；表格 HTML 保留并挂 caption。
 正文图保留占位符但带元数据：![figure](path)<!-- page=N, bbox=... -->，方便以后批量做 VLM 图注
 
+
+## embedding
+
+ocr清洗之后的数据存在：有大量过短块；存在图片、图表；表格为转换为可读文本；公式与连续上下文文本未结合。
+按照结构化过滤、补元数据、按章节组块的方式建立embedding_chunks.jsonl，进行入库
+
+
+PostgreSQL
+├── chunk 原文与元数据
+├── pgvector 向量索引
+└── 中文全文/关键词检索字段
+        ↓
+向量召回 + 关键词召回 + RRF 融合
 ## memorymangeragent
 
 ### 为什么不使用langgraphserver
