@@ -44,6 +44,34 @@
         "title": "AccountMemoryPurgeRequest",
         "type": "object"
       },
+      "AccountPurgeRequest": {
+        "additionalProperties": false,
+        "description": "内部账号清理请求（§12.8/D19：system principal）。",
+        "properties": {
+          "account_deletion_id": {
+            "format": "uuid",
+            "title": "Account Deletion Id",
+            "type": "string"
+          },
+          "requested_at": {
+            "format": "date-time",
+            "title": "Requested At",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_deletion_id",
+          "user_id",
+          "requested_at"
+        ],
+        "title": "AccountPurgeRequest",
+        "type": "object"
+      },
       "ActivityEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -141,6 +169,138 @@
           "activity_ids"
         ],
         "title": "ActivityEvidence",
+        "type": "object"
+      },
+      "CalendarDayOut": {
+        "properties": {
+          "available_minutes": {
+            "title": "Available Minutes",
+            "type": "integer"
+          },
+          "completed_minutes": {
+            "title": "Completed Minutes",
+            "type": "integer"
+          },
+          "day_of_week": {
+            "title": "Day Of Week",
+            "type": "integer"
+          },
+          "is_rest_day": {
+            "title": "Is Rest Day",
+            "type": "boolean"
+          },
+          "local_date": {
+            "format": "date",
+            "title": "Local Date",
+            "type": "string"
+          },
+          "planned_minutes": {
+            "title": "Planned Minutes",
+            "type": "integer"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/TaskOut"
+            },
+            "title": "Tasks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "local_date",
+          "day_of_week",
+          "is_rest_day",
+          "available_minutes",
+          "planned_minutes",
+          "completed_minutes",
+          "tasks"
+        ],
+        "title": "CalendarDayOut",
+        "type": "object"
+      },
+      "CalendarOut": {
+        "properties": {
+          "current_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Revision Id"
+          },
+          "plan_id": {
+            "format": "uuid",
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "start_date": {
+            "format": "date",
+            "title": "Start Date",
+            "type": "string"
+          },
+          "target_date": {
+            "format": "date",
+            "title": "Target Date",
+            "type": "string"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          },
+          "weeks": {
+            "items": {
+              "$ref": "#/components/schemas/CalendarWeekOut"
+            },
+            "title": "Weeks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "plan_id",
+          "timezone",
+          "start_date",
+          "target_date",
+          "current_revision_id",
+          "weeks"
+        ],
+        "title": "CalendarOut",
+        "type": "object"
+      },
+      "CalendarWeekOut": {
+        "properties": {
+          "days": {
+            "items": {
+              "$ref": "#/components/schemas/CalendarDayOut"
+            },
+            "title": "Days",
+            "type": "array"
+          },
+          "from": {
+            "format": "date",
+            "title": "From",
+            "type": "string"
+          },
+          "to": {
+            "format": "date",
+            "title": "To",
+            "type": "string"
+          },
+          "week_index": {
+            "title": "Week Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "week_index",
+          "from",
+          "to",
+          "days"
+        ],
+        "title": "CalendarWeekOut",
         "type": "object"
       },
       "CandidateContentView": {
@@ -1268,6 +1428,234 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HeartbeatRequest": {
+        "additionalProperties": false,
+        "description": "Session heartbeat（§12.5/D28：单调递增 seq）。",
+        "properties": {
+          "seq": {
+            "minimum": 1.0,
+            "title": "Seq",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq"
+        ],
+        "title": "HeartbeatRequest",
+        "type": "object"
+      },
+      "HomeActivePlanOut": {
+        "properties": {
+          "goal": {
+            "title": "Goal",
+            "type": "string"
+          },
+          "personalization_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "personalized",
+                  "degraded",
+                  "not_requested"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Personalization Status"
+          },
+          "plan_id": {
+            "format": "uuid",
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "progress_percent": {
+            "title": "Progress Percent",
+            "type": "integer"
+          },
+          "task_progress_percent": {
+            "title": "Task Progress Percent",
+            "type": "integer"
+          },
+          "week_label": {
+            "title": "Week Label",
+            "type": "string"
+          },
+          "workload_progress_percent": {
+            "title": "Workload Progress Percent",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plan_id",
+          "goal",
+          "week_label",
+          "personalization_status",
+          "progress_percent",
+          "task_progress_percent",
+          "workload_progress_percent"
+        ],
+        "title": "HomeActivePlanOut",
+        "type": "object"
+      },
+      "HomeDayOut": {
+        "properties": {
+          "active_minutes": {
+            "title": "Active Minutes",
+            "type": "integer"
+          },
+          "completed_task_count": {
+            "title": "Completed Task Count",
+            "type": "integer"
+          },
+          "local_date": {
+            "format": "date",
+            "title": "Local Date",
+            "type": "string"
+          },
+          "session_count": {
+            "title": "Session Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "local_date",
+          "active_minutes",
+          "completed_task_count",
+          "session_count"
+        ],
+        "title": "HomeDayOut",
+        "type": "object"
+      },
+      "HomeOut": {
+        "properties": {
+          "active_plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HomeActivePlanOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "local_date": {
+            "format": "date",
+            "title": "Local Date",
+            "type": "string"
+          },
+          "recent_7_days": {
+            "$ref": "#/components/schemas/HomeRecent7DaysOut"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone"
+          },
+          "today": {
+            "$ref": "#/components/schemas/HomeTodayOut"
+          }
+        },
+        "required": [
+          "local_date",
+          "timezone",
+          "active_plan",
+          "today",
+          "recent_7_days"
+        ],
+        "title": "HomeOut",
+        "type": "object"
+      },
+      "HomeRecent7DaysOut": {
+        "properties": {
+          "days": {
+            "items": {
+              "$ref": "#/components/schemas/HomeDayOut"
+            },
+            "title": "Days",
+            "type": "array"
+          },
+          "from": {
+            "format": "date",
+            "title": "From",
+            "type": "string"
+          },
+          "to": {
+            "format": "date",
+            "title": "To",
+            "type": "string"
+          },
+          "total_active_minutes": {
+            "title": "Total Active Minutes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "total_active_minutes",
+          "days"
+        ],
+        "title": "HomeRecent7DaysOut",
+        "type": "object"
+      },
+      "HomeTodayOut": {
+        "properties": {
+          "completed_count": {
+            "title": "Completed Count",
+            "type": "integer"
+          },
+          "generation_status": {
+            "enum": [
+              "pending",
+              "ready",
+              "no_active_plan"
+            ],
+            "title": "Generation Status",
+            "type": "string"
+          },
+          "planned_minutes": {
+            "title": "Planned Minutes",
+            "type": "integer"
+          },
+          "recommendations": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Recommendations",
+            "type": "array"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/TaskOut"
+            },
+            "title": "Tasks",
+            "type": "array"
+          },
+          "total_count": {
+            "title": "Total Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generation_status",
+          "completed_count",
+          "total_count",
+          "planned_minutes",
+          "tasks"
+        ],
+        "title": "HomeTodayOut",
+        "type": "object"
+      },
       "KnowledgeGraphSnapshot": {
         "properties": {
           "edges": {
@@ -1303,6 +1691,55 @@
           "synced_at"
         ],
         "title": "KnowledgeGraphSnapshot",
+        "type": "object"
+      },
+      "LaunchOut": {
+        "description": "task launch 稳定响应骨架（§12.5/D24）。",
+        "properties": {
+          "conversation_status": {
+            "enum": [
+              "not_requested",
+              "pending",
+              "ready",
+              "failed"
+            ],
+            "title": "Conversation Status",
+            "type": "string"
+          },
+          "conversation_thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Thread Id"
+          },
+          "launch_payload": {
+            "additionalProperties": true,
+            "title": "Launch Payload",
+            "type": "object"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "task_id": {
+            "format": "uuid",
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "session_id",
+          "conversation_status",
+          "launch_payload"
+        ],
+        "title": "LaunchOut",
         "type": "object"
       },
       "LearnerMemoryView": {
@@ -2077,6 +2514,21 @@
         "title": "MemoryNotificationPage",
         "type": "object"
       },
+      "MemoryNotificationReadAllResponse": {
+        "additionalProperties": false,
+        "description": "read-all 统一响应（方案 community §8.6 冻结：{\"unread_count\": 0}）。",
+        "properties": {
+          "unread_count": {
+            "title": "Unread Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "unread_count"
+        ],
+        "title": "MemoryNotificationReadAllResponse",
+        "type": "object"
+      },
       "MemoryOperationResult": {
         "properties": {
           "cancelled_at": {
@@ -2480,6 +2932,79 @@
         "title": "MutationResult",
         "type": "object"
       },
+      "OperationOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "operation_id": {
+            "format": "uuid",
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "operation_type": {
+            "title": "Operation Type",
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "needs_input",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "user_id",
+          "operation_type",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "OperationOut",
+        "type": "object"
+      },
       "OverrideLearnerProfileCommand": {
         "additionalProperties": false,
         "properties": {
@@ -2560,6 +3085,262 @@
           }
         },
         "title": "OverrideLearnerProfileCommand",
+        "type": "object"
+      },
+      "PlanActivateRequest": {
+        "additionalProperties": false,
+        "description": "激活计划请求（§12.2：事务内 CAS + active 唯一约束复查）。",
+        "properties": {
+          "expected_version": {
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_version"
+        ],
+        "title": "PlanActivateRequest",
+        "type": "object"
+      },
+      "PlanCreateRequest": {
+        "additionalProperties": false,
+        "description": "创建计划请求（§12.2）：manual 直录 / ai 生成两条路径。",
+        "properties": {
+          "generation_mode": {
+            "enum": [
+              "manual",
+              "ai"
+            ],
+            "title": "Generation Mode",
+            "type": "string"
+          },
+          "intent": {
+            "$ref": "#/components/schemas/PlanIntent"
+          },
+          "task_blueprint": {
+            "items": {
+              "$ref": "#/components/schemas/TaskBlueprintItem"
+            },
+            "title": "Task Blueprint",
+            "type": "array"
+          }
+        },
+        "required": [
+          "intent",
+          "generation_mode"
+        ],
+        "title": "PlanCreateRequest",
+        "type": "object"
+      },
+      "PlanIntent": {
+        "additionalProperties": false,
+        "description": "结构化计划意图（§8）。模型禁止自行补造，缺失字段由 intake 追问补齐。",
+        "properties": {
+          "duration_weeks": {
+            "anyOf": [
+              {
+                "maximum": 52.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Weeks"
+          },
+          "goal": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Goal",
+            "type": "string"
+          },
+          "preferences": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Preferences",
+            "type": "array"
+          },
+          "session_max_minutes": {
+            "maximum": 240.0,
+            "minimum": 5.0,
+            "title": "Session Max Minutes",
+            "type": "integer"
+          },
+          "session_min_minutes": {
+            "maximum": 120.0,
+            "minimum": 5.0,
+            "title": "Session Min Minutes",
+            "type": "integer"
+          },
+          "start_date": {
+            "format": "date",
+            "title": "Start Date",
+            "type": "string"
+          },
+          "target_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Date"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          },
+          "weekly_availability": {
+            "items": {
+              "$ref": "#/components/schemas/WeeklyAvailabilitySlot"
+            },
+            "maxItems": 7,
+            "minItems": 1,
+            "title": "Weekly Availability",
+            "type": "array"
+          }
+        },
+        "required": [
+          "goal",
+          "start_date",
+          "timezone",
+          "weekly_availability",
+          "session_min_minutes",
+          "session_max_minutes"
+        ],
+        "title": "PlanIntent",
+        "type": "object"
+      },
+      "PlanOut": {
+        "properties": {
+          "activated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activated At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "current_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Revision Id"
+          },
+          "goal": {
+            "title": "Goal",
+            "type": "string"
+          },
+          "personalization_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "personalized",
+                  "degraded",
+                  "not_requested"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Personalization Status"
+          },
+          "plan_id": {
+            "format": "uuid",
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "session_max_minutes": {
+            "title": "Session Max Minutes",
+            "type": "integer"
+          },
+          "session_min_minutes": {
+            "title": "Session Min Minutes",
+            "type": "integer"
+          },
+          "start_date": {
+            "format": "date",
+            "title": "Start Date",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "draft",
+              "active",
+              "paused",
+              "completed",
+              "archived"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target_date": {
+            "format": "date",
+            "title": "Target Date",
+            "type": "string"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          },
+          "weekly_minutes": {
+            "title": "Weekly Minutes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plan_id",
+          "user_id",
+          "goal",
+          "status",
+          "timezone",
+          "start_date",
+          "target_date",
+          "weekly_minutes",
+          "session_min_minutes",
+          "session_max_minutes",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "PlanOut",
         "type": "object"
       },
       "PublicError": {
@@ -2913,6 +3694,312 @@
         "title": "ReviewDecisionRequest",
         "type": "object"
       },
+      "RevisionDecisionRequest": {
+        "additionalProperties": false,
+        "description": "proposed revision 的 accept/reject 决策（§12.2/D21）。",
+        "properties": {
+          "expected_version": {
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "expected_version"
+        ],
+        "title": "RevisionDecisionRequest",
+        "type": "object"
+      },
+      "RevisionOut": {
+        "properties": {
+          "activated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activated At"
+          },
+          "base_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Revision Id"
+          },
+          "change_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Summary"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "decision_actor_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Actor Id"
+          },
+          "decision_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision At"
+          },
+          "decision_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Reason"
+          },
+          "model_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Name"
+          },
+          "personalization_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Personalization Reason"
+          },
+          "personalization_status": {
+            "enum": [
+              "personalized",
+              "degraded",
+              "not_requested"
+            ],
+            "title": "Personalization Status",
+            "type": "string"
+          },
+          "plan_id": {
+            "format": "uuid",
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "prompt_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Version"
+          },
+          "proposal_operation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposal Operation Id"
+          },
+          "reason": {
+            "enum": [
+              "initial",
+              "user_adjustment",
+              "weekly_replan",
+              "missed_task",
+              "memory_change"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "revision_id": {
+            "format": "uuid",
+            "title": "Revision Id",
+            "type": "string"
+          },
+          "revision_no": {
+            "title": "Revision No",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "proposed",
+              "active",
+              "rejected",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision_id",
+          "plan_id",
+          "revision_no",
+          "reason",
+          "status",
+          "personalization_status",
+          "created_at"
+        ],
+        "title": "RevisionOut",
+        "type": "object"
+      },
+      "SessionOut": {
+        "properties": {
+          "active_seconds": {
+            "title": "Active Seconds",
+            "type": "integer"
+          },
+          "conversation_status": {
+            "enum": [
+              "not_requested",
+              "pending",
+              "ready",
+              "failed"
+            ],
+            "title": "Conversation Status",
+            "type": "string"
+          },
+          "conversation_thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Thread Id"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "last_heartbeat_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Heartbeat At"
+          },
+          "last_heartbeat_seq": {
+            "title": "Last Heartbeat Seq",
+            "type": "integer"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "completed",
+              "abandoned"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          }
+        },
+        "required": [
+          "session_id",
+          "task_id",
+          "conversation_status",
+          "status",
+          "started_at",
+          "last_heartbeat_seq",
+          "active_seconds"
+        ],
+        "title": "SessionOut",
+        "type": "object"
+      },
       "SourceBundle": {
         "additionalProperties": false,
         "properties": {
@@ -3029,6 +4116,259 @@
           "message_ids"
         ],
         "title": "SourceReadRequest",
+        "type": "object"
+      },
+      "TaskActionRequest": {
+        "additionalProperties": false,
+        "description": "任务写操作通用请求（§12.3：expected_version）。",
+        "properties": {
+          "expected_version": {
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_version"
+        ],
+        "title": "TaskActionRequest",
+        "type": "object"
+      },
+      "TaskBlueprintItem": {
+        "additionalProperties": false,
+        "description": "用户确认的结构化任务蓝图（§8/D8）。",
+        "properties": {
+          "description": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Description",
+            "type": "string"
+          },
+          "estimated_minutes": {
+            "maximum": 480.0,
+            "minimum": 5.0,
+            "title": "Estimated Minutes",
+            "type": "integer"
+          },
+          "task_type": {
+            "enum": [
+              "learn",
+              "practice",
+              "review",
+              "assessment"
+            ],
+            "title": "Task Type",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "topic_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic Key"
+          }
+        },
+        "required": [
+          "title",
+          "task_type",
+          "estimated_minutes"
+        ],
+        "title": "TaskBlueprintItem",
+        "type": "object"
+      },
+      "TaskOut": {
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "completion_source": {
+            "anyOf": [
+              {
+                "const": "manual",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Source"
+          },
+          "completion_suggestion_pending": {
+            "default": false,
+            "title": "Completion Suggestion Pending",
+            "type": "boolean"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "estimated_minutes": {
+            "title": "Estimated Minutes",
+            "type": "integer"
+          },
+          "estimation_basis": {
+            "title": "Estimation Basis",
+            "type": "string"
+          },
+          "graph_node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Graph Node Id"
+          },
+          "order_index": {
+            "title": "Order Index",
+            "type": "integer"
+          },
+          "plan_id": {
+            "format": "uuid",
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "revision_id": {
+            "format": "uuid",
+            "title": "Revision Id",
+            "type": "string"
+          },
+          "scheduled_date": {
+            "format": "date",
+            "title": "Scheduled Date",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "plan",
+              "recommendation",
+              "manual"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed",
+              "skipped",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "task_id": {
+            "format": "uuid",
+            "title": "Task Id",
+            "type": "string"
+          },
+          "task_type": {
+            "enum": [
+              "learn",
+              "practice",
+              "review",
+              "assessment"
+            ],
+            "title": "Task Type",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "topic_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic Key"
+          },
+          "user_locked": {
+            "title": "User Locked",
+            "type": "boolean"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "task_id",
+          "plan_id",
+          "revision_id",
+          "scheduled_date",
+          "order_index",
+          "task_type",
+          "title",
+          "description",
+          "estimated_minutes",
+          "estimation_basis",
+          "source",
+          "status",
+          "user_locked",
+          "version"
+        ],
+        "title": "TaskOut",
+        "type": "object"
+      },
+      "TaskRescheduleRequest": {
+        "additionalProperties": false,
+        "description": "单任务改期（§12.3/D11：仅 pending，只改自身日期）。",
+        "properties": {
+          "expected_version": {
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "scheduled_date": {
+            "format": "date",
+            "title": "Scheduled Date",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scheduled_date",
+          "expected_version"
+        ],
+        "title": "TaskRescheduleRequest",
         "type": "object"
       },
       "ThreadListItem": {
@@ -3177,6 +4517,59 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "WeeklyAvailabilitySlot": {
+        "additionalProperties": false,
+        "description": "每周可学习日（§7.3/§8：ISO 8601，1=周一，7=周日）。",
+        "properties": {
+          "available_minutes": {
+            "minimum": 0.0,
+            "title": "Available Minutes",
+            "type": "integer"
+          },
+          "day_of_week": {
+            "description": "ISO 8601 周几（1=周一）",
+            "maximum": 7.0,
+            "minimum": 1.0,
+            "title": "Day Of Week",
+            "type": "integer"
+          },
+          "end_local_time": {
+            "anyOf": [
+              {
+                "format": "time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Local Time"
+          },
+          "is_rest_day": {
+            "default": false,
+            "title": "Is Rest Day",
+            "type": "boolean"
+          },
+          "start_local_time": {
+            "anyOf": [
+              {
+                "format": "time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Local Time"
+          }
+        },
+        "required": [
+          "day_of_week",
+          "available_minutes"
+        ],
+        "title": "WeeklyAvailabilitySlot",
         "type": "object"
       },
       "_GraphStatePutBody": {
@@ -3850,6 +5243,46 @@
         "summary": "Read Sources",
         "tags": [
           "internal-conversation"
+        ]
+      }
+    },
+    "/api/v1/internal/study-accounts/purge": {
+      "post": {
+        "description": "按 account_deletion_id 幂等清理用户全部 Study 数据（D19/§12.8）。",
+        "operationId": "purge_account_api_v1_internal_study_accounts_purge_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountPurgeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Purge Account",
+        "tags": [
+          "internal-study"
         ]
       }
     },
@@ -4694,6 +6127,28 @@
         ]
       }
     },
+    "/api/v1/memory/notifications/read-all": {
+      "post": {
+        "description": "全部已读（D14：只更新当前认证用户的未读记录；重复调用返回 200 与当前计数）。",
+        "operationId": "mark_all_notifications_read_api_v1_memory_notifications_read_all_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryNotificationReadAllResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Mark All Notifications Read",
+        "tags": [
+          "memory-notifications"
+        ]
+      }
+    },
     "/api/v1/memory/notifications/{notification_id}/read": {
       "post": {
         "description": "幂等已读（§19.6）；他人通知一律 404（§18.4）。",
@@ -5004,6 +6459,1201 @@
         "summary": "Search Memories",
         "tags": [
           "memory"
+        ]
+      }
+    },
+    "/api/v1/study/home": {
+      "get": {
+        "description": "§12.6：只读聚合；future date → 422 INVALID_PAYLOAD。",
+        "operationId": "get_home_api_v1_study_home_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HomeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Home",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/operations/{operation_id}": {
+      "get": {
+        "operationId": "get_operation_api_v1_study_operations__operation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Operation",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/plans": {
+      "get": {
+        "operationId": "list_plans_api_v1_study_plans_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PlanOut"
+                  },
+                  "title": "Response List Plans Api V1 Study Plans Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Plans",
+        "tags": [
+          "study"
+        ]
+      },
+      "post": {
+        "description": "创建计划（§12.2）。manual → 201 + 草案；ai → 202 + operation_id。",
+        "operationId": "create_plan_api_v1_study_plans_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Plan",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/plans/{plan_id}": {
+      "get": {
+        "operationId": "get_plan_api_v1_study_plans__plan_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plan Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Plan",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/plans/{plan_id}/activate": {
+      "post": {
+        "operationId": "activate_plan_api_v1_study_plans__plan_id__activate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanActivateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Activate Plan",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/plans/{plan_id}/archive": {
+      "post": {
+        "operationId": "archive_plan_api_v1_study_plans__plan_id__archive_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanActivateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Archive Plan",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/plans/{plan_id}/calendar": {
+      "get": {
+        "description": "§12.2/D26：只读、无副作用，覆盖完整计划日期范围。",
+        "operationId": "get_calendar_api_v1_study_plans__plan_id__calendar_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plan Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalendarOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Calendar",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/plans/{plan_id}/pause": {
+      "post": {
+        "operationId": "pause_plan_api_v1_study_plans__plan_id__pause_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanActivateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pause Plan",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/plans/{plan_id}/resume": {
+      "post": {
+        "operationId": "resume_plan_api_v1_study_plans__plan_id__resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanActivateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resume Plan",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/plans/{plan_id}/revisions": {
+      "get": {
+        "operationId": "list_revisions_api_v1_study_plans__plan_id__revisions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plan Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RevisionOut"
+                  },
+                  "title": "Response List Revisions Api V1 Study Plans  Plan Id  Revisions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Revisions",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/plans/{plan_id}/revisions/{revision_id}/accept": {
+      "post": {
+        "operationId": "accept_revision_api_v1_study_plans__plan_id__revisions__revision_id__accept_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "revision_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Revision Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevisionDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Accept Revision",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/plans/{plan_id}/revisions/{revision_id}/reject": {
+      "post": {
+        "operationId": "reject_revision_api_v1_study_plans__plan_id__revisions__revision_id__reject_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "revision_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Revision Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevisionDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reject Revision",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/sessions/{session_id}": {
+      "get": {
+        "description": "只读返回 Session、conversation_status 与可能已回填的 thread id（§12.5）。",
+        "operationId": "get_session_api_v1_study_sessions__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Session",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/sessions/{session_id}/finish": {
+      "post": {
+        "description": "结束 Session（§12.5：结算最后有效区间，写入 daily_stats）。",
+        "operationId": "finish_session_api_v1_study_sessions__session_id__finish_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Finish Session",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/sessions/{session_id}/heartbeat": {
+      "post": {
+        "description": "§12.5：单调 seq；相同 seq 幂等重放，乱序 409，过快 429 RATE_LIMITED。",
+        "operationId": "heartbeat_api_v1_study_sessions__session_id__heartbeat_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HeartbeatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Heartbeat",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/tasks/{task_id}/complete": {
+      "post": {
+        "operationId": "complete_task_api_v1_study_tasks__task_id__complete_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Complete Task",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/tasks/{task_id}/launch": {
+      "post": {
+        "operationId": "launch_task_api_v1_study_tasks__task_id__launch_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Launch Task",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/tasks/{task_id}/reopen": {
+      "post": {
+        "operationId": "reopen_task_api_v1_study_tasks__task_id__reopen_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reopen Task",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/tasks/{task_id}/reschedule": {
+      "post": {
+        "operationId": "reschedule_task_api_v1_study_tasks__task_id__reschedule_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskRescheduleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reschedule Task",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/tasks/{task_id}/skip": {
+      "post": {
+        "operationId": "skip_task_api_v1_study_tasks__task_id__skip_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Skip Task",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/tasks/{task_id}/start": {
+      "post": {
+        "operationId": "start_task_api_v1_study_tasks__task_id__start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Task",
+        "tags": [
+          "study"
         ]
       }
     },

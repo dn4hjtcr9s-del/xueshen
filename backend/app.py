@@ -413,6 +413,8 @@ def create_app(
         """
         trace_id = getattr(request.state, "trace_id", None) or ""
         current_version = getattr(exc, "current_version", None)
+        retry_after = getattr(exc, "retry_after", None)
+        headers = {"Retry-After": str(retry_after)} if retry_after else None
         return JSONResponse(
             status_code=exc.http_status,
             content=_public_error_body(
@@ -423,6 +425,7 @@ def create_app(
                 field=exc.field,
                 current_version=current_version,
             ),
+            headers=headers,
         )
 
     @app.exception_handler(CommunityError)
@@ -453,6 +456,8 @@ def create_app(
         """
         trace_id = getattr(request.state, "trace_id", None) or ""
         current_version = getattr(exc, "current_version", None)
+        retry_after = getattr(exc, "retry_after", None)
+        headers = {"Retry-After": str(retry_after)} if retry_after else None
         return JSONResponse(
             status_code=exc.http_status,
             content=_public_error_body(
@@ -463,6 +468,7 @@ def create_app(
                 field=exc.field,
                 current_version=current_version,
             ),
+            headers=headers,
         )
 
     @app.exception_handler(AuthRuntimeUnavailableError)

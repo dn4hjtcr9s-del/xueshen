@@ -4,13 +4,14 @@ build_study_routers(app) 在 FastAPI 运行时装配（对齐 Conversation/Commu
 - STUDY_DOMAIN_ENABLED=false 或未配置 STUDY_DATABASE_URL → 返回 None，路由不挂载（§21）；
 - 启用并配置后创建 StudyDatabase + StudyRuntime，挂到
   app.state.study_db / app.state.study_runtime 供依赖使用；
-- 内部 purge 路由仅在配置了 STUDY_ACCOUNT_PURGE_SERVICE_TOKEN 时挂载（D19 fail-closed）。
+- 内部 purge 路由由 app.py 仅在配置 STUDY_ACCOUNT_PURGE_SERVICE_TOKEN 时挂载（D19）。
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, FastAPI
 
+from backend.study.api import home, operations, plans, sessions, tasks
 from backend.study.api.dependencies import StudyRuntime
 from backend.study.persistence.database import StudyDatabase
 
@@ -33,5 +34,10 @@ def build_study_routers(app: FastAPI) -> APIRouter | None:
     runtime = StudyRuntime(settings=settings, database=db)
     app.state.study_db = db
     app.state.study_runtime = runtime
-    router = APIRouter()
+    router = APIRouter(prefix="/api/v1/study", tags=["study"])
+    router.include_router(plans.router)
+    router.include_router(tasks.router)
+    router.include_router(sessions.router)
+    router.include_router(home.router)
+    router.include_router(operations.router)
     return router

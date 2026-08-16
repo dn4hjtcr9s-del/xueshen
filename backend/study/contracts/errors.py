@@ -31,6 +31,9 @@ STUDY_ERROR_CODES: frozenset[str] = frozenset(
         "STUDY_INVALID_REVISION_TRANSITION",
         "STUDY_SESSION_CONFLICT",
         "STUDY_OPERATION_NOT_FOUND",
+        # 实现期补充（§12.2 生命周期端点需要区分计划状态转移错误；
+        # 与 D21 的 revision 转移错误分离，避免语义混淆）
+        "STUDY_INVALID_PLAN_TRANSITION",
     }
 )
 
@@ -198,3 +201,22 @@ class StudyOperationNotFoundError(StudyError):
 
     code = "STUDY_OPERATION_NOT_FOUND"
     http_status = 404
+
+
+class StudyInvalidPlanTransitionError(StudyError):
+    """计划生命周期状态转移非法（§12.2 实现期补充：activate/pause/resume/archive）。"""
+
+    code = "STUDY_INVALID_PLAN_TRANSITION"
+    http_status = 409
+
+
+class StudyRateLimitedError(StudyError):
+    """速率限制（§17：429，含过快 heartbeat，错误码 RATE_LIMITED）。"""
+
+    code = "RATE_LIMITED"
+    http_status = 429
+    retryable = True
+
+    def __init__(self, message: str, *, retry_after: int) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after

@@ -46,6 +46,9 @@ SCOPE_MEMORY_SOURCE_DELETE = "memory:source_delete"
 # 独立 system principal（D36），加入 ALL_SCOPES 但不加入 AGENT_ALLOWED_SCOPES
 SCOPE_COMMUNITY_SOURCE_READ = "community:source_read"
 SCOPE_COMMUNITY_ACCOUNT_PURGE = "community:account_purge"
+# Study 域内部 scope（方案 study §12.8/D19）：独立 system principal，
+# 加入 ALL_SCOPES 但不加入 AGENT_ALLOWED_SCOPES、不授予普通用户
+SCOPE_STUDY_ACCOUNT_PURGE = "study:account_purge"
 
 ALL_SCOPES: frozenset[str] = frozenset(
     {
@@ -64,6 +67,7 @@ ALL_SCOPES: frozenset[str] = frozenset(
         SCOPE_MEMORY_SOURCE_DELETE,
         SCOPE_COMMUNITY_SOURCE_READ,
         SCOPE_COMMUNITY_ACCOUNT_PURGE,
+        SCOPE_STUDY_ACCOUNT_PURGE,
     }
 )
 
