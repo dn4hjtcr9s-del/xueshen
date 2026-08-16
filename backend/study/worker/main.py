@@ -25,25 +25,80 @@ from backend.study.graph.builder import build_plan_generation_graph
 from backend.study.persistence.database import StudyDatabase
 
 
-async def _run_operation(
+async def _run_daily_feed(
     *,
     operation: dict[str, Any],
     session_factory: Any,
-    graph: Any,
+    graphs: dict[str, Any],
     worker_id: str,
     settings: Settings,
     logger: logging.Logger,
 ) -> dict[str, Any]:
-    """执行单个 operation（plan_generation 当前唯一类型）。"""
+    """Daily Feed Graph（§9.3）：失败把 feed run 标记 failed，不虚构推荐（§16）。"""
+    from backend.study.services import feed_service
+
+    payload = operation["payload"] or {}
+    state = {
+        "user_id": str(operation["user_id"]),
+        "operation_id": str(operation["operation_id"]),
+        "feed_run_id": payload.get("feed_run_id", ""),
+        "plan_id": payload.get("plan_id", ""),
+        "revision_id": payload.get("revision_id"),
+        "local_date": payload.get("local_date", ""),
+        "timezone": payload.get("timezone", ""),
+        "memory_context": None,
+        "formal_items": [],
+        "recommendation_items": [],
+    }
+    graph = graphs["daily_feed"]
+    try:
+        result = await graph.ainvoke(
+            state,
+            config={
+                "configurable": {
+                    "thread_id": str(operation["operation_id"]),
+                    "worker_id": worker_id,
+                }
+            },
+        )
+    except Exception as exc:
+        if payload.get("feed_run_id"):
+            await feed_service.fail_feed_run(
+                session_factory,
+                feed_run_id=UUID(payload["feed_run_id"]),
+                error_code=type(exc).__name__,
+            )
+        raise
+    return {"feed_run_id": result.get("feed_run_id")}
+
+
+async def _run_operation(
+    *,
+    operation: dict[str, Any],
+    session_factory: Any,
+    graphs: dict[str, Any],
+    worker_id: str,
+    settings: Settings,
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    """执行单个 operation（plan_generation / daily_feed_generation）。"""
     operation_type = str(operation["operation_type"])
+    if operation_type == "daily_feed_generation":
+        return await _run_daily_feed(
+            operation=operation,
+            session_factory=session_factory,
+            graphs=graphs,
+            worker_id=worker_id,
+            settings=settings,
+            logger=logger,
+        )
     if operation_type != "plan_generation":
         raise ValueError(f"未知 operation 类型: {operation_type}")
+    graph = graphs["plan_generation"]
     payload = operation["payload"] or {}
     intent = payload.get("intent") or {}
     # 去掉内部确认标记（intake confirm 写入）
     intent = {k: v for k, v in intent.items() if not k.startswith("_")}
-    from langgraph.types import Command
-
     initial_state = {
         "user_id": str(operation["user_id"]),
         "operation_id": str(operation["operation_id"]),
@@ -57,7 +112,7 @@ async def _run_operation(
         "error": None,
     }
     result = await graph.ainvoke(
-        Command(resume=None, update=initial_state),
+        initial_state,
         config={
             "configurable": {"thread_id": str(operation["operation_id"]), "worker_id": worker_id}
         },
@@ -240,7 +295,17 @@ async def run_forever(settings: Settings) -> None:
             )
         )
 
-    graph = build_plan_generation_graph(
+    from backend.study.graph.builder import build_daily_feed_graph
+
+    graphs: dict[str, Any] = {}
+    graphs["plan_generation"] = build_plan_generation_graph(
+        settings=settings,
+        session_factory=db.session_factory,
+        openai_gateway=openai_gateway,
+        memory_gateway=memory_gateway,
+        logger=logger,
+    )
+    graphs["daily_feed"] = build_daily_feed_graph(
         settings=settings,
         session_factory=db.session_factory,
         openai_gateway=openai_gateway,
@@ -249,7 +314,8 @@ async def run_forever(settings: Settings) -> None:
     )
     async with AsyncPostgresSaver.from_conn_string(saver_url) as saver:
         await saver.setup()
-        graph = graph.with_config(checkpointer=saver)
+        for name in graphs:
+            graphs[name] = graphs[name].with_config(checkpointer=saver)
         logger.info(
             "Study Worker 启动: %s concurrency=%s", worker_id, settings.study_worker_concurrency
         )
@@ -284,7 +350,7 @@ async def run_forever(settings: Settings) -> None:
                     result = await _run_operation(
                         operation=operation,
                         session_factory=db.session_factory,
-                        graph=graph,
+                        graphs=graphs,
                         worker_id=worker_id,
                         settings=settings,
                         logger=logger,

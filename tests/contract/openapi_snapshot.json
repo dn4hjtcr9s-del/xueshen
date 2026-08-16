@@ -1,6 +1,26 @@
 {
   "components": {
     "schemas": {
+      "AcceptRecommendationOut": {
+        "properties": {
+          "feed_item_id": {
+            "format": "uuid",
+            "title": "Feed Item Id",
+            "type": "string"
+          },
+          "task_id": {
+            "format": "uuid",
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "feed_item_id",
+          "task_id"
+        ],
+        "title": "AcceptRecommendationOut",
+        "type": "object"
+      },
       "AccountMemoryPurgeRequest": {
         "additionalProperties": false,
         "description": "POST /internal/account-memory/purge 请求体；不允许直接注入内部 user_id。",
@@ -914,6 +934,38 @@
           "restore_until"
         ],
         "title": "DeletedMemoryItem",
+        "type": "object"
+      },
+      "EnsureTodayOut": {
+        "properties": {
+          "feed_run_id": {
+            "format": "uuid",
+            "title": "Feed Run Id",
+            "type": "string"
+          },
+          "generation_status": {
+            "default": "queued",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "stale"
+            ],
+            "title": "Generation Status",
+            "type": "string"
+          },
+          "operation_id": {
+            "format": "uuid",
+            "title": "Operation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "feed_run_id",
+          "operation_id"
+        ],
+        "title": "EnsureTodayOut",
         "type": "object"
       },
       "ForgetMemoryCommand": {
@@ -6592,6 +6644,49 @@
         ]
       }
     },
+    "/api/v1/study/home/ensure-today": {
+      "post": {
+        "description": "D9/D22：显式触发当日 feed（业务键 (user_id, plan_id, local_date)）。",
+        "operationId": "ensure_today_api_v1_study_home_ensure_today_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnsureTodayOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ensure Today",
+        "tags": [
+          "study"
+        ]
+      }
+    },
     "/api/v1/study/intakes": {
       "post": {
         "operationId": "create_intake_api_v1_study_intakes_post",
@@ -7385,6 +7480,108 @@
           }
         },
         "summary": "Reject Revision",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/recommendations/{feed_item_id}/accept": {
+      "post": {
+        "operationId": "accept_recommendation_api_v1_study_recommendations__feed_item_id__accept_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "feed_item_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Feed Item Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptRecommendationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Accept Recommendation",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/recommendations/{feed_item_id}/dismiss": {
+      "post": {
+        "operationId": "dismiss_recommendation_api_v1_study_recommendations__feed_item_id__dismiss_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "feed_item_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Feed Item Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dismiss Recommendation",
         "tags": [
           "study"
         ]

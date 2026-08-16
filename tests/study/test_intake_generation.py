@@ -188,7 +188,7 @@ class TestPlanGeneration:
         result = await _run_operation(
             operation=dict(row),
             session_factory=study_session_factory,
-            graph=graph,
+            graphs={"plan_generation": graph},
             worker_id="test-worker",
             settings=settings,
             logger=__import__("logging").getLogger("test"),

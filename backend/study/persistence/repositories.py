@@ -656,7 +656,7 @@ async def sum_tasks_minutes_for_date(
             FROM study_tasks
             WHERE plan_id = :plan_id AND scheduled_date = :scheduled_date
               AND status <> 'cancelled'
-              AND task_id <> COALESCE(:exclude, '00000000-0000-0000-0000-000000000000')
+              AND task_id <> COALESCE(:exclude, '00000000-0000-0000-0000-000000000000'::uuid)
             """
         ),
         {

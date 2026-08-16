@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypedDict
 from uuid import UUID
 
 from langgraph.graph import END, StateGraph
@@ -20,6 +20,7 @@ from backend.study.contracts.errors import StudyPlanGenerationFailedError
 from backend.study.contracts.graph import PlanBlueprint, PlanGenerationState
 from backend.study.gateways.memory import StudyMemoryGateway, context_hash
 from backend.study.gateways.openai import StudyOpenAIGateway
+from backend.study.persistence import repositories as repo
 from backend.study.services import plan_service
 
 PLAN_PROMPT_VERSION = "plan-v1"
@@ -30,6 +31,160 @@ PLAN_SYSTEM_PROMPT = """你是数学学习计划设计助手。根据学习目�
 2. topic_key 与 graph_node_id 只能从后端提供的候选列表选择，禁止编造；
 3. estimated_minutes 是估算值，最终由确定性排期引擎归一化；
 4. 学习内容与复习任务数量保持均衡。"""
+
+
+FEED_PROMPT_VERSION = "feed-v1"
+
+FEED_SYSTEM_PROMPT = """你是数学学习每日推荐助手。根据用户正式任务、长期记忆与知识图谱
+候选推荐，生成最多两条自适应推荐任务卡。规则：
+1. 推荐标题具体、可执行，理由用一句中文说明；
+2. topic_key 与 graph_node_id 只能从后端提供的候选列表选择，禁止编造；
+3. estimated_minutes 考虑当天剩余时间，不压过用户正式计划；
+4. 没有合适候选时 recommendations 返回空数组。"""
+
+
+def build_daily_feed_graph(
+    *,
+    settings: Settings,
+    session_factory: Any,
+    openai_gateway: StudyOpenAIGateway | None,
+    memory_gateway: StudyMemoryGateway | None,
+    logger: logging.Logger | None = None,
+) -> Any:
+    """Daily Feed Graph（§9.3）：正式任务 + 最多两条自适应推荐。"""
+    from datetime import date as _date
+
+    from langgraph.graph import END, StateGraph
+
+    from backend.study.contracts.graph import DailyFeedBlueprint
+
+    logger = logger or logging.getLogger("study.graph.daily_feed")
+
+    class FeedState(TypedDict, total=False):
+        user_id: str
+        operation_id: str
+        feed_run_id: str
+        plan_id: str
+        revision_id: str | None
+        local_date: str
+        timezone: str
+        memory_context: dict[str, Any] | None
+        formal_items: list[dict[str, Any]]
+        recommendation_items: list[dict[str, Any]]
+
+    async def read_inputs(state: FeedState) -> FeedState:
+        state["formal_items"] = []
+        state["recommendation_items"] = []
+        return state
+
+    async def load_memory(state: FeedState) -> FeedState:
+        memory_context: dict[str, Any] | None = None
+        if settings.study_daily_feed_enabled and settings.study_memory_read_enabled:
+            if memory_gateway is None:
+                raise StudyPlanGenerationFailedError("Memory Gateway 未装配（daily feed 已开启）")
+            try:
+                memory_context = await memory_gateway.read_context(query="今日学习推荐")
+            except Exception as exc:
+                logger.warning("Daily feed Memory 不可用，仅展示正式任务: %s", type(exc).__name__)
+                memory_context = None
+        state["memory_context"] = memory_context
+        return state
+
+    async def generate(state: FeedState) -> FeedState:
+
+        candidates = _candidate_topics(state.get("memory_context"))
+        recommendations: list[Any] = []
+        if settings.study_daily_feed_enabled and candidates and openai_gateway is not None:
+            async with session_factory() as session:
+                blueprint = await openai_gateway.structured_call(
+                    session=session,
+                    user_id=UUID(state["user_id"]),
+                    operation_id=UUID(state["operation_id"]),
+                    purpose="feed",
+                    prompt_version=FEED_PROMPT_VERSION,
+                    system_prompt=FEED_SYSTEM_PROMPT,
+                    user_payload={
+                        "local_date": state["local_date"],
+                        "candidate_topics": candidates[:6],
+                    },
+                    text_format=DailyFeedBlueprint,
+                    cache_retention_days=settings.study_model_response_cache_retention_days,
+                    now=datetime.now(UTC),
+                )
+                await session.commit()
+            for rec in blueprint.recommendations:
+                if rec.graph_node_id and rec.graph_node_id not in {
+                    c["graph_node_id"] for c in candidates if c.get("graph_node_id")
+                }:
+                    raise StudyPlanGenerationFailedError(
+                        f"feed 输出候选集外 graph_node_id: {rec.graph_node_id}"
+                    )
+                recommendations.append(
+                    {
+                        "source_type": "recommendation",
+                        "task_id": None,
+                        "topic_key": rec.topic_key,
+                        "graph_node_id": rec.graph_node_id,
+                        "title": rec.title,
+                        "reason": "今日自适应推荐（Memory/图谱信号）",
+                        "reason_codes": ["NEXT_GRAPH_NODE"],
+                        "estimated_minutes": rec.estimated_minutes,
+                        "launch_payload": {
+                            "topic_key": rec.topic_key,
+                            "graph_node_id": rec.graph_node_id,
+                        },
+                    }
+                )
+        state["recommendation_items"] = recommendations
+        return state
+
+    async def persist(state: FeedState) -> FeedState:
+        from backend.study.services import feed_service as fs
+
+        async with session_factory() as session:
+            formal = await repo.list_tasks_for_date(
+                session,
+                plan_id=UUID(state["plan_id"]),
+                scheduled_date=_date.fromisoformat(state["local_date"]),
+            )
+            items = [
+                {
+                    "source_type": "formal_task",
+                    "task_id": t["task_id"],
+                    "topic_key": t["topic_key"],
+                    "graph_node_id": t["graph_node_id"],
+                    "title": t["title"],
+                    "reason": "今日正式任务",
+                    "reason_codes": [],
+                    "estimated_minutes": t["estimated_minutes"],
+                    "launch_payload": {
+                        "task_id": str(t["task_id"]),
+                        "topic_key": t["topic_key"],
+                        "graph_node_id": t["graph_node_id"],
+                    },
+                }
+                for t in formal
+            ]
+            items.extend(state.get("recommendation_items", []))
+            await fs.persist_feed_result(
+                session,
+                feed_run_id=UUID(state["feed_run_id"]),
+                items=items,
+                now=datetime.now().astimezone(),
+            )
+        return state
+
+    graph = StateGraph(FeedState)
+    graph.add_node("read_inputs", read_inputs)
+    graph.add_node("load_memory", load_memory)
+    graph.add_node("generate", generate)
+    graph.add_node("persist", persist)
+    graph.set_entry_point("read_inputs")
+    graph.add_edge("read_inputs", "load_memory")
+    graph.add_edge("load_memory", "generate")
+    graph.add_edge("generate", "persist")
+    graph.add_edge("persist", END)
+    return graph.compile()
 
 
 def build_plan_generation_graph(

@@ -108,6 +108,9 @@ def test_openapi_contains_study_routes() -> None:
         "/api/v1/study/sessions/{session_id}/heartbeat",
         "/api/v1/study/sessions/{session_id}/finish",
         "/api/v1/study/home",
+        "/api/v1/study/home/ensure-today",
+        "/api/v1/study/recommendations/{feed_item_id}/accept",
+        "/api/v1/study/recommendations/{feed_item_id}/dismiss",
         "/api/v1/study/operations/{operation_id}",
         "/api/v1/internal/study-accounts/purge",
     }
