@@ -1,6 +1,6 @@
 # AGENTS.md
 
-MemoryManagerGraph（gewu-math-memory）：数学教材长期记忆 + 知识图谱 + 对话/社区服务。FastAPI 单进程多域后端 + React(Vite) 前端，uv 管理，Python 3.13（`[tool.uv] package = false`，无 README，文档全在根目录 spec md 与 `docs/`）。
+MemoryManagerGraph（xueshen-math）：数学教材长期记忆 + 知识图谱 + 对话/社区服务。FastAPI 单进程多域后端 + React(Vite) 前端，uv 管理，Python 3.13（`[tool.uv] package = false`，快速上手见 `README.md` / `README.en.md`，设计文档在根目录 spec md 与 `docs/`）。
 
 ## 命令
 

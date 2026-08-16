@@ -1,5 +1,5 @@
 [project]
-name = "gewu-math-memory"
+name = "xueshen-math"
 version = "0.1.0"
 description = "MemoryManagerGraph: 长期记忆与知识图谱状态服务"
 requires-python = ">=3.13,<3.14"
