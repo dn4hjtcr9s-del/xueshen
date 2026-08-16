@@ -31,7 +31,7 @@ export function LoginPage({ onGoRegister }: { onGoRegister: () => void }) {
   return (
     <div className="auth-screen">
       <div className="auth-card card">
-        <div className="brand-seal" title="格物 · Math Studio">格</div>
+        <div className="brand-seal" title="学神 · Math Studio">学</div>
         <h1 className="auth-title">欢迎回来</h1>
         <p className="auth-sub">登录后继续你的数学学习记忆</p>
         {logoutWarning && <div className="auth-warning">{logoutWarning}</div>}

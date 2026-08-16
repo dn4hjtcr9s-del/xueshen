@@ -38,6 +38,25 @@ const TABS = [
 
 type TabKey = (typeof TABS)[number]["key"];
 
+// 讨论区阶段筛选：前端统一展示 全部/初中/高中/大学。
+// 后端板块 slug 暂保持既有契约，这里做展示层映射，避免改坏发帖与记忆链路。
+const STAGE_FILTERS = [
+  { key: "all", label: "全部", slug: null },
+  { key: "junior-high", label: "初中", slug: "linear-algebra" },
+  { key: "senior-high", label: "高中", slug: "calculus" },
+  { key: "college", label: "大学", slug: "probability" },
+] as const;
+
+type StageKey = (typeof STAGE_FILTERS)[number]["key"];
+
+const STAGE_LABEL_BY_SLUG: Record<string, string> = Object.fromEntries(
+  STAGE_FILTERS.filter((item) => item.slug !== null).map((item) => [item.slug, item.label]),
+);
+
+function boardDisplayName(board: Pick<CommunityBoard, "slug" | "name">): string {
+  return STAGE_LABEL_BY_SLUG[board.slug] ?? board.name;
+}
+
 // ---------------------------------------------------------------------------
 // 小组件
 // ---------------------------------------------------------------------------
@@ -81,7 +100,7 @@ function PostRow({
           {post.title}
         </div>
         <div className="post-meta">
-          <span className="tag">{post.board.name}</span>
+          <span className="tag">{boardDisplayName(post.board)}</span>
           <span>{post.author.display_name}</span>
           <span>{RelativeTime(post.last_activity_at)}</span>
         </div>
@@ -194,39 +213,69 @@ type Sort = "latest" | "unanswered";
 
 function DiscussionList({ onOpenPost }: { onOpenPost: (postId: string) => void }) {
   const [boards, setBoards] = useState<CommunityBoard[]>([]);
-  const [boardId, setBoardId] = useState<string>("");
+  const [stage, setStage] = useState<StageKey>("all");
   const [sort, setSort] = useState<Sort>("latest");
   const [posts, setPosts] = useState<CommunityPostSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [composing, setComposing] = useState(false);
+  const selectedStage = STAGE_FILTERS.find((item) => item.key === stage);
+  const activeBoardId =
+    selectedStage?.slug === null || selectedStage?.slug === undefined
+      ? ""
+      : boards.find((board) => board.slug === selectedStage.slug)?.board_id ?? "";
+  const stageBoards = STAGE_FILTERS.flatMap((item) => {
+    if (!item.slug) return [];
+    const board = boards.find((candidate) => candidate.slug === item.slug);
+    return board ? [{ ...board, name: item.label }] : [];
+  });
+  const postsRef = useRef<CommunityPostSummary[]>([]);
+  const requestSeq = useRef(0);
+  const hasLoadedOnce = useRef(false);
+
+  useEffect(() => {
+    postsRef.current = posts;
+  }, [posts]);
 
   const load = useCallback(
     async (cursor: string | null, append: boolean) => {
+      const requestId = requestSeq.current + 1;
+      requestSeq.current = requestId;
+
+      // 只有首次加载才显示骨架屏；切换板块/排序（即使当前列表为空）统一走
+      // 轻量刷新态，避免“空态 → 骨架屏 → 列表”或“旧列表 → 骨架屏 → 新列表”的闪烁。
       if (append) setLoadingMore(true);
+      else if (hasLoadedOnce.current) setRefreshing(true);
       else setLoading(true);
       setError(null);
       try {
         const page = await listPosts({
-          board_id: boardId || undefined,
+          board_id: activeBoardId || undefined,
           sort,
           cursor: cursor ?? undefined,
           limit: 20,
         });
+        if (requestId !== requestSeq.current) return;
         setPosts((prev) => (append ? [...prev, ...page.items] : page.items));
         setNextCursor(page.next_cursor);
         setHasMore(page.has_more);
       } catch (e) {
+        if (requestId !== requestSeq.current) return;
         setError(e instanceof Error ? e.message : "加载失败");
       } finally {
-        setLoading(false);
-        setLoadingMore(false);
+        if (requestId === requestSeq.current) {
+          if (!append) hasLoadedOnce.current = true;
+          setLoading(false);
+          setRefreshing(false);
+          setLoadingMore(false);
+        }
       }
     },
-    [boardId, sort],
+    [activeBoardId, sort],
   );
 
   useEffect(() => {
@@ -243,21 +292,20 @@ function DiscussionList({ onOpenPost }: { onOpenPost: (postId: string) => void }
     <div className="rise">
       <div className="comm-toolbar">
         <div className="comm-filters">
-          <button
-            className={`comm-chip ${boardId === "" ? "active" : ""}`}
-            onClick={() => setBoardId("")}
-          >
-            全部
-          </button>
-          {boards.map((b) => (
+          {STAGE_FILTERS.map((item) => (
             <button
-              key={b.board_id}
-              className={`comm-chip ${boardId === b.board_id ? "active" : ""}`}
-              onClick={() => setBoardId(b.board_id)}
+              key={item.key}
+              className={`comm-chip ${stage === item.key ? "active" : ""}`}
+              onClick={() => setStage(item.key)}
             >
-              {b.name}
+              {item.label}
             </button>
           ))}
+          {refreshing && (
+            <span className="comm-refreshing-inline" role="status">
+              <Loader2 className="spin" size={13} /> 更新中
+            </span>
+          )}
         </div>
         <div className="comm-sort">
           <button
@@ -284,7 +332,7 @@ function DiscussionList({ onOpenPost }: { onOpenPost: (postId: string) => void }
 
       {composing && (
         <ComposePanel
-          boards={boards}
+          boards={stageBoards}
           onCancel={() => setComposing(false)}
           onDone={() => {
             setComposing(false);
@@ -295,10 +343,19 @@ function DiscussionList({ onOpenPost }: { onOpenPost: (postId: string) => void }
 
       {loading && <SkeletonRows />}
 
-      {error && (
+      {error && posts.length === 0 && (
         <div className="comm-empty">
           <p>{error}</p>
           <button className="btn btn-primary" onClick={() => void load(null, false)}>
+            重试
+          </button>
+        </div>
+      )}
+
+      {error && posts.length > 0 && (
+        <div className="comm-error-inline" role="alert">
+          <span>{error}</span>
+          <button className="link-btn" onClick={() => void load(null, false)}>
             重试
           </button>
         </div>
@@ -310,15 +367,15 @@ function DiscussionList({ onOpenPost }: { onOpenPost: (postId: string) => void }
         </div>
       )}
 
-      {!loading && !error && posts.length > 0 && (
-        <div className="post-list">
+      {posts.length > 0 && (
+        <div className={`post-list ${refreshing ? "is-refreshing" : ""}`}>
           {posts.map((p, i) => (
             <PostRow key={p.post_id} post={p} index={i} onClick={() => onOpenPost(p.post_id)} />
           ))}
         </div>
       )}
 
-      {hasMore && (
+      {hasMore && !refreshing && (
         <div className="comm-loadmore">
           <button
             className="btn btn-ghost"
@@ -415,7 +472,7 @@ function DiscussionDetail({ postId, onBack }: { postId: string; onBack: () => vo
           {post.deleted ? "该帖子已被作者删除" : post.title}
         </div>
         <div className="post-meta">
-          <span className="tag">{post.board.name}</span>
+          <span className="tag">{boardDisplayName(post.board)}</span>
           <span>{post.author.display_name}</span>
           <span>{RelativeTime(post.created_at)}</span>
           {post.solved && <span className="tag">已解决</span>}

@@ -7,9 +7,27 @@ import rehypeKatex from "rehype-katex";
 import { Bookmark, Copy, Plus, SendHorizontal, ThumbsDown, ThumbsUp } from "lucide-react";
 import { useConversation } from "../hooks/useConversation";
 import { useTurnStream } from "../hooks/useTurnStream";
+import { addNote } from "../notebookStore";
 import type { ConversationMessage } from "../types/conversation";
 
-export function ChatPage() {
+function excerptFromAnswer(answer: string): string {
+  return answer
+    .replace(/```/g, "")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/\*\*|__|~~|\$\$/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 280);
+}
+
+function questionBefore(messages: ConversationMessage[], index: number): string {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user") return messages[i].content;
+  }
+  return messages.find((message) => message.role === "user")?.content ?? "未命名问题";
+}
+
+export function ChatPage({ initialPrompt = "" }: { initialPrompt?: string }) {
   const {
     threads,
     activeThreadId,
@@ -32,6 +50,31 @@ export function ChatPage() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const { state: stream } = useTurnStream(streamUrl);
+
+  const activeThreadTitle =
+    threads.find((thread) => thread.thread_id === activeThreadId)?.title?.trim() || "AI 对话";
+
+  const saveAnswer = useCallback(
+    (question: string, answer: string) => {
+      const created = addNote({
+        question,
+        answerExcerpt: excerptFromAnswer(answer),
+        source: activeThreadTitle,
+      });
+      setSaved(created !== null);
+      return created !== null;
+    },
+    [activeThreadTitle],
+  );
+
+  const currentQuestion = pendingUser ?? questionBefore(messages, messages.length);
+
+  // 从新用户主页选择的预设问题只带入输入框，不自动创建会话或发送。
+  useEffect(() => {
+    if (!initialPrompt) return;
+    setInput(initialPrompt);
+    inputRef.current?.focus();
+  }, [initialPrompt]);
 
   // 会话切换时载入历史消息
   useEffect(() => {
@@ -65,6 +108,7 @@ export function ChatPage() {
     if (!content || sending) return;
     setInput("");
     setPendingUser(content);
+    setSaved(false);
     const response = await send(content);
     if (response) {
       setActiveTurnId(response.turn_id);
@@ -119,8 +163,13 @@ export function ChatPage() {
           {loading && <div className="loading-hint">加载会话…</div>}
           {error && <div className="error-hint">{error}</div>}
 
-          {messages.map((m) => (
-            <MessageRow key={m.message_id} message={m} />
+          {messages.map((m, index) => (
+            <MessageRow
+              key={m.message_id}
+              message={m}
+              question={questionBefore(messages, index)}
+              onSave={saveAnswer}
+            />
           ))}
 
           {pendingUser && (
@@ -134,7 +183,7 @@ export function ChatPage() {
           {stream.status !== "idle" && (
             <div className="msg assistant">
               <div className="msg-body">
-                <div className="msg-role">格物 AI · 讲解模式</div>
+                <div className="msg-role">学神 AI · 讲解模式</div>
                 {stream.status === "connecting" && <div className="loading-hint">正在连接…</div>}
                 {stream.answer && (
                   <div className="msg-text md">
@@ -178,7 +227,10 @@ export function ChatPage() {
                   <div className="memory-hint">记忆请求尚未确认，系统将重试</div>
                 )}
                 <div className="msg-actions">
-                  <button className="chip-btn" onClick={() => setSaved(true)}>
+                  <button
+                    className="chip-btn"
+                    onClick={() => saveAnswer(currentQuestion, stream.answer)}
+                  >
                     <Bookmark size={13} fill={saved ? "currentColor" : "none"} />
                     {saved ? "已存入错题本" : "存入错题本"}
                   </button>
@@ -230,12 +282,22 @@ export function ChatPage() {
   );
 }
 
-function MessageRow({ message }: { message: ConversationMessage }) {
+function MessageRow({
+  message,
+  question,
+  onSave,
+}: {
+  message: ConversationMessage;
+  question: string;
+  onSave: (question: string, answer: string) => boolean;
+}) {
+  const [saved, setSaved] = useState(false);
+
   return (
     <div className={`msg ${message.role}`}>
       <div className="msg-body">
         <div className="msg-role" style={message.role === "user" ? { textAlign: "right" } : undefined}>
-          {message.role === "user" ? "你 · 提问" : "格物 AI · 讲解模式"}
+          {message.role === "user" ? "你 · 提问" : "学神 AI · 讲解模式"}
         </div>
         {message.role === "user" ? (
           <div className="msg-text">{message.content}</div>
@@ -244,6 +306,19 @@ function MessageRow({ message }: { message: ConversationMessage }) {
             <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
               {message.content}
             </ReactMarkdown>
+          </div>
+        )}
+        {message.role === "assistant" && (
+          <div className="msg-actions">
+            <button
+              className="chip-btn"
+              onClick={() => {
+                if (onSave(question, message.content)) setSaved(true);
+              }}
+            >
+              <Bookmark size={13} fill={saved ? "currentColor" : "none"} />
+              {saved ? "已存入错题本" : "存入错题本"}
+            </button>
           </div>
         )}
       </div>

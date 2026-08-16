@@ -1,5 +1,6 @@
 // 生产前端样例的 Mock 数据与类型定义。
-// 说明：本文件仅用于设计样例（prototype.html），字段形态参考未来 API 契约，不与现有 demo 代码耦合。
+// 说明：学习计划页与错题本页已不再渲染示例内容；此文件保留首页等仍使用的
+// Mock 字段与后续 API 对接所需的类型形态。
 
 export type PageKey =
   | "home"
@@ -122,40 +123,6 @@ export const todayTasks: PlanTask[] = [
   { id: "t4", title: "复习：矩阵的秩（3 条错题到期）", kind: "复习", topic: "矩阵的秩", done: false, minutes: 10 },
 ];
 
-export const weekPlan: PlanDay[] = [
-  {
-    weekday: "周一", date: "8/3", isToday: false,
-    tasks: [
-      { id: "w1", title: "相似矩阵的定义与性质", kind: "学", topic: "相似矩阵", done: true, minutes: 30 },
-      { id: "w2", title: "复习：行列式展开", kind: "复习", topic: "行列式", done: true, minutes: 10 },
-    ],
-  },
-  {
-    weekday: "周二", date: "8/4", isToday: true,
-    tasks: todayTasks,
-  },
-  {
-    weekday: "周三", date: "8/5", isToday: false,
-    tasks: [
-      { id: "w3", title: "对角化的充要条件", kind: "学", topic: "对角化", done: false, minutes: 30 },
-      { id: "w4", title: "向 AI 提问：不可对角化的矩阵长什么样", kind: "练", topic: "对角化", done: false, minutes: 15 },
-    ],
-  },
-  {
-    weekday: "周四", date: "8/6", isToday: false,
-    tasks: [
-      { id: "w5", title: "实对称矩阵的正交对角化", kind: "学", topic: "实对称矩阵", done: false, minutes: 35 },
-    ],
-  },
-  {
-    weekday: "周五", date: "8/7", isToday: false,
-    tasks: [
-      { id: "w6", title: "本周小结：向 AI 复述特征值全链路", kind: "练", topic: "综合", done: false, minutes: 20 },
-      { id: "w7", title: "复习到期错题", kind: "复习", topic: "综合", done: false, minutes: 15 },
-    ],
-  },
-];
-
 export const conversations: Conversation[] = [
   { id: "c1", title: "特征值与特征向量", time: "10:24", preview: "几何上，特征向量是变换下方向不变的直线……", active: true },
   { id: "c2", title: "矩阵的秩为什么重要", time: "昨天", preview: "秩衡量的是列空间的真实维度……" },
@@ -230,64 +197,6 @@ export const knowledgeNodes: KnowledgeNode[] = [
 ];
 
 export const domains = ["线性代数", "微积分", "概率论"];
-
-export const notes: NoteItem[] = [
-  {
-    id: "n1",
-    question: "为什么矩阵的秩等于行阶梯形的非零行数？",
-    answerExcerpt: "初等行变换保持行空间不变，而行阶梯形的非零行线性无关，构成行空间的一组基……",
-    tags: ["矩阵的秩", "线性代数"],
-    source: "对话「矩阵的秩为什么重要」",
-    addedAt: "8 月 2 日",
-    nextReview: "今天",
-    reviewStage: 2,
-    mastery: "薄弱",
-  },
-  {
-    id: "n2",
-    question: "rank(AB) ≤ min(rank A, rank B) 的直观解释？",
-    answerExcerpt: "AB 的列空间包含于 A 的列空间，复合变换不会让信息维度增加……",
-    tags: ["矩阵的秩"],
-    source: "对话「矩阵的秩为什么重要」",
-    addedAt: "8 月 2 日",
-    nextReview: "今天",
-    reviewStage: 2,
-    mastery: "薄弱",
-  },
-  {
-    id: "n3",
-    question: "可逆矩阵的等价条件有哪些？",
-    answerExcerpt: "满秩、行列式非零、零空间只有零向量、特征值全部非零……共十条等价刻画。",
-    tags: ["可逆矩阵", "线性代数"],
-    source: "对话「矩阵的秩为什么重要」",
-    addedAt: "8 月 1 日",
-    nextReview: "今天",
-    reviewStage: 1,
-    mastery: "巩固中",
-  },
-  {
-    id: "n4",
-    question: "泰勒公式的拉格朗日余项怎么估计误差？",
-    answerExcerpt: "余项 Rₙ(x) = f⁽ⁿ⁺¹⁾(ξ)/(n+1)! · (x−x₀)ⁿ⁺¹，用导数上界即可控制误差……",
-    tags: ["泰勒展开", "微积分"],
-    source: "对话「泰勒展开的余项怎么理解」",
-    addedAt: "7 月 28 日",
-    nextReview: "8 月 6 日",
-    reviewStage: 3,
-    mastery: "巩固中",
-  },
-  {
-    id: "n5",
-    question: "贝叶斯公式里先验和后验的角色？",
-    answerExcerpt: "先验是看到证据前的信念 P(H)，证据 E 通过似然 P(E|H) 把它更新为后验 P(H|E)……",
-    tags: ["贝叶斯", "概率论"],
-    source: "对话「条件概率与贝叶斯」",
-    addedAt: "7 月 25 日",
-    nextReview: "8 月 9 日",
-    reviewStage: 4,
-    mastery: "已掌握",
-  },
-];
 
 export const studyGroups: StudyGroup[] = [
   { id: "g1", name: "线代攻坚小队", members: 18, desc: "六周刷完线性代数核心章节，每周日复盘", todayActive: 11, joined: true },

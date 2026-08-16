@@ -32,21 +32,28 @@ import { NotebookPage } from "./pages/Notebook";
 import { CommunityPage } from "./pages/Community";
 import { ProfilePage } from "./pages/Profile";
 
-const NAV: { key: PageKey; label: string; icon: typeof Home; badge?: number }[] = [
+const NAV: { key: PageKey; label: string; icon: typeof Home }[] = [
   { key: "home", label: "今日", icon: Home },
   { key: "chat", label: "AI 对话", icon: MessageCircle },
   { key: "plan", label: "学习计划", icon: CalendarCheck },
   { key: "map", label: "知识地图", icon: Network },
-  { key: "notebook", label: "错题本", icon: BookMarked, badge: 3 },
+  { key: "notebook", label: "错题本", icon: BookMarked },
   { key: "community", label: "社区", icon: Users },
 ];
+
+function formatStudioDate(now: Date): string {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}.${month}.${day} — XUESHEN MATH STUDIO`;
+}
 
 const MASTHEADS: Record<PageKey, { kicker: string; title: string; aside: string[] }> = {
   home: { kicker: "Tuesday · 星期二", title: "今日", aside: ["VOL.04 — 特征值与对角化", "第 12 天连续学习"] },
   chat: { kicker: "Ask · 有问必答", title: "AI 对话", aside: ["讲解模式", "引用可溯源"] },
-  plan: { kicker: "Plan · 循序渐进", title: "学习计划", aside: ["WEEK 4 / 6", "每周日晚自动调整"] },
+  plan: { kicker: "Plan · 循序渐进", title: "学习计划", aside: ["等待你的第一个目标", "由 AI 生成并动态调整"] },
   map: { kicker: "Atlas · 了如指掌", title: "知识地图", aside: ["11 个知识点", "3 个领域"] },
-  notebook: { kicker: "Notebook · 温故知新", title: "错题本", aside: ["5 篇收藏", "3 条今天到期"] },
+  notebook: { kicker: "Notebook · 温故知新", title: "错题本", aside: ["等待首次收藏", "按间隔重复安排复习"] },
   community: { kicker: "Community · 教学相长", title: "社区", aside: ["讨论区 · 小组 · 打卡"] },
   profile: { kicker: "Profile · 君子慎独", title: "个人中心", aside: ["记忆透明可管"] },
 };
@@ -149,6 +156,7 @@ function NotifPanel({
 export default function App() {
   const { initials } = useAuth();
   const [page, setPage] = useState<PageKey>("home");
+  const [chatDraft, setChatDraft] = useState("");
   const [showNotif, setShowNotif] = useState(false);
   const [notifications, setNotifications] = useState<UnifiedNotification[]>([]);
   const [notifError, setNotifError] = useState<string | null>(null);
@@ -210,7 +218,10 @@ export default function App() {
   };
 
   // 页面间联动：知识地图/计划里的"去问 AI"跳转到对话页。
-  const goChat = () => setPage("chat");
+  const goChat = (prompt = "") => {
+    setChatDraft(prompt);
+    setPage("chat");
+  };
   const masthead = MASTHEADS[page];
 
   const openCommunityPost = (postId: string) => {
@@ -222,26 +233,34 @@ export default function App() {
   return (
     <div className="app">
       <aside className="sidebar">
-        <div className="brand-seal" title="格物 · Math Studio">格</div>
+        <div className="sidebar-brand" title="学神 · Math Studio">
+          <div className="brand-seal">学</div>
+          <div className="sidebar-brand-copy">
+            <strong>学神数学</strong>
+            <span>MATH STUDIO</span>
+          </div>
+        </div>
         <nav className="nav">
-          {NAV.map(({ key, label, icon: Icon, badge }) => (
+          {NAV.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
+              type="button"
               title={label}
               className={`nav-item ${page === key ? "active" : ""}`}
               onClick={() => setPage(key)}
+              aria-current={page === key ? "page" : undefined}
             >
               <Icon size={18} strokeWidth={1.7} />
-              {badge && <span className="nav-badge">{badge}</span>}
+              <span className="nav-label">{label}</span>
             </button>
           ))}
         </nav>
-        <div className="sidebar-foot">格物致知</div>
+        <div className="sidebar-foot">学神致知</div>
       </aside>
 
       <div className="main">
         <header className="utility-bar">
-          <div className="utility-date">2026.08.04 — GEWU MATH STUDIO</div>
+          <div className="utility-date">{formatStudioDate(new Date())}</div>
           <div className="topbar-search">
             <Search size={13} />
             <span>搜索知识点、对话、笔记…</span>
@@ -251,7 +270,7 @@ export default function App() {
             {unreadTotal > 0 && <span className="dot" />}
           </button>
           <button className="avatar-btn" onClick={() => setPage("profile")} aria-label="个人中心">
-            {initials || "格"}
+            {initials || "学"}
           </button>
         </header>
 
@@ -267,10 +286,10 @@ export default function App() {
               />
             )}
             {page === "home" && <HomePage goChat={goChat} go={(p) => setPage(p)} />}
-            {page === "chat" && <ChatPage />}
+            {page === "chat" && <ChatPage initialPrompt={chatDraft} />}
             {page === "plan" && <PlanPage goChat={goChat} />}
             {page === "map" && <KnowledgeMapPage goChat={goChat} />}
-            {page === "notebook" && <NotebookPage />}
+            {page === "notebook" && <NotebookPage goChat={goChat} />}
             {page === "community" && (
               <CommunityPage
                 targetPostId={communityTargetPostId}

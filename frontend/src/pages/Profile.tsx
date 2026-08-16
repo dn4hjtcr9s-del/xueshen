@@ -2,16 +2,31 @@
 // 只有「AI 记住了我什么」接真实 API（§20.1）；其余区域为 Mock：
 // development 显著标注“展示数据”，production 构建默认隐藏。
 // 用户名/邮箱/首字来自 /me 真实用户（方案 §9.2 / 附录 A.4 #15）；logout 按钮在此。
+// 未登录（访客）时展示登录/注册表单——登录不是浏览前置条件，仅作为可选项。
+import { useState } from "react";
 import { LogOut, Pencil, ShieldCheck } from "lucide-react";
 import { user } from "../data";
 import { useAuth } from "../auth/AuthContext";
 import { SectionHead } from "../ui";
 import { MemorySection } from "./profile/MemorySection";
+import { LoginPage } from "./Login";
+import { RegisterPage } from "./Register";
 
 const SHOW_MOCK = import.meta.env.DEV;
 
 export function ProfilePage() {
   const { user: authUser, initials, logout } = useAuth();
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+
+  // 访客：个人中心展示登录/注册表单（可切换），登录成功后自动回到已登录视图
+  if (authUser === null) {
+    return authMode === "login" ? (
+      <LoginPage onGoRegister={() => setAuthMode("register")} />
+    ) : (
+      <RegisterPage onGoLogin={() => setAuthMode("login")} />
+    );
+  }
+
   return (
     <div className="profile-grid">
       <div className="card profile-card rise">
@@ -73,7 +88,7 @@ export function ProfilePage() {
         <div className="memory-banner rise" style={{ animationDelay: "0.06s" }}>
           <ShieldCheck size={16} style={{ flexShrink: 0, marginTop: 1 }} />
           <span>
-            格物 AI 只根据你的学习行为积累以下记忆，用来让讲解更贴合你。每一条都可以修改或删除，删除后立即生效。
+            学神 AI 只根据你的学习行为积累以下记忆，用来让讲解更贴合你。每一条都可以修改或删除，删除后立即生效。
           </span>
         </div>
         <div className="rise" style={{ animationDelay: "0.12s" }}>

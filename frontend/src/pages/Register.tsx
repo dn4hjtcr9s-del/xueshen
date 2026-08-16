@@ -33,7 +33,7 @@ export function RegisterPage({ onGoLogin }: { onGoLogin: () => void }) {
     return (
       <div className="auth-screen">
         <div className="auth-card card">
-          <div className="brand-seal" title="格物 · Math Studio">格</div>
+          <div className="brand-seal" title="学神 · Math Studio">学</div>
           <h1 className="auth-title">注册成功</h1>
           <p className="auth-sub">请使用新账号登录</p>
           <button className="btn btn-primary auth-submit" type="button" onClick={onGoLogin}>
@@ -47,7 +47,7 @@ export function RegisterPage({ onGoLogin }: { onGoLogin: () => void }) {
   return (
     <div className="auth-screen">
       <div className="auth-card card">
-        <div className="brand-seal" title="格物 · Math Studio">格</div>
+        <div className="brand-seal" title="学神 · Math Studio">学</div>
         <h1 className="auth-title">创建账号</h1>
         <p className="auth-sub">注册后，AI 将记住你的每一次学习</p>
         <form onSubmit={submit} className="auth-form">

@@ -1,13 +1,17 @@
-// 认证前端测试（方案 §11 / §9）：登录/注册交互、AuthGate、401 → single-flight refresh。
+// 认证前端测试（方案 §11 / §9）：登录/注册交互、访客浏览、401 → single-flight refresh。
+import { useState } from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AuthProvider } from "../auth/AuthContext";
-import { AuthGate } from "../auth/AuthGate";
+import { AuthProvider, useAuth } from "../auth/AuthContext";
+import { LoginPage } from "../pages/Login";
+import { RegisterPage } from "../pages/Register";
+import { ProfilePage } from "../pages/Profile";
 import { request } from "../api/client";
 import { setAccessToken, getAccessToken } from "../auth/tokenStore";
 import { server } from "./server";
+import { candidateView, deletedItem, indexView, learnerView, masteryView } from "./fixtures";
 
 // 默认无会话：refresh 401 → 未登录
 function installNoSession() {
@@ -33,27 +37,41 @@ function installLogin(username = "alice01") {
   );
 }
 
-describe("AuthGate 与登录页", () => {
+// 观察当前登录态（AuthProvider 不渲染 UI，登录结果需由消费组件呈现）
+function UserProbe() {
+  const { user } = useAuth();
+  return <div>{user ? `已登录:${user.username}` : "未登录"}</div>;
+}
+
+// 登录表单 + 登录态展示（登录成功后同屏看到已登录标记）
+function AuthWorkspace() {
+  const { user } = useAuth();
+  return (
+    <div>
+      <UserProbe />
+      {user === null && <LoginPage onGoRegister={() => {}} />}
+    </div>
+  );
+}
+
+describe("登录/注册表单", () => {
   beforeEach(installNoSession);
 
-  it("未登录时渲染登录页，登录成功后渲染主应用", async () => {
+  it("未登录展示登录表单，登录成功后进入已登录状态", async () => {
     installLogin();
     render(
       <AuthProvider>
-        <AuthGate>
-          <div>主应用内容</div>
-        </AuthGate>
+        <AuthWorkspace />
       </AuthProvider>,
     );
-    // 静默恢复完成后显示登录页
-    expect(await screen.findByRole("button", { name: "登录" })).toBeInTheDocument();
-    expect(screen.queryByText("主应用内容")).not.toBeInTheDocument();
+    expect(await screen.findByText("未登录")).toBeInTheDocument();
+    expect(screen.getByText("欢迎回来")).toBeInTheDocument();
 
     await userEvent.type(screen.getByLabelText(/用户名 \/ 邮箱/), "alice01");
     await userEvent.type(screen.getByLabelText("密码"), "password123");
     await userEvent.click(screen.getByRole("button", { name: "登录" }));
 
-    expect(await screen.findByText("主应用内容")).toBeInTheDocument();
+    expect(await screen.findByText("已登录:alice01")).toBeInTheDocument();
     expect(getAccessToken()).toBe("test-access-token");
   });
 
@@ -76,9 +94,7 @@ describe("AuthGate 与登录页", () => {
     );
     render(
       <AuthProvider>
-        <AuthGate>
-          <div>主应用内容</div>
-        </AuthGate>
+        <LoginPage onGoRegister={() => {}} />
       </AuthProvider>,
     );
     await screen.findByRole("button", { name: "登录" });
@@ -105,11 +121,17 @@ describe("AuthGate 与登录页", () => {
         ),
       ),
     );
+    function RegisterWorkspace() {
+      const [mode, setMode] = useState<"login" | "register">("login");
+      return mode === "login" ? (
+        <LoginPage onGoRegister={() => setMode("register")} />
+      ) : (
+        <RegisterPage onGoLogin={() => setMode("login")} />
+      );
+    }
     render(
       <AuthProvider>
-        <AuthGate>
-          <div>主应用内容</div>
-        </AuthGate>
+        <RegisterWorkspace />
       </AuthProvider>,
     );
     await screen.findByRole("button", { name: "登录" });
@@ -123,6 +145,52 @@ describe("AuthGate 与登录页", () => {
     expect(await screen.findByText("注册成功")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "去登录" }));
     expect(await screen.findByText("欢迎回来")).toBeInTheDocument();
+  });
+});
+
+describe("个人中心：访客与已登录状态", () => {
+  beforeEach(installNoSession);
+
+  it("访客进入个人中心展示登录表单，可切换到注册", async () => {
+    render(
+      <AuthProvider>
+        <ProfilePage />
+      </AuthProvider>,
+    );
+    expect(await screen.findByText("欢迎回来")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "注册" }));
+    expect(await screen.findByText("创建账号")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "登录" }));
+    expect(await screen.findByText("欢迎回来")).toBeInTheDocument();
+  });
+
+  it("登录后展示已登录视图与退出按钮", async () => {
+    installLogin();
+    // 已登录视图会挂载 MemorySection（读取记忆数据）
+    server.use(
+      http.get("*/api/v1/memory/learner", () => HttpResponse.json(learnerView())),
+      http.get("*/api/v1/memory/index", () => HttpResponse.json(indexView())),
+      http.get("*/api/v1/memory/deleted", () =>
+        HttpResponse.json({ items: [deletedItem()], next_cursor: null, has_more: false }),
+      ),
+      http.get("*/api/v1/memory/review-candidates", () =>
+        HttpResponse.json({ items: [candidateView()], next_cursor: null, has_more: false }),
+      ),
+      http.get("*/api/v1/memory/mastery/:topicKey", () => HttpResponse.json(masteryView())),
+    );
+    render(
+      <AuthProvider>
+        <ProfilePage />
+      </AuthProvider>,
+    );
+    await screen.findByText("欢迎回来");
+    await userEvent.type(screen.getByLabelText(/用户名 \/ 邮箱/), "alice01");
+    await userEvent.type(screen.getByLabelText("密码"), "password123");
+    await userEvent.click(screen.getByRole("button", { name: "登录" }));
+
+    expect(await screen.findByText("alice01")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "退出登录" })).toBeInTheDocument();
+    expect(screen.queryByText("欢迎回来")).not.toBeInTheDocument();
   });
 });
 

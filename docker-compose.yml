@@ -198,6 +198,9 @@ services:
     environment:
       # 评审 P1-3：容器内 localhost 指向自身；代理必须指向 memory-api 服务
       MEMORY_DEV_API_TARGET: http://memory-api:8000
+      # 开发预览：Vite 代理向 /memory-api 注入 X-Dev-User-Id，
+      # 访客免登录浏览也能正常加载数据（§18.1；生产构建不含此逻辑）
+      MEMORY_DEV_USER_ID: "00000000-0000-4000-8000-000000000001"
     depends_on:
       - memory-api
 

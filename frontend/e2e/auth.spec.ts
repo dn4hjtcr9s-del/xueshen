@@ -1,15 +1,19 @@
 // 浏览器主链路 E2E（方案 §12 验收标准 / 评审 P2-4 / 复审 P1-2）：
-// 注册 → 登录 → 真实 memory API 200 → 刷新页面会话不丢 →
-// 退出后旧 refresh cookie 重放 401、客户端不再携带 Bearer；
+// 访客免登录浏览主页 → 个人中心注册/登录 → 真实 memory API 200 →
+// 刷新页面会话不丢 → 退出后旧 refresh cookie 重放 401、客户端不再携带 Bearer；
 // 多标签页并发刷新不会撤销合法会话。
 import { expect, test } from "@playwright/test";
 
 const PASSWORD = "e2e-password-123";
 
-async function registerAndLogin(page: import("@playwright/test").Page): Promise<void> {
+async function registerAndLogin(page: import("@playwright/test").Page): Promise<string> {
   const username = `e2e_${Date.now()}`;
-  // 未登录 → 登录页
+  // 访客无需登录即可浏览主页（登录不是浏览前置条件）
   await page.goto("/");
+  await expect(page.getByRole("heading", { name: /真正的问题/ })).toBeVisible();
+
+  // 登录/注册从个人中心进入（未登录态展示登录表单）
+  await page.getByRole("button", { name: "个人中心" }).click();
   await expect(page.getByText("欢迎回来")).toBeVisible();
 
   // 注册新账号
@@ -22,7 +26,8 @@ async function registerAndLogin(page: import("@playwright/test").Page): Promise<
   await expect(page.getByText("注册成功")).toBeVisible();
   await page.getByRole("button", { name: "去登录" }).click();
 
-  // 登录：等待一次真实 memory API 请求成功（浏览器携带真实 Bearer token）
+  // 登录：等待一次真实 memory API 请求成功（浏览器携带真实 Bearer token；
+  // 登录后个人中心立即挂载「AI 记住了我什么」并发起 memory 请求）
   const memoryCall = page.waitForResponse(
     (response) => response.url().includes("/api/v1/memory/") && response.status() === 200,
   );
@@ -30,19 +35,22 @@ async function registerAndLogin(page: import("@playwright/test").Page): Promise<
   await page.getByLabel(/用户名 \/ 邮箱/).fill(username);
   await page.getByLabel("密码", { exact: true }).fill(PASSWORD);
   await page.getByRole("button", { name: "登录", exact: true }).click();
-  await expect(page.getByText("晚上好")).toBeVisible();
+  await expect(page.locator(".profile-name")).toHaveText(username);
   await memoryCall;
+  return username;
 }
 
-test("主链路：注册 → 登录 → memory API 200 → 刷新保持会话 → 退出后旧凭据失效", async ({
+test("主链路：访客浏览 → 注册 → 登录 → memory API 200 → 刷新保持会话 → 退出后旧凭据失效", async ({
   page,
   context,
 }) => {
-  await registerAndLogin(page);
+  const username = await registerAndLogin(page);
 
-  // 刷新页面：会话不丢（静默 refresh）
+  // 刷新页面：会话不丢（静默 refresh），主页新用户引导带用户名
   await page.reload();
-  await expect(page.getByText("晚上好")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: new RegExp(`欢迎，${username}`) }),
+  ).toBeVisible();
 
   // 捕获旧 refresh cookie 值（退出后用于重放验证）
   const cookiesBefore = await context.cookies();
@@ -50,7 +58,7 @@ test("主链路：注册 → 登录 → memory API 200 → 刷新保持会话 �
   expect(refreshCookie).toBeDefined();
 
   // 评审 P2-4 / 复审 P3：同 JS context 内验证退出后客户端不再携带 Bearer。
-  // 探针：logout 自身带 Bearer（证明监听有效），退出后在登录页发起一次登录
+  // 探针：logout 自身带 Bearer（证明监听有效），退出后在登录表单发起一次登录
   // 请求，断言其不带 Authorization。
   const authorizationHeaders: string[] = [];
   const collectAuth = (request: import("@playwright/test").Request) => {
@@ -59,7 +67,7 @@ test("主链路：注册 → 登录 → memory API 200 → 刷新保持会话 �
   };
   page.on("request", collectAuth);
 
-  // 退出登录：Profile 页 logout → 回到登录页
+  // 退出登录：Profile 页 logout → 回到访客态（个人中心展示登录表单）
   await page.getByRole("button", { name: "个人中心" }).click();
   await page.getByRole("button", { name: "退出登录" }).click();
   await expect(page.getByText("欢迎回来")).toBeVisible();
@@ -98,12 +106,14 @@ test("多标签页并发刷新不会撤销合法会话（复审 P1-2 / P3 barrie
   page,
   context,
 }) => {
-  await registerAndLogin(page);
+  const username = await registerAndLogin(page);
 
-  // 第二个标签页：静默恢复会话（触发一次 refresh）
+  // 第二个标签页：静默恢复会话（触发一次 refresh）；
+  // 个人中心展示用户名证明 /me 成功（访客标签页只会显示登录表单）
   const page2 = await context.newPage();
   await page2.goto("/");
-  await expect(page2.getByText("晚上好")).toBeVisible();
+  await page2.getByRole("button", { name: "个人中心" }).click();
+  await expect(page2.locator(".profile-name")).toHaveText(username);
 
   // 复审 P3：用延迟放行让两个标签页的刷新窗口真实重叠——若前端没有
   // Web Locks 串行化且没有 token 复用，两个标签页会同时提交旧 cookie，
@@ -118,15 +128,23 @@ test("多标签页并发刷新不会撤销合法会话（复审 P1-2 / P3 barrie
   });
 
   await Promise.all([page.reload(), page2.reload()]);
-  await expect(page.getByText("晚上好")).toBeVisible({ timeout: 15_000 });
-  await expect(page2.getByText("晚上好")).toBeVisible({ timeout: 15_000 });
+  await expect(
+    page.getByRole("heading", { name: new RegExp(`欢迎，${username}`) }),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(
+    page2.getByRole("heading", { name: new RegExp(`欢迎，${username}`) }),
+  ).toBeVisible({ timeout: 15_000 });
   expect(gatedRefreshCount.length).toBeGreaterThanOrEqual(1); // 至少一个标签页进入了 refresh
 
   // 会话仍有效：再次刷新依旧能静默恢复（family 未被重放撤销）
   await page.reload();
-  await expect(page.getByText("晚上好")).toBeVisible({ timeout: 15_000 });
+  await expect(
+    page.getByRole("heading", { name: new RegExp(`欢迎，${username}`) }),
+  ).toBeVisible({ timeout: 15_000 });
   await page2.reload();
-  await expect(page2.getByText("晚上好")).toBeVisible({ timeout: 15_000 });
+  await expect(
+    page2.getByRole("heading", { name: new RegExp(`欢迎，${username}`) }),
+  ).toBeVisible({ timeout: 15_000 });
 });
 
 test("logout 失败时等待锁的标签页不得恢复会话（复审 P1）", async ({ page, context }) => {
@@ -135,7 +153,8 @@ test("logout 失败时等待锁的标签页不得恢复会话（复审 P1）", a
   // 第二个标签页：静默恢复会话（触发一次 refresh）
   const page2 = await context.newPage();
   await page2.goto("/");
-  await expect(page2.getByText("晚上好")).toBeVisible();
+  await page2.getByRole("button", { name: "个人中心" }).click();
+  await expect(page2.getByText("退出登录")).toBeVisible();
 
   // 拦截 logout：持锁期间不放行，最终返回 503（family 未撤销、Cookie 未删除）
   let logoutRequestStarted!: () => void;
@@ -180,9 +199,15 @@ test("logout 失败时等待锁的标签页不得恢复会话（复审 P1）", a
   await page2.reload();
   await new Promise((resolve) => setTimeout(resolve, 2000));
 
-  // 放行 logout → 503：A 本地清除并递增 logout epoch、广播 logout
+  // 放行 logout → 503：A 本地清除并递增 logout epoch、广播 logout；
+  // A 回到访客态（个人中心展示登录表单）
   releaseLogout();
   await expect(page.getByText("欢迎回来")).toBeVisible({ timeout: 15_000 });
+  // B 侧：reload 完成后停留在匿名主页，个人中心只展示登录表单（未恢复会话）
+  await expect(page2.getByRole("heading", { name: /真正的问题/ })).toBeVisible({
+    timeout: 15_000,
+  });
+  await page2.getByRole("button", { name: "个人中心" }).click();
   await expect(page2.getByText("欢迎回来")).toBeVisible({ timeout: 15_000 });
 
   // 复审 P1：B 的排队 refresh 必须被 epoch 复查拦截，不得发出请求
@@ -216,7 +241,8 @@ test("无 Web Locks 环境下 logout 后排队 refresh 不得恢复会话（复�
   // 第二个标签页：静默恢复会话
   const page2 = await context.newPage();
   await page2.goto("/");
-  await expect(page2.getByText("晚上好")).toBeVisible();
+  await page2.getByRole("button", { name: "个人中心" }).click();
+  await expect(page2.getByText("退出登录")).toBeVisible();
 
   // 拦截 logout：持锁（页面互斥队列）期间不放行，最终返回 503
   let logoutRequestStarted!: () => void;
@@ -258,7 +284,11 @@ test("无 Web Locks 环境下 logout 后排队 refresh 不得恢复会话（复�
   // 放行 logout → 503
   releaseLogout();
   await expect(page.getByText("欢迎回来")).toBeVisible({ timeout: 15_000 });
-  // B 无论曾短暂恢复还是被丢弃，最终必须停在登录页
+  // B 无论曾短暂恢复还是被丢弃，最终必须停在访客态（个人中心展示登录表单）
+  await expect(page2.getByRole("heading", { name: /真正的问题/ })).toBeVisible({
+    timeout: 15_000,
+  });
+  await page2.getByRole("button", { name: "个人中心" }).click();
   await expect(page2.getByText("欢迎回来")).toBeVisible({ timeout: 15_000 });
 
   // B 侧探针：登录请求不得携带 Bearer
