@@ -168,8 +168,10 @@ async def _memory_fingerprint_stale(gateway: Any | None, run_row: Any, goal: str
     """run.input_hash 尾段（Memory 快照哈希）与当前 Memory 是否一致。"""
     if gateway is None or not run_row.get("input_hash"):
         return False
+    from backend.study.gateways.memory import FEED_MEMORY_QUERY
+
     try:
-        context = await gateway.read_context(query=goal)
+        context = await gateway.read_context(query=FEED_MEMORY_QUERY)
     except Exception:
         # Memory 不可用：按确定性前缀判定，不反复触发再生成
         return False

@@ -16,6 +16,7 @@ import logging
 from typing import Any
 from uuid import UUID, uuid4
 
+from openai import APITimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.memory.contracts.errors import OpenAISchemaInvalidError
@@ -229,6 +230,7 @@ class StudyOpenAIGateway:
                 validated_response=None,
                 usage=usage,
                 error_code="SCHEMA_INVALID",
+                expected_status="running",
             )
             raise
         except TimeoutError as exc:
@@ -239,11 +241,24 @@ class StudyOpenAIGateway:
                 validated_response=None,
                 usage=usage,
                 error_code="TIMEOUT",
+                expected_status="running",
             )
             # §9.1/D10：超时返回 retryable 503，而不是 500
             raise StudyPlanGenerationFailedError(
                 f"模型调用超时（{self._timeouts.get(purpose, 60.0)}s），请重试"
             ) from exc
+        except APITimeoutError as exc:
+            # OpenAI SDK 自身超时同样映射 retryable 503（次要路径不裸抛 500）
+            await repo.update_model_call_result(
+                session,
+                model_call_id=record_id,
+                status="failed",
+                validated_response=None,
+                usage=usage,
+                error_code="API_TIMEOUT",
+                expected_status="running",
+            )
+            raise StudyPlanGenerationFailedError("OpenAI 请求超时，请重试") from exc
         except Exception as exc:
             await repo.update_model_call_result(
                 session,
@@ -252,6 +267,7 @@ class StudyOpenAIGateway:
                 validated_response=None,
                 usage=usage,
                 error_code=type(exc).__name__,
+                expected_status="running",
             )
             raise
 

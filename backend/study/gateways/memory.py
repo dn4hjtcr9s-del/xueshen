@@ -14,6 +14,13 @@ from typing import Any
 
 from backend.memory.client import MemoryClient, MemoryClientError
 
+#: Daily Feed 读取 Memory 的固定 query（写入与校验必须同一常量，评审必改）
+FEED_MEMORY_QUERY = "今日学习推荐"
+
+#: 指纹稳定字段子集（排除 query 回显、时间衰减 recommendations、
+#: token_usage 与 truncated——这些字段每次组装都会变化，§14/评审必改）
+STABLE_CONTEXT_FIELDS: tuple[str, ...] = ("learner", "mastery", "graph_states")
+
 
 class StudyMemoryUnavailableError(RuntimeError):
     """Memory 读取不可用（§16：允许降级生成，不允许当作系统指令失败）。"""
@@ -49,11 +56,19 @@ class StudyMemoryGateway:
 
 
 def context_hash(context: dict[str, Any] | None) -> str | None:
-    """Memory 输入快照哈希（§14.4：revision.memory_context_hash）。"""
+    """Memory 输入快照哈希（§14.4：revision.memory_context_hash）。
+
+    只覆盖稳定字段子集（learner/mastery/graph_states）；query 回显、
+    时间衰减排序的 recommendations、token_usage、truncated 不参与——
+    否则同一 Memory 状态每次组装哈希都不同（评审必改：指纹永不匹配）。
+    """
     if context is None:
         return None
     import hashlib
     import json
 
-    canonical = json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    stable = {key: context[key] for key in STABLE_CONTEXT_FIELDS if key in context}
+    canonical = json.dumps(
+        stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

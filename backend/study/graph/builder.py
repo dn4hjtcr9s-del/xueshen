@@ -83,7 +83,9 @@ def build_daily_feed_graph(
             if memory_gateway is None:
                 raise StudyPlanGenerationFailedError("Memory Gateway 未装配（daily feed 已开启）")
             try:
-                memory_context = await memory_gateway.read_context(query="今日学习推荐")
+                from backend.study.gateways.memory import FEED_MEMORY_QUERY
+
+                memory_context = await memory_gateway.read_context(query=FEED_MEMORY_QUERY)
             except Exception as exc:
                 logger.warning("Daily feed Memory 不可用，仅展示正式任务: %s", type(exc).__name__)
                 memory_context = None
