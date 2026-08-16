@@ -106,7 +106,7 @@ class TestMemoryFingerprintStale:
         deterministic = "abc123"
         run_row = {"input_hash": f"{deterministic}:{context_hash(context)}"}
         gateway = FakeMemoryGateway(context)
-        assert await _memory_fingerprint_stale(gateway, run_row, "目标") is False
+        assert await _memory_fingerprint_stale(gateway, run_row) is False
         # 写入与校验使用同一常量 query
         assert gateway.seen_queries == [FEED_MEMORY_QUERY]
 
@@ -116,24 +116,24 @@ class TestMemoryFingerprintStale:
         deterministic = "abc123"
         run_row = {"input_hash": f"{deterministic}:{context_hash(context)}"}
         gateway = FakeMemoryGateway(_context(query="别的 query"))
-        assert await _memory_fingerprint_stale(gateway, run_row, "目标") is False
+        assert await _memory_fingerprint_stale(gateway, run_row) is False
 
     async def test_mastery_change_is_stale(self) -> None:
         context = _context()
         deterministic = "abc123"
         run_row = {"input_hash": f"{deterministic}:{context_hash(context)}"}
         gateway = FakeMemoryGateway(_context(mastery=[]))
-        assert await _memory_fingerprint_stale(gateway, run_row, "目标") is True
+        assert await _memory_fingerprint_stale(gateway, run_row) is True
 
     async def test_gateway_none_not_stale(self) -> None:
         run_row = {"input_hash": "abc:hash"}
-        assert await _memory_fingerprint_stale(None, run_row, "目标") is False
+        assert await _memory_fingerprint_stale(None, run_row) is False
 
     async def test_gateway_error_not_stale(self) -> None:
         run_row = {"input_hash": "abc:hash"}
         gateway = FakeMemoryGateway(None, error=RuntimeError("memory down"))
-        assert await _memory_fingerprint_stale(gateway, run_row, "目标") is False
+        assert await _memory_fingerprint_stale(gateway, run_row) is False
 
     async def test_missing_input_hash_not_stale(self) -> None:
         gateway = FakeMemoryGateway(_context())
-        assert await _memory_fingerprint_stale(gateway, {}, "目标") is False
+        assert await _memory_fingerprint_stale(gateway, {}) is False

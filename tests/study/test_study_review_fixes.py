@@ -227,7 +227,17 @@ class TestConcurrentEnsureToday:
                 .mappings()
                 .all()
             )
+            operations = (
+                await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM study_operations WHERE user_id = :uid "
+                        "AND operation_type = 'daily_feed_generation'"
+                    ),
+                    {"uid": USER_A},
+                )
+            ).scalar_one()
         assert len(runs) == 1
+        assert operations == 1  # 孤儿 operation 竞态不成立（ON CONFLICT 等待后复用）
 
 
 class TestIdempotencyConcurrencyRecovery:

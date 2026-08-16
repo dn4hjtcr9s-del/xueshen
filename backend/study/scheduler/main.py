@@ -111,9 +111,7 @@ async def scan_once(db: StudyDatabase, settings: Settings, logger: logging.Logge
                 ):
                     if feed_service.feed_run_matches_deterministic(row["input_hash"], current_hash):
                         # Memory 指纹比较点（评审半修 #2）：推荐输入变化 → 强制再生成
-                        if not await _memory_fingerprint_stale(
-                            memory_gateway, row, str(row["goal"])
-                        ):
+                        if not await _memory_fingerprint_stale(memory_gateway, row):
                             continue
                     await feed_service.ensure_daily_feed(
                         session,
@@ -164,7 +162,7 @@ def _build_memory_gateway(settings: Settings) -> Any | None:
     )
 
 
-async def _memory_fingerprint_stale(gateway: Any | None, run_row: Any, goal: str) -> bool:
+async def _memory_fingerprint_stale(gateway: Any | None, run_row: Any) -> bool:
     """run.input_hash 尾段（Memory 快照哈希）与当前 Memory 是否一致。"""
     if gateway is None or not run_row.get("input_hash"):
         return False
