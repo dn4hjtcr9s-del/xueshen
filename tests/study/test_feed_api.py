@@ -99,8 +99,7 @@ async def _seed_succeeded_feed(
 
 class TestEnsureToday:
     async def test_ensure_creates_unique_run_and_operation(self, client: AsyncClient) -> None:
-        plan = await _active_plan(client)
-        today = _server_today(plan).isoformat()
+        await _active_plan(client)
         r1 = await client.post(
             "/api/v1/study/home/ensure-today",
             headers={**auth(USER_A), "Idempotency-Key": "ensure-1"},
@@ -134,7 +133,7 @@ class TestEnsureToday:
     async def test_get_home_has_no_side_effect(
         self, client: AsyncClient, study_session_factory: Any
     ) -> None:
-        plan = await _active_plan(client)
+        await _active_plan(client)
         await client.get("/api/v1/study/home", headers=auth(USER_A))
         async with study_session_factory() as session:
             count = (
