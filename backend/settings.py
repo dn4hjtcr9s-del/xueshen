@@ -352,6 +352,79 @@ class Settings(BaseSettings):
         default_factory=list, alias="COMMUNITY_TRUSTED_PROXY_CIDRS"
     )
 
+    # ------------------------------------------------------------------
+    # Study 学习编排（docs/study-plan-push-implementation-plan.md v1.2，§19/D1–D29）
+    # ------------------------------------------------------------------
+
+    # D25 同模式：默认空 = 未配置时不挂载 Study 路由（§21），readiness 不报错；
+    # STUDY_DOMAIN_ENABLED=true 但未配置 URL 时 readiness fail-closed。
+    study_database_url: str = Field(default="", alias="STUDY_DATABASE_URL")
+    study_graph_checkpoint_schema: str = Field(
+        default="study_checkpoints", alias="STUDY_GRAPH_CHECKPOINT_SCHEMA"
+    )
+    # Worker（D17：同用户串行、跨用户并发由 STUDY_WORKER_CONCURRENCY 控制）
+    study_worker_concurrency: int = Field(default=4, alias="STUDY_WORKER_CONCURRENCY")
+    study_worker_poll_seconds: float = Field(default=1.0, alias="STUDY_WORKER_POLL_SECONDS")
+    study_operation_lease_seconds: int = Field(default=120, alias="STUDY_OPERATION_LEASE_SECONDS")
+    study_operation_soft_timeout_seconds: int = Field(
+        default=150, alias="STUDY_OPERATION_SOFT_TIMEOUT_SECONDS"
+    )
+    study_operation_hard_timeout_seconds: int = Field(
+        default=180, alias="STUDY_OPERATION_HARD_TIMEOUT_SECONDS"
+    )
+    # Scheduler（D9：每 5 分钟按用户 IANA 时区兜底扫描；§19 调度进程自身时区）
+    study_scheduler_timezone: str = Field(default="Asia/Shanghai", alias="STUDY_SCHEDULER_TIMEZONE")
+    study_daily_feed_scan_interval_seconds: int = Field(
+        default=300, alias="STUDY_DAILY_FEED_SCAN_INTERVAL_SECONDS"
+    )
+    study_daily_feed_scan_batch_size: int = Field(
+        default=100, alias="STUDY_DAILY_FEED_SCAN_BATCH_SIZE"
+    )
+    # 幂等与模型缓存保留（D15/D16）
+    study_idempotency_retention_days: int = Field(
+        default=7, alias="STUDY_IDEMPOTENCY_RETENTION_DAYS"
+    )
+    study_model_response_cache_retention_days: int = Field(
+        default=30, alias="STUDY_MODEL_RESPONSE_CACHE_RETENTION_DAYS"
+    )
+    # Intake（D10/§7.1：同步追问、8 轮/2,000 字符/24 小时上限）
+    study_intake_request_timeout_seconds: float = Field(
+        default=8.0, alias="STUDY_INTAKE_REQUEST_TIMEOUT_SECONDS"
+    )
+    study_intake_max_messages: int = Field(default=8, alias="STUDY_INTAKE_MAX_MESSAGES")
+    study_intake_message_max_chars: int = Field(
+        default=2000, alias="STUDY_INTAKE_MESSAGE_MAX_CHARS"
+    )
+    study_intake_ttl_hours: int = Field(default=24, alias="STUDY_INTAKE_TTL_HOURS")
+    # Session heartbeat（§12.5/D28：60s 周期、30s 最小间隔、120s 空闲阈值）
+    study_session_heartbeat_seconds: int = Field(
+        default=60, alias="STUDY_SESSION_HEARTBEAT_SECONDS"
+    )
+    study_session_heartbeat_min_interval_seconds: int = Field(
+        default=30, alias="STUDY_SESSION_HEARTBEAT_MIN_INTERVAL_SECONDS"
+    )
+    study_session_idle_timeout_seconds: int = Field(
+        default=120, alias="STUDY_SESSION_IDLE_TIMEOUT_SECONDS"
+    )
+    # 内部 purge（D19：fail-closed，未配置 token 不挂载路由）
+    study_account_purge_service_token: str | None = Field(
+        default=None, alias="STUDY_ACCOUNT_PURGE_SERVICE_TOKEN"
+    )
+    # 模型角色（§19：不写死模型名，按角色配置；Phase 1 的 manual 路径不依赖模型）
+    openai_study_intake_model: str = Field(default="", alias="OPENAI_STUDY_INTAKE_MODEL")
+    openai_study_plan_model: str = Field(default="", alias="OPENAI_STUDY_PLAN_MODEL")
+    openai_study_feed_model: str = Field(default="", alias="OPENAI_STUDY_FEED_MODEL")
+
+    # Feature Flags（§19：全部默认关闭，"实现不等于批准启用"）
+    study_domain_enabled: bool = Field(default=False, alias="STUDY_DOMAIN_ENABLED")
+    study_memory_read_enabled: bool = Field(default=False, alias="STUDY_MEMORY_READ_ENABLED")
+    study_daily_feed_enabled: bool = Field(default=False, alias="STUDY_DAILY_FEED_ENABLED")
+    study_auto_replan_enabled: bool = Field(default=False, alias="STUDY_AUTO_REPLAN_ENABLED")
+    study_memory_writeback_enabled: bool = Field(
+        default=False, alias="STUDY_MEMORY_WRITEBACK_ENABLED"
+    )
+    study_notification_enabled: bool = Field(default=False, alias="STUDY_NOTIFICATION_ENABLED")
+
     # Embedding 复用现有配置（§20.2 / D15：不新增重复凭证）
     embedding_base_url: str | None = Field(default=None, alias="EMBEDDING_BASE_URL")
     embedding_api_key: str | None = Field(default=None, alias="EMBEDDING_API_KEY")
@@ -399,6 +472,18 @@ class Settings(BaseSettings):
             "memory_read": self.conversation_memory_read_enabled,
             "memory_submit": self.conversation_memory_submit_enabled,
             "streaming": self.conversation_streaming_enabled,
+        }
+
+    @property
+    def study_flags(self) -> dict[str, bool]:
+        """Study Feature Flag 快照（§19：进程启动时读入，运行中不热切换）。"""
+        return {
+            "domain_enabled": self.study_domain_enabled,
+            "memory_read": self.study_memory_read_enabled,
+            "daily_feed": self.study_daily_feed_enabled,
+            "auto_replan": self.study_auto_replan_enabled,
+            "memory_writeback": self.study_memory_writeback_enabled,
+            "notification": self.study_notification_enabled,
         }
 
     @model_validator(mode="after")
@@ -487,6 +572,18 @@ class Settings(BaseSettings):
                         raise ValueError(
                             "生产环境启用 Community 删除链路必须配置 MEMORY_API_BASE_URL"
                         )
+            # Study（方案 §19/§21：启用 Study 域必须显式配置数据库 URL 与模型角色，
+            # 禁止开发默认凭证进入生产）
+            if self.study_domain_enabled:
+                if not self.study_database_url:
+                    raise ValueError("生产环境启用 Study 域必须显式配置 STUDY_DATABASE_URL")
+                for role_field in (
+                    "openai_study_intake_model",
+                    "openai_study_plan_model",
+                    "openai_study_feed_model",
+                ):
+                    if not getattr(self, role_field, ""):
+                        raise ValueError(f"生产环境启用 Study 域必须配置 {role_field}")
         return self
 
     def _validate_auth_keys(self) -> None:

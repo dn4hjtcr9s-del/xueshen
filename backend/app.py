@@ -51,6 +51,7 @@ from backend.memory.maintenance_gate import MaintenanceGate, MaintenanceGateErro
 from backend.memory.persistence import break_glass as bg_repo
 from backend.settings import Settings, get_settings
 from backend.shared.auth_context import AuthRuntimeUnavailableError
+from backend.study.contracts.errors import StudyError
 
 logger = logging.getLogger("memory.api")
 
@@ -263,6 +264,11 @@ def create_app(
     # 不挂载路由、readiness 跳过；启动时按配置构建独立连接池。
     app.state.community_db = None
     app.state.community_migration_head = None
+    # Study（方案 §21）：未启用/未配置 STUDY_DATABASE_URL 时保持 None；
+    # 域开启但缺库时 readiness 以 study_database_not_configured fail-closed。
+    app.state.study_db = None
+    app.state.study_migration_head = None
+    app.state.study_runtime = None
     if runtime is not None and runtime.maintenance_gate is None and runtime.db is not None:
         runtime.maintenance_gate = MaintenanceGate(runtime.db.engine)
 
@@ -437,6 +443,28 @@ def create_app(
             headers=headers,
         )
 
+    @app.exception_handler(StudyError)
+    async def study_error_handler(request: Request, exc: StudyError) -> JSONResponse:
+        """Study 域错误（方案 §17）：复用 PublicError 信封。
+
+        版本冲突（409）时在 error 对象内部携带 current_version（§15.3，
+        与 Conversation 同语义）；SCHEDULE_CONFLICT 由 adjust* 字段在
+        响应模型内呈现（Phase 1 起由路由自行扩展）。
+        """
+        trace_id = getattr(request.state, "trace_id", None) or ""
+        current_version = getattr(exc, "current_version", None)
+        return JSONResponse(
+            status_code=exc.http_status,
+            content=_public_error_body(
+                exc.code,
+                exc.message,
+                retryable=exc.retryable,
+                trace_id=trace_id,
+                field=exc.field,
+                current_version=current_version,
+            ),
+        )
+
     @app.exception_handler(AuthRuntimeUnavailableError)
     async def auth_runtime_unavailable_handler(
         request: Request, exc: AuthRuntimeUnavailableError
@@ -571,6 +599,20 @@ def create_app(
             except Exception:
                 logger.warning("无法解析 community alembic head revision", exc_info=True)
                 app.state.community_migration_head = None
+        # Study（方案 §21）：StudyDatabase 与路由由 build_study_routers 在
+        # create_app 时同步装配（对齐 Community）；此处仅解析迁移链 head
+        # 供 readiness 使用。未启用时保持 None。
+        if app.state.study_db is not None:
+            try:
+                from alembic.config import Config
+                from alembic.script import ScriptDirectory
+
+                app.state.study_migration_head = ScriptDirectory.from_config(
+                    Config("study_alembic.ini")
+                ).get_current_head()
+            except Exception:
+                logger.warning("无法解析 study alembic head revision", exc_info=True)
+                app.state.study_migration_head = None
         # Community Publisher 与维护任务（§12.1/§12.4）：lifespan background task。
         # 配置了社区库且 COMMUNITY_PUBLISHER_ENABLED=true 才启动 Publisher；
         # 维护清理任务独立低频运行（间隔 COMMUNITY_MAINTENANCE_INTERVAL_SECONDS）。
@@ -655,6 +697,9 @@ def create_app(
         community_db = app.state.community_db
         if community_db is not None:
             await community_db.close()
+        study_db = app.state.study_db
+        if study_db is not None:
+            await study_db.close()
 
     app.include_router(memories.router)
     app.include_router(reviews.router)
@@ -725,6 +770,19 @@ def create_app(
 
         reader_service = ConversationSourceReadService(session_factory=reader_db.session_factory)
         app.include_router(build_reader_router(reader_service))
+    # Study Router（方案 §21：STUDY_DOMAIN_ENABLED=false 或未配置
+    # STUDY_DATABASE_URL 时不挂载；readiness 对"开启但缺库" fail-closed）
+    from backend.study.api import build_study_routers
+
+    study_router = build_study_routers(app)
+    if study_router is not None:
+        app.include_router(study_router)
+        # 内部账号 purge（D19/§12.8）：仅配置 purge 服务 token 才挂载（fail-closed）。
+        # 未配置 study:account_purge token 时端点保持关闭。
+        if settings.study_account_purge_service_token:
+            from backend.study.api.internal_accounts import router as study_purge_router
+
+            app.include_router(study_purge_router)
     # 认证服务（方案 §2.3：内嵌同进程，将来可平移为独立服务）
     app.include_router(auth_router, prefix="/api/v1/auth")
 
@@ -890,6 +948,31 @@ def create_app(
                     failures.append("community_source_delete_token_missing")
                 if not settings.memory_api_base_url:
                     failures.append("memory_api_not_configured")
+        # Study 迁移链检查（方案 §21）：未启用/未配置时 study_db 为 None，跳过；
+        # 域开启但缺库 → study_database_not_configured（fail-closed，语义与
+        # Community D25 同源）；已装配但 ping/迁移版本不一致 → fail-closed。
+        study_db = getattr(request.app.state, "study_db", None)
+        if study_db is not None:
+            if not await study_db.ping():
+                failures.append("study_database_unavailable")
+            else:
+                study_head = getattr(request.app.state, "study_migration_head", None)
+                if study_head is None:
+                    failures.append("study_migration_head_unresolved")
+                else:
+                    try:
+                        async with study_db.session_factory() as session:
+                            row = await session.execute(
+                                text("SELECT version_num FROM study_alembic_version")
+                            )
+                            study_version = row.scalar_one_or_none()
+                    except Exception:
+                        logger.warning("study_alembic_version 查询失败", exc_info=True)
+                        study_version = None
+                    if study_version != study_head:
+                        failures.append("study_migration_version_mismatch")
+        elif settings.study_domain_enabled:
+            failures.append("study_database_not_configured")
         # §6.3：readiness 同时检查 memory 与 auth 两条迁移链（fail-closed）
         auth_current: AuthRuntime | None = getattr(request.app.state, "auth_runtime", None)
         if auth_current is None:
