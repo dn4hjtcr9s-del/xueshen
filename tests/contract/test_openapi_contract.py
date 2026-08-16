@@ -95,6 +95,7 @@ def test_openapi_contains_study_routes() -> None:
         "/api/v1/study/plans/{plan_id}/revisions/{revision_id}/accept",
         "/api/v1/study/plans/{plan_id}/revisions/{revision_id}/reject",
         "/api/v1/study/plans/{plan_id}/activate",
+        "/api/v1/study/plans/{plan_id}/adjustments",
         "/api/v1/study/plans/{plan_id}/pause",
         "/api/v1/study/plans/{plan_id}/resume",
         "/api/v1/study/plans/{plan_id}/archive",

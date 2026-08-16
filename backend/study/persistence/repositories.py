@@ -936,6 +936,38 @@ async def update_operation_status(
 
 
 # ---------------------------------------------------------------------------
+# Outbox（§7.12/§15.4：跨域最终一致投递）
+# ---------------------------------------------------------------------------
+
+
+async def insert_outbox_event(
+    session: AsyncSession,
+    *,
+    event_id: UUID,
+    user_id: UUID,
+    event_type: str,
+    payload: dict[str, Any],
+    idempotency_key: str,
+) -> None:
+    await session.execute(
+        text(
+            """
+            INSERT INTO study_outbox (event_id, user_id, event_type, payload, idempotency_key)
+            VALUES (:event_id, :user_id, :event_type, :payload, :idempotency_key)
+            ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+            """
+        ),
+        {
+            "event_id": event_id,
+            "user_id": user_id,
+            "event_type": event_type,
+            "payload": _json(payload),
+            "idempotency_key": idempotency_key,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # 幂等（§7.12/D16）
 # ---------------------------------------------------------------------------
 

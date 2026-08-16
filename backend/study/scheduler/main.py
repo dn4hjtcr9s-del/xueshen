@@ -115,6 +115,71 @@ async def scan_once(db: StudyDatabase, settings: Settings, logger: logging.Logge
             logger.warning("daily feed ensure 失败 user=%s: %s", user_id, exc)
     if triggered:
         logger.info("daily feed scan 触发 %s 个计划", triggered)
+
+    # Phase 4（§9.4）：每周复盘 replan（STUDY_AUTO_REPLAN_ENABLED 门控，
+    # 每计划每 ISO 周幂等；重大调整仍生成 proposed revision 待确认）
+    if settings.study_auto_replan_enabled:
+        weekly = await _trigger_weekly_replan(db, settings, logger)
+        if weekly:
+            logger.info("weekly replan 触发 %s 个计划", weekly)
+    return triggered
+
+
+async def _trigger_weekly_replan(
+    db: StudyDatabase, settings: Settings, logger: logging.Logger
+) -> int:
+    """每周复盘：每 active plan 每 ISO 周入队一次 replan operation（幂等）。"""
+    from backend.study.persistence import repositories as repo
+
+    now = datetime.now().astimezone()
+    iso_year, iso_week, _ = now.isocalendar()
+    triggered = 0
+    async with db.session_factory() as session:
+        plans = (
+            (
+                await session.execute(
+                    text(
+                        """
+                    SELECT plan_id, user_id FROM study_plans
+                    WHERE status = 'active' AND target_date >= current_date
+                    """
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+    for plan_row in plans:
+        plan_id = UUID(str(plan_row["plan_id"]))
+        key = f"weekly_replan:{plan_id}:{iso_year}:{iso_week}"
+        try:
+            async with db.session_factory() as session:
+                async with session.begin():
+                    await session.execute(
+                        text(
+                            """
+                            INSERT INTO study_scheduler_runs (run_id, name, idempotency_key)
+                            VALUES (gen_random_uuid(), 'weekly_replan', :key)
+                            """
+                        ),
+                        {"key": key},
+                    )
+                    operation_id = uuid4()
+                    await repo.insert_operation(
+                        session,
+                        operation_id=operation_id,
+                        user_id=UUID(str(plan_row["user_id"])),
+                        operation_type="replan",
+                        payload={
+                            "plan_id": str(plan_id),
+                            "reason": "weekly_replan",
+                            "user_requested": False,
+                        },
+                    )
+                triggered += 1
+        except Exception:
+            # 幂等键冲突 = 本周已触发；跳过
+            continue
     return triggered
 
 

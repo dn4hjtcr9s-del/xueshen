@@ -123,11 +123,16 @@ def dev_settings_with_study(url: str, **overrides: object) -> Settings:
     )
 
 
-async def make_study_client(study_session_factory: async_sessionmaker[AsyncSession]) -> AsyncClient:
+async def make_study_client(
+    study_session_factory: async_sessionmaker[AsyncSession],
+    **settings_overrides: object,
+) -> AsyncClient:
     """装配带 Study 路由的 ASGI 测试客户端（不触发 lifespan，不连 Memory 库）。"""
     from backend.app import create_app
 
-    settings = dev_settings_with_study(url=_session_url(study_session_factory))
+    settings = dev_settings_with_study(
+        url=_session_url(study_session_factory), **settings_overrides
+    )
     app = create_app(settings=settings)
     # dev auth 的 get_auth_context 读取 app.state.runtime.session_factory；
     # maintenance_gate=None 供 observability middleware 使用（Community 同模式）

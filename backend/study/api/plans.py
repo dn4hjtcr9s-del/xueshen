@@ -180,10 +180,15 @@ async def _lifecycle(
     plan_id: UUID,
     expected_version: int,
     action: str,
+    memory_writeback: bool = False,
 ) -> PlanOut:
     if action == "activate":
         plan = await plan_service.activate_plan(
-            session, user_id=user_id, plan_id=plan_id, expected_version=expected_version
+            session,
+            user_id=user_id,
+            plan_id=plan_id,
+            expected_version=expected_version,
+            memory_writeback=memory_writeback,
         )
     elif action == "pause":
         plan = await plan_service.pause_plan(
@@ -314,6 +319,7 @@ async def _lifecycle_call(
         plan_id=plan_id,
         expected_version=expected_version,
         action=action,
+        memory_writeback=runtime.settings.study_memory_writeback_enabled,
     )
     content = plan.model_dump(mode="json")
     await record_idempotent_result(
@@ -424,3 +430,93 @@ async def _revision_decision(
     )
     await session.commit()
     return JSONResponse(status_code=200, content=content)
+
+
+@router.post("/plans/{plan_id}/adjustments")
+async def adjust_plan(
+    plan_id: UUID,
+    body: PlanActivateRequest,
+    auth: Annotated[AuthContext, Depends(get_auth_context)],
+    session: StudySessionDep,
+    runtime: StudyRuntimeDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+) -> JSONResponse:
+    """用户主动要求重新安排（§9.4/§12.2）：创建 replan operation。
+
+    重大调整 → operation needs_input + proposed revision（等 accept/reject）；
+    局部调整 → 自动激活。返回 202 + operation_id（前端轮询 operations）。
+    """
+    from uuid import uuid4
+
+    from backend.study.persistence import repositories as repo
+    from backend.study.services.replan import run_replan_operation
+
+    plan = await repo.get_plan_row(session, user_id=auth.user_id, plan_id=plan_id)
+    if plan is None:
+        from backend.study.contracts.errors import StudyPlanNotFoundError
+
+        raise StudyPlanNotFoundError("计划不存在或不属于当前用户")
+    replay = await _replay_or_none(
+        session,
+        user_id=auth.user_id,
+        operation_name="plan.adjustments",
+        key=idempotency_key,
+        payload={"plan_id": str(plan_id), "expected_version": body.expected_version},
+        runtime=runtime,
+    )
+    if replay is not None:
+        return replay
+    if not await repo.bump_plan_version(
+        session, plan_id=plan_id, expected_version=body.expected_version
+    ):
+        await _raise_version_conflict_plans(session, plan_id)
+    operation_id = uuid4()
+    await repo.insert_operation(
+        session,
+        operation_id=operation_id,
+        user_id=auth.user_id,
+        operation_type="replan",
+        payload={
+            "plan_id": str(plan_id),
+            "reason": "user_adjustment",
+            "user_requested": True,
+        },
+    )
+    # 同步执行确定性 replan（无模型节点，与 Worker 路径同一函数）
+    result = await run_replan_operation(
+        session,
+        operation={
+            "operation_id": str(operation_id),
+            "user_id": str(auth.user_id),
+            "operation_type": "replan",
+            "payload": {
+                "plan_id": str(plan_id),
+                "reason": "user_adjustment",
+                "user_requested": True,
+            },
+        },
+        settings=runtime.settings,
+    )
+    content = {
+        "operation_id": str(operation_id),
+        "status": result["status"],
+        "revision_id": result.get("revision_id"),
+    }
+    await record_idempotent_result(
+        session,
+        user_id=auth.user_id,
+        operation_name="plan.adjustments",
+        idempotency_key=idempotency_key,
+        response_status=202,
+        response_body=content,
+        operation_id=operation_id,
+    )
+    await session.commit()
+    return JSONResponse(status_code=202, content=content)
+
+
+async def _raise_version_conflict_plans(session: StudySessionDep, plan_id: UUID) -> None:
+    from backend.study.contracts.errors import StudyPlanVersionConflictError
+
+    current = await repo.get_plan_version(session, plan_id=plan_id)
+    raise StudyPlanVersionConflictError("计划版本冲突，请刷新后重试", current_version=current)

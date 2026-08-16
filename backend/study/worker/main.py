@@ -92,6 +92,11 @@ async def _run_operation(
             settings=settings,
             logger=logger,
         )
+    if operation_type == "replan":
+        from backend.study.services.replan import run_replan_operation
+
+        async with session_factory() as session:
+            return await run_replan_operation(session, operation=operation, settings=settings)
     if operation_type != "plan_generation":
         raise ValueError(f"未知 operation 类型: {operation_type}")
     graph = graphs["plan_generation"]

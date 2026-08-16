@@ -143,6 +143,7 @@ async def complete_task(
     now: datetime,
     plan_timezone: str,
     idle_timeout: int,
+    memory_writeback: bool = False,
 ) -> dict[str, Any]:
     """complete（§12.3/D27）：结算 Session → completed + completion_source=manual。"""
     new_status = task_state.apply_transition(str(task_row["status"]), "complete")
@@ -171,11 +172,29 @@ async def complete_task(
         payload={"completion_source": "manual"},
     )
     local_date = now.astimezone(ZoneInfo(plan_timezone)).date()
+    owner = await _task_user_id(session, task_id=UUID(str(task_row["task_id"])))
     await repo.increment_daily_completed(
         session,
-        user_id=await _task_user_id(session, task_id=UUID(str(task_row["task_id"]))),
+        user_id=owner,
         local_date=local_date,
     )
+    if memory_writeback:
+        # §14：任务活动回写 Memory（flag 门控；失败不影响任务完成）
+        await repo.insert_outbox_event(
+            session,
+            event_id=uuid4(),
+            user_id=owner,
+            event_type="study.task_completed",
+            payload={
+                "task_id": str(task_row["task_id"]),
+                "task_type": str(task_row["task_type"]),
+                "title": str(task_row["title"]),
+                "topic_key": task_row["topic_key"],
+                "graph_node_id": task_row["graph_node_id"],
+                "completed_at": now.isoformat(),
+            },
+            idempotency_key=f"study:task_completed:{task_row['task_id']}:{task_row['version']}",
+        )
     await session.commit()
     return await repo.get_task_row(
         session,

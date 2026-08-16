@@ -189,6 +189,7 @@ async def activate_plan(
     user_id: UUID,
     plan_id: UUID,
     expected_version: int,
+    memory_writeback: bool = False,
 ) -> dict[str, Any]:
     """激活草案（§12.2：draft → active；CAS + active 唯一约束兜底）。"""
     plan = await _require_plan(session, user_id, plan_id)
@@ -213,10 +214,28 @@ async def activate_plan(
         if isinstance(exc, IntegrityError) and repo.is_active_conflict(exc):
             raise ActiveStudyPlanExistsError("已存在其他 active 计划（D5）") from exc
         raise
+    if memory_writeback:
+        # §14：计划激活后异步回写稳定摘要（flag 门控；失败不影响激活）
+        await repo.insert_outbox_event(
+            session,
+            event_id=uuid4(),
+            user_id=user_id,
+            event_type="study.plan_activated",
+            payload={"plan_id": str(plan_id), "goal": plan["goal"], "summary": _plan_summary(plan)},
+            idempotency_key=f"study:plan_activated:{plan_id}",
+        )
     await session.commit()
     refreshed = await repo.get_plan_row(session, user_id=user_id, plan_id=plan_id)
     assert refreshed is not None
     return refreshed
+
+
+def _plan_summary(plan: dict[str, Any]) -> str:
+    """稳定计划摘要（§6：Memory learner.plans 语义摘要）。"""
+    return (
+        f"{plan['goal']}；计划周期 {plan['start_date']} 至 {plan['target_date']}，"
+        f"每周约 {plan['weekly_minutes']} 分钟（时区 {plan['timezone']}）。"
+    )
 
 
 async def pause_plan(
@@ -394,6 +413,10 @@ async def decide_revision(
         if not updated:
             raise StudyInvalidRevisionTransitionError("revision 状态已变化，决策失败")
         await repo.set_current_revision(session, plan_id=plan_id, revision_id=revision_id)
+        # Phase 4（§12.2/D21）：应用任务 diff（新 revision 生成自己的任务行）
+        from backend.study.services.replan import apply_revision_diff
+
+        await apply_revision_diff(session, plan=plan, revision_row=revision)
         op_terminal = "succeeded"
     else:
         updated = await repo.update_revision_status(

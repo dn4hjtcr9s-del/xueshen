@@ -105,6 +105,7 @@ async def _task_action(
             now=now,
             plan_timezone=str(plan["timezone"]),
             idle_timeout=idle_timeout,
+            memory_writeback=runtime.settings.study_memory_writeback_enabled,
         )
     elif action == "reopen":
         row = await task_service.reopen_task(

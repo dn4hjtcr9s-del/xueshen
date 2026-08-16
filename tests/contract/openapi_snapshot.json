@@ -7074,6 +7074,67 @@
         ]
       }
     },
+    "/api/v1/study/plans/{plan_id}/adjustments": {
+      "post": {
+        "description": "用户主动要求重新安排（§9.4/§12.2）：创建 replan operation。\n\n重大调整 → operation needs_input + proposed revision（等 accept/reject）；\n局部调整 → 自动激活。返回 202 + operation_id（前端轮询 operations）。",
+        "operationId": "adjust_plan_api_v1_study_plans__plan_id__adjustments_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanActivateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Adjust Plan",
+        "tags": [
+          "study"
+        ]
+      }
+    },
     "/api/v1/study/plans/{plan_id}/archive": {
       "post": {
         "operationId": "archive_plan_api_v1_study_plans__plan_id__archive_post",
