@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, FastAPI
 
-from backend.study.api import home, operations, plans, sessions, tasks
+from backend.study.api import home, intakes, operations, plans, sessions, tasks
 from backend.study.api.dependencies import StudyRuntime
 from backend.study.persistence.database import StudyDatabase
 
@@ -35,6 +35,7 @@ def build_study_routers(app: FastAPI) -> APIRouter | None:
     app.state.study_db = db
     app.state.study_runtime = runtime
     router = APIRouter(prefix="/api/v1/study", tags=["study"])
+    router.include_router(intakes.router)
     router.include_router(plans.router)
     router.include_router(tasks.router)
     router.include_router(sessions.router)

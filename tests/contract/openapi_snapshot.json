@@ -1656,6 +1656,85 @@
         "title": "HomeTodayOut",
         "type": "object"
       },
+      "IntakeMessageRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "IntakeMessageRequest",
+        "type": "object"
+      },
+      "IntakeOut": {
+        "description": "intake 状态（§12.1；Phase 2 接线）。",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "intake_id": {
+            "format": "uuid",
+            "title": "Intake Id",
+            "type": "string"
+          },
+          "message_count": {
+            "title": "Message Count",
+            "type": "integer"
+          },
+          "missing_fields": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Fields",
+            "type": "array"
+          },
+          "normalized_intent": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Normalized Intent"
+          },
+          "status": {
+            "enum": [
+              "collecting",
+              "ready",
+              "confirmed",
+              "exhausted",
+              "expired"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "intake_id",
+          "status",
+          "missing_fields",
+          "message_count",
+          "version",
+          "expires_at"
+        ],
+        "title": "IntakeOut",
+        "type": "object"
+      },
       "KnowledgeGraphSnapshot": {
         "properties": {
           "edges": {
@@ -6508,6 +6587,173 @@
           }
         },
         "summary": "Get Home",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/intakes": {
+      "post": {
+        "operationId": "create_intake_api_v1_study_intakes_post",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntakeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Intake",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/intakes/{intake_id}": {
+      "get": {
+        "operationId": "get_intake_api_v1_study_intakes__intake_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "intake_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Intake Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntakeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Intake",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/intakes/{intake_id}/confirm": {
+      "post": {
+        "description": "confirm（§12.1）：ready → 202 operation_id；按 intake 自身幂等。",
+        "operationId": "confirm_intake_api_v1_study_intakes__intake_id__confirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "intake_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Intake Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirm Intake",
+        "tags": [
+          "study"
+        ]
+      }
+    },
+    "/api/v1/study/intakes/{intake_id}/messages": {
+      "post": {
+        "description": "同步执行单轮抽取（D10）：200 + 状态/追问/缺失字段；幂等重放返回首次结果。",
+        "operationId": "post_intake_message_api_v1_study_intakes__intake_id__messages_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "intake_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Intake Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntakeMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Intake Message",
         "tags": [
           "study"
         ]

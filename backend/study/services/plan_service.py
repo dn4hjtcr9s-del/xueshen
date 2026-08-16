@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.study.contracts.api import PlanCreateRequest
+from backend.study.contracts.api import PlanCreateRequest, PlanIntent
 from backend.study.contracts.errors import (
     ActiveStudyPlanExistsError,
     StudyInvalidPlanTransitionError,
@@ -58,6 +58,39 @@ async def create_manual_plan(
 ) -> dict[str, Any]:
     """manual 直录（§8/D8）：确定性排期同步生成 draft plan/revision/tasks。"""
     intent = request.intent
+    return await persist_plan_from_blueprint(
+        session,
+        user_id=user_id,
+        intent=intent,
+        blueprints=[
+            (b.title, str(b.task_type), b.estimated_minutes, b.topic_key, b.description)
+            for b in request.task_blueprint
+        ],
+        generation_mode="manual",
+        personalization_status="not_requested",
+        personalization_reason=None,
+        change_summary="初始计划草案（manual 直录，确定性排期）",
+        memory_context_hash=None,
+        model_name=None,
+        prompt_version=None,
+    )
+
+
+async def persist_plan_from_blueprint(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    intent: PlanIntent,
+    blueprints: list[tuple[str, str, int, str | None, str]],
+    generation_mode: str,
+    personalization_status: str,
+    personalization_reason: str | None,
+    change_summary: str,
+    memory_context_hash: str | None,
+    model_name: str | None,
+    prompt_version: str | None,
+) -> dict[str, Any]:
+    """按蓝图确定性排期并落库 draft plan/revision/tasks（§9.2 复用 Phase 1 引擎）。"""
     plan_id = uuid4()
     revision_id = uuid4()
     target_date = intent.resolved_target_date()
@@ -95,10 +128,6 @@ async def create_manual_plan(
         for slot in intent.weekly_availability
     }
     days = scheduling.plan_days(intent.start_date, target_date, availability_map)
-    blueprints = [
-        (b.title, str(b.task_type), b.estimated_minutes, b.topic_key, b.description)
-        for b in request.task_blueprint
-    ]
     scheduled = scheduling.schedule_manual_blueprint(
         days=days,
         session_min=intent.session_min_minutes,
@@ -114,14 +143,17 @@ async def create_manual_plan(
         reason="initial",
         input_snapshot={
             "intent": intent.model_dump(mode="json"),
-            "generation_mode": "manual",
-            "blueprint": [b.model_dump(mode="json") for b in request.task_blueprint],
+            "generation_mode": generation_mode,
+            "blueprint": [list(b) for b in blueprints],
         },
-        personalization_status="not_requested",
-        personalization_reason=None,
-        change_summary="初始计划草案（manual 直录，确定性排期）",
+        personalization_status=personalization_status,
+        personalization_reason=personalization_reason,
+        change_summary=change_summary,
         proposal_operation_id=None,
         base_revision_id=None,
+        memory_context_hash=memory_context_hash,
+        model_name=model_name,
+        prompt_version=prompt_version,
     )
     for draft in scheduled:
         task_id = uuid4()
@@ -139,7 +171,7 @@ async def create_manual_plan(
             model_estimated_minutes=draft.model_estimated_minutes,
             estimation_basis=draft.estimation_basis,
             topic_key=draft.topic_key,
-            source="manual",
+            source="plan" if generation_mode == "ai" else "manual",
         )
         await repo.insert_task_event(
             session, event_id=uuid4(), task_id=task_id, event_type="created"

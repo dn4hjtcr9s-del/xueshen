@@ -84,6 +84,10 @@ def test_openapi_contains_study_routes() -> None:
     """方案 §20.4：Study 域路由必须进入契约快照（v1.2 §12 冻结）。"""
     spec = json.loads(_normalized_spec())
     expected_study_paths = {
+        "/api/v1/study/intakes",
+        "/api/v1/study/intakes/{intake_id}",
+        "/api/v1/study/intakes/{intake_id}/messages",
+        "/api/v1/study/intakes/{intake_id}/confirm",
         "/api/v1/study/plans",
         "/api/v1/study/plans/{plan_id}",
         "/api/v1/study/plans/{plan_id}/calendar",

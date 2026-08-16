@@ -1031,6 +1031,112 @@ async def update_idempotency_result(
 
 
 # ---------------------------------------------------------------------------
+# 模型响应缓存（§7.11/D15）
+# ---------------------------------------------------------------------------
+
+
+async def get_model_call_row(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    purpose: str,
+    input_hash: str,
+    prompt_version: str,
+    model: str,
+    schema_version: str,
+) -> dict[str, Any] | None:
+    result = await session.execute(
+        text(
+            "SELECT * FROM study_model_call_records WHERE user_id = :user_id "
+            "AND purpose = :purpose AND input_hash = :input_hash "
+            "AND prompt_version = :prompt_version AND model = :model "
+            "AND schema_version = :schema_version"
+        ),
+        {
+            "user_id": user_id,
+            "purpose": purpose,
+            "input_hash": input_hash,
+            "prompt_version": prompt_version,
+            "model": model,
+            "schema_version": schema_version,
+        },
+    )
+    row = result.mappings().first()
+    return _row(row) if row is not None else None
+
+
+async def insert_model_call_row(
+    session: AsyncSession,
+    *,
+    model_call_id: UUID,
+    user_id: UUID,
+    operation_id: UUID | None,
+    purpose: str,
+    input_hash: str,
+    prompt_version: str,
+    model: str,
+    schema_version: str,
+    expires_at: datetime,
+) -> bool:
+    """插入 running 状态的缓存记录；唯一键冲突返回 False（并发同键）。"""
+    try:
+        await session.execute(
+            text(
+                """
+                INSERT INTO study_model_call_records (model_call_id, user_id, operation_id,
+                    purpose, input_hash, prompt_version, model, schema_version, expires_at)
+                VALUES (:mid, :user_id, :operation_id, :purpose, :input_hash,
+                    :prompt_version, :model, :schema_version, :expires_at)
+                """
+            ),
+            {
+                "mid": model_call_id,
+                "user_id": user_id,
+                "operation_id": operation_id,
+                "purpose": purpose,
+                "input_hash": input_hash,
+                "prompt_version": prompt_version,
+                "model": model,
+                "schema_version": schema_version,
+                "expires_at": expires_at,
+            },
+        )
+        return True
+    except IntegrityError:
+        return False
+
+
+async def update_model_call_result(
+    session: AsyncSession,
+    *,
+    model_call_id: UUID,
+    status: str,
+    validated_response: dict[str, Any] | None,
+    usage: dict[str, Any] | None = None,
+    error_code: str | None = None,
+) -> None:
+    await session.execute(
+        text(
+            """
+            UPDATE study_model_call_records
+            SET status = :status, validated_response = :validated_response,
+                usage = :usage, error_code = :error_code
+            WHERE model_call_id = :model_call_id
+            """
+        ),
+        {
+            "status": status,
+            "validated_response": _json(validated_response)
+            if validated_response is not None
+            else None,
+            "usage": _json(usage or {}),
+            "error_code": error_code,
+            "model_call_id": model_call_id,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Purge（§12.8/D19）
 # ---------------------------------------------------------------------------
 
