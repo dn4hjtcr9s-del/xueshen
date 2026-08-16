@@ -19,7 +19,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from backend.study.contracts.domain import (
     ConversationStatus,
     FeedItemStatus,
-    FeedRunStatus,
     IntakeStatus,
     OperationStatus,
     PersonalizationStatus,
@@ -396,9 +395,16 @@ class IdempotentPlanCreateOut(BaseModel):
 
 
 class EnsureTodayOut(BaseModel):
+    """ensure-today 响应（D9/§12.6）。
+
+    - generation_status="ready"：已有成功 run 且输入指纹匹配，直接复用，
+      operation_id 为 null（无新生成任务）；
+    - generation_status="queued"：已创建/重试 feed 生成 operation。
+    """
+
     feed_run_id: UUID
-    operation_id: UUID
-    generation_status: FeedRunStatus = "queued"
+    operation_id: UUID | None = None
+    generation_status: Literal["ready", "queued"] = "queued"
 
 
 class AcceptRecommendationOut(BaseModel):

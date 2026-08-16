@@ -56,6 +56,7 @@ async def publish_once(db: StudyDatabase, settings: Settings, logger: logging.Lo
                             """
                         SELECT * FROM study_outbox
                         WHERE status = 'pending'
+                          AND (available_at IS NULL OR available_at <= now())
                           AND (lease_expires_at IS NULL OR lease_expires_at < now())
                         ORDER BY created_at
                         LIMIT 50

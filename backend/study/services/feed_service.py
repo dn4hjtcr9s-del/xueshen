@@ -30,6 +30,7 @@ async def ensure_daily_feed(
     user_id: UUID,
     local_date: date,
     settings: Any,
+    force_regenerate: bool = False,
 ) -> tuple[UUID, UUID | None]:
     """ensure-today / Scheduler 共用入口（§9.3：同一应用服务）。
 
@@ -54,8 +55,10 @@ async def ensure_daily_feed(
     existing = await _get_feed_run(session, user_id=user_id, plan_id=plan_id, local_date=local_date)
     if existing is not None:
         run_id = UUID(str(existing["feed_run_id"]))
-        if existing["status"] == "succeeded" and feed_run_matches_deterministic(
-            existing["input_hash"], current_hash
+        if (
+            not force_regenerate
+            and existing["status"] == "succeeded"
+            and feed_run_matches_deterministic(existing["input_hash"], current_hash)
         ):
             return run_id, None
         if existing["status"] in ("queued", "running"):
@@ -181,6 +184,12 @@ async def persist_feed_result(
         ),
         {"run_id": feed_run_id},
     )
+    run = await _get_feed_run_by_id(session, feed_run_id=feed_run_id)
+    timezone = str(run["timezone"]) if run else "UTC"
+    from zoneinfo import ZoneInfo
+
+    local_now = now.astimezone(ZoneInfo(timezone))
+    expires = local_now.replace(hour=23, minute=59, second=59, microsecond=0)
     for item in items:
         await session.execute(
             text(
@@ -205,7 +214,7 @@ async def persist_feed_result(
                 "reason_codes": _json(item.get("reason_codes", [])),
                 "estimated_minutes": item.get("estimated_minutes"),
                 "launch_payload": _json(item.get("launch_payload", {})),
-                "expires_at": now.replace(hour=23, minute=59, second=59, microsecond=0),
+                "expires_at": expires,
             },
         )
     run = await _get_feed_run_by_id(session, feed_run_id=feed_run_id)

@@ -937,6 +937,7 @@
         "type": "object"
       },
       "EnsureTodayOut": {
+        "description": "ensure-today 响应（D9/§12.6）。\n\n- generation_status=\"ready\"：已有成功 run 且输入指纹匹配，直接复用，\n  operation_id 为 null（无新生成任务）；\n- generation_status=\"queued\"：已创建/重试 feed 生成 operation。",
         "properties": {
           "feed_run_id": {
             "format": "uuid",
@@ -946,24 +947,27 @@
           "generation_status": {
             "default": "queued",
             "enum": [
-              "queued",
-              "running",
-              "succeeded",
-              "failed",
-              "stale"
+              "ready",
+              "queued"
             ],
             "title": "Generation Status",
             "type": "string"
           },
           "operation_id": {
-            "format": "uuid",
-            "title": "Operation Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Id"
           }
         },
         "required": [
-          "feed_run_id",
-          "operation_id"
+          "feed_run_id"
         ],
         "title": "EnsureTodayOut",
         "type": "object"

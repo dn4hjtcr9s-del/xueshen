@@ -508,3 +508,133 @@ class TestPurgeCoverage:
             ):
                 count = (await session.execute(text(f"SELECT COUNT(*) FROM {table}"))).scalar_one()
                 assert count == 0, f"{table} 未被清理"
+
+
+class TestWorkerNeedsInputEndToEnd:
+    async def test_replan_needs_input_survives_worker_terminal_write(
+        self, study_session_factory: Any
+    ) -> None:
+        """Critical 2 端到端回归：worker 执行 replan 产出 needs_input，
+        终态写入不得覆写为 succeeded。"""
+        import logging
+        from datetime import date, timedelta
+        from uuid import uuid4
+
+        from backend.settings import Settings
+        from backend.study.worker.main import (
+            _claim_batch,
+            _finish_operation,
+            _run_operation,
+        )
+
+        today = date.today()
+        plan_id = uuid4()
+        revision_id = uuid4()
+        task_id = uuid4()
+        op_id = uuid4()
+        async with study_session_factory() as session:
+            async with session.begin():
+                # 活跃计划：今天为休息日（不可顺延），任务已过期 → 不可行 → major
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO study_plans (plan_id, user_id, goal, status, timezone,
+                            start_date, target_date, weekly_minutes, session_min_minutes,
+                            session_max_minutes, current_revision_id)
+                        VALUES (:pid, :uid, '目标', 'active', 'Asia/Shanghai', :start,
+                            :target, 60, 15, 60, :rid)
+                        """
+                    ),
+                    {
+                        "pid": plan_id,
+                        "uid": USER_A,
+                        "start": today - timedelta(days=1),
+                        "target": today,
+                        "rid": revision_id,
+                    },
+                )
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO study_plan_availability (plan_id, day_of_week,
+                            available_minutes, is_rest_day)
+                        VALUES (:pid, :dow, 0, true)
+                        """
+                    ),
+                    {"pid": plan_id, "dow": today.isoweekday()},
+                )
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO study_plan_revisions (revision_id, plan_id, revision_no,
+                            reason, status, input_snapshot, personalization_status)
+                        VALUES (:rid, :pid, 1, 'initial', 'active', '{}', 'not_requested')
+                        """
+                    ),
+                    {"rid": revision_id, "pid": plan_id},
+                )
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO study_tasks (task_id, plan_id, revision_id,
+                            scheduled_date, order_index, task_type, title,
+                            estimated_minutes, source, status)
+                        VALUES (:tid, :pid, :rid, :d, 1, 'learn', '过期任务', 40,
+                                'plan', 'pending')
+                        """
+                    ),
+                    {
+                        "tid": task_id,
+                        "pid": plan_id,
+                        "rid": revision_id,
+                        "d": today - timedelta(days=1),
+                    },
+                )
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO study_operations (operation_id, user_id, operation_type,
+                            payload, status)
+                        VALUES (:op, :uid, 'replan', :payload, 'queued')
+                        """
+                    ),
+                    {
+                        "op": op_id,
+                        "uid": USER_A,
+                        "payload": __import__("json").dumps(
+                            {
+                                "plan_id": str(plan_id),
+                                "reason": "weekly_replan",
+                                "user_requested": False,
+                            }
+                        ),
+                    },
+                )
+        settings = Settings(app_env="test", _env_file=None)
+        claimed = await _claim_batch(
+            study_session_factory, worker_id="w1", lease_seconds=60, batch_size=5
+        )
+        assert len(claimed) == 1
+        result = await _run_operation(
+            operation=claimed[0],
+            session_factory=study_session_factory,
+            graphs={},
+            worker_id="w1",
+            settings=settings,
+            logger=logging.getLogger("t"),
+        )
+        assert result["status"] == "needs_input"
+        await _finish_operation(
+            study_session_factory,
+            operation_id=op_id,
+            status=str(result["status"]),
+            result_payload=result,
+        )
+        async with study_session_factory() as session:
+            status = (
+                await session.execute(
+                    text("SELECT status FROM study_operations WHERE operation_id = :op"),
+                    {"op": op_id},
+                )
+            ).scalar_one()
+        assert status == "needs_input"

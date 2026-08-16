@@ -20,7 +20,6 @@ from backend.auth.context import AuthContext
 from backend.shared.auth_context import get_auth_context
 from backend.study.api.dependencies import StudyRuntime, StudyRuntimeDep, StudySessionDep
 from backend.study.contracts.api import IntakeOut
-from backend.study.contracts.errors import StudyIntakeLimitExceededError
 from backend.study.graph import intake_runner
 from backend.study.services.idempotency import (
     open_idempotent_request,
@@ -79,9 +78,9 @@ async def get_intake(
     )
     row = result.mappings().first()
     if row is None:
-        from backend.study.contracts.errors import StudyIntakeLimitExceededError as _E
+        from backend.study.contracts.errors import StudyIntakeNotFoundError
 
-        raise _E("intake 不存在或不属于当前用户")
+        raise StudyIntakeNotFoundError("intake 不存在或不属于当前用户")
     return _intake_out(dict(row))
 
 
@@ -116,7 +115,9 @@ async def post_intake_message(
     )
     row = result.mappings().first()
     if row is None:
-        raise StudyIntakeLimitExceededError("intake 不存在或不属于当前用户")
+        from backend.study.contracts.errors import StudyIntakeNotFoundError
+
+        raise StudyIntakeNotFoundError("intake 不存在或不属于当前用户")
     gateway = _gateway_for(runtime)
     refreshed, reply, status = await intake_runner.run_intake_turn(
         session=session,
@@ -160,7 +161,9 @@ async def confirm_intake(
     )
     row = result.mappings().first()
     if row is None:
-        raise StudyIntakeLimitExceededError("intake 不存在或不属于当前用户")
+        from backend.study.contracts.errors import StudyIntakeNotFoundError
+
+        raise StudyIntakeNotFoundError("intake 不存在或不属于当前用户")
     operation_id = await intake_runner.confirm_intake(
         session, intake_row=dict(row), user_id=auth.user_id
     )

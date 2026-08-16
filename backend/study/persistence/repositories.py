@@ -931,17 +931,18 @@ async def update_operation_status(
     user_id: UUID | None = None,
 ) -> int:
     """operation 终态更新；user_id 提供时加用户谓词（纵深防御，§18.2）。"""
-    expected_clause = "status = :expected_status" if expected_status else "TRUE"
-    user_clause = "AND user_id = :user_id" if user_id is not None else ""
+    # 静态模板 + 静态子句取值（值全部参数绑定；不拼接任何外部片段）
+    sql = """
+        UPDATE study_operations
+        SET status = :new_status, result = :result_payload,
+            error_code = :error_code, error_message = :error_message, updated_at = now()
+        WHERE operation_id = :operation_id AND {status_clause} {user_clause}
+    """.format(
+        status_clause="status = :expected_status" if expected_status else "TRUE",
+        user_clause="AND user_id = :user_id" if user_id is not None else "",
+    )
     result = await session.execute(
-        text(
-            f"""
-            UPDATE study_operations
-            SET status = :new_status, result = :result_payload,
-                error_code = :error_code, error_message = :error_message, updated_at = now()
-            WHERE operation_id = :operation_id AND {expected_clause} {user_clause}
-            """
-        ),
+        text(sql),
         {
             "new_status": new_status,
             "result_payload": _json(result_payload),
@@ -1026,31 +1027,31 @@ async def insert_idempotency_row(
     operation_id: UUID | None = None,
 ) -> bool:
     """插入幂等记录；唯一键冲突返回 False（并发重放，由上层重查）。"""
-    try:
-        await session.execute(
-            text(
-                """
-                INSERT INTO study_idempotency_requests (idempotency_request_id, user_id,
-                    operation_name, idempotency_key, request_hash, operation_id, expires_at)
-                VALUES (:idempotency_request_id, :user_id, :operation_name, :idempotency_key,
-                    :request_hash, :operation_id, :expires_at)
-                """
-            ),
-            {
-                "idempotency_request_id": idempotency_request_id,
-                "user_id": user_id,
-                "operation_name": operation_name,
-                "idempotency_key": idempotency_key,
-                "request_hash": request_hash,
-                "operation_id": operation_id,
-                "expires_at": expires_at,
-            },
-        )
-        return True
-    except IntegrityError:
-        # 并发同键：回滚失败事务后由上层重查（否则 session 处于 aborted 状态）
-        await session.rollback()
-        return False
+    # ON CONFLICT DO NOTHING + RETURNING：PostgreSQL 对未提交冲突行会等待其
+    # 终局后判定，loser 随后重查即可看到 winner 的提交（D16 重放语义）；
+    # 同时不再产生 aborted 事务（评审 backlog #1）
+    result = await session.execute(
+        text(
+            """
+            INSERT INTO study_idempotency_requests (idempotency_request_id, user_id,
+                operation_name, idempotency_key, request_hash, operation_id, expires_at)
+            VALUES (:idempotency_request_id, :user_id, :operation_name, :idempotency_key,
+                :request_hash, :operation_id, :expires_at)
+            ON CONFLICT (user_id, operation_name, idempotency_key) DO NOTHING
+            RETURNING idempotency_request_id
+            """
+        ),
+        {
+            "idempotency_request_id": idempotency_request_id,
+            "user_id": user_id,
+            "operation_name": operation_name,
+            "idempotency_key": idempotency_key,
+            "request_hash": request_hash,
+            "operation_id": operation_id,
+            "expires_at": expires_at,
+        },
+    )
+    return result.first() is not None
 
 
 async def update_idempotency_result(
@@ -1169,7 +1170,9 @@ async def update_model_call_result(
     validated_response: dict[str, Any] | None,
     usage: dict[str, Any] | None = None,
     error_code: str | None = None,
+    expected_status: str | None = None,
 ) -> None:
+    """模型调用结果落库；expected_status 提供时做状态 CAS（并发回收防双跑）。"""
     await session.execute(
         text(
             """
@@ -1177,6 +1180,7 @@ async def update_model_call_result(
             SET status = :status, validated_response = :validated_response,
                 usage = :usage, error_code = :error_code
             WHERE model_call_id = :model_call_id
+              AND status = COALESCE(:expected_status, status)
             """
         ),
         {
@@ -1187,6 +1191,7 @@ async def update_model_call_result(
             "usage": _json(usage or {}),
             "error_code": error_code,
             "model_call_id": model_call_id,
+            "expected_status": expected_status,
         },
     )
 
@@ -1224,7 +1229,6 @@ _PURGE_USER_STATEMENTS: tuple[str, ...] = (
     "DELETE FROM study_operations WHERE user_id = :uid",
     "DELETE FROM study_model_call_records WHERE user_id = :uid",
     "DELETE FROM study_daily_stats WHERE user_id = :uid",
-    "DELETE FROM study_sessions WHERE user_id = :uid",
     "DELETE FROM study_daily_feed_runs WHERE user_id = :uid",
     "DELETE FROM study_plans WHERE user_id = :uid",
     "DELETE FROM study_plan_intakes WHERE user_id = :uid",

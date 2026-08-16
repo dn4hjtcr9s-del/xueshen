@@ -171,6 +171,7 @@ def build_daily_feed_graph(
                 feed_run_id=UUID(state["feed_run_id"]),
                 items=items,
                 now=datetime.now().astimezone(),
+                memory_context_hash=context_hash(state.get("memory_context")),
             )
         return state
 

@@ -195,6 +195,7 @@ class TestWeeklyBufferAndReviewIntervals:
         learn = next(t for t in result if t.task_type == "learn")
         review = next(t for t in result if t.task_type == "review")
         gap = (review.scheduled_date - learn.scheduled_date).days
-        # 优先 1/3/7 天间隔；首个可行学习日为 +1（周二无课→周三 = +2 不可用则 +3 周三）
-        assert gap in (1, 3, 7, 2, 4, 5, 6)
+        # 学任务周一（8/17）→ 复习优先 +1（周二无课）→ +3（周四无课）
+        # → +7（下周一 8/24 有课）→ 严格命中 1/3/7 间隔链
+        assert gap == 7
         assert review.scheduled_date > learn.scheduled_date

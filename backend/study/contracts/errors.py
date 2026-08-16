@@ -14,6 +14,7 @@ STUDY_ERROR_CODES: frozenset[str] = frozenset(
         "STUDY_PLAN_NOT_FOUND",
         "STUDY_INTAKE_EXPIRED",
         "STUDY_INTAKE_LIMIT_EXCEEDED",
+        "STUDY_INTAKE_NOT_FOUND",
         "ACTIVE_STUDY_PLAN_EXISTS",
         "STUDY_PLAN_VERSION_CONFLICT",
         "STUDY_TASK_VERSION_CONFLICT",
@@ -70,6 +71,13 @@ class StudyIntakeExpiredError(StudyError):
 
     code = "STUDY_INTAKE_EXPIRED"
     http_status = 409
+
+
+class StudyIntakeNotFoundError(StudyError):
+    """intake 不存在或不属于当前用户（§12.1 实现期补充：404）。"""
+
+    code = "STUDY_INTAKE_NOT_FOUND"
+    http_status = 404
 
 
 class StudyIntakeLimitExceededError(StudyError):

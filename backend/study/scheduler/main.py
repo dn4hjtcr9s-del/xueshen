@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from backend.settings import Settings, get_settings
 from backend.study.persistence.database import StudyDatabase
@@ -40,7 +42,9 @@ async def scan_once(db: StudyDatabase, settings: Settings, logger: logging.Logge
                     ),
                     {"run_id": uuid4(), "key": run_key},
                 )
-            except Exception:
+            except IntegrityError:
+                # 幂等键冲突 = 本轮扫描已有并发执行；DB 连接等故障不吞（评审残留 #3）
+                await session.rollback()
                 logger.info("本轮扫描已有并发执行，跳过")
                 return 0
         candidates = (
@@ -48,7 +52,7 @@ async def scan_once(db: StudyDatabase, settings: Settings, logger: logging.Logge
                 await session.execute(
                     text(
                         """
-                    SELECT p.plan_id, p.user_id,
+                    SELECT p.plan_id, p.user_id, p.goal,
                            (now() AT TIME ZONE p.timezone)::date AS local_date,
                            r.feed_run_id, r.status, r.input_hash, r.generation
                     FROM study_plans p
@@ -70,6 +74,7 @@ async def scan_once(db: StudyDatabase, settings: Settings, logger: logging.Logge
             .all()
         )
 
+    memory_gateway = _build_memory_gateway(settings)
     triggered = 0
     for row in candidates:
         user_id = UUID(str(row["user_id"]))
@@ -96,13 +101,28 @@ async def scan_once(db: StudyDatabase, settings: Settings, logger: logging.Logge
                     plan_id=plan_id,
                     revision_id=plan["current_revision_id"],
                     local_date=local_date,
+                    daily_feed_enabled=bool(settings.study_daily_feed_enabled),
+                    memory_read_enabled=bool(settings.study_memory_read_enabled),
                 )
                 if (
                     row["feed_run_id"] is not None
                     and row["status"] == "succeeded"
-                    and row["input_hash"] == current_hash
                     and row["local_date"] == local_date
                 ):
+                    if feed_service.feed_run_matches_deterministic(row["input_hash"], current_hash):
+                        # Memory 指纹比较点（评审半修 #2）：推荐输入变化 → 强制再生成
+                        if not await _memory_fingerprint_stale(
+                            memory_gateway, row, str(row["goal"])
+                        ):
+                            continue
+                    await feed_service.ensure_daily_feed(
+                        session,
+                        user_id=user_id,
+                        local_date=local_date,
+                        settings=settings,
+                        force_regenerate=True,
+                    )
+                    triggered += 1
                     continue
                 await feed_service.ensure_daily_feed(
                     session,
@@ -124,6 +144,42 @@ async def scan_once(db: StudyDatabase, settings: Settings, logger: logging.Logge
         if weekly:
             logger.info("weekly replan 触发 %s 个计划", weekly)
     return triggered
+
+
+def _build_memory_gateway(settings: Settings) -> Any | None:
+    """daily feed + memory read 同时开启时构建 Memory 网关（指纹比较用）。"""
+    if not settings.study_daily_feed_enabled or not settings.study_memory_read_enabled:
+        return None
+    if not settings.memory_api_base_url or not settings.memory_agent_token:
+        return None
+    from backend.memory.client import MemoryClient
+    from backend.study.gateways.memory import StudyMemoryGateway
+
+    return StudyMemoryGateway(
+        client=MemoryClient(
+            settings.memory_api_base_url,
+            token=settings.memory_agent_token,
+            timeout=settings.memory_context_timeout_seconds,
+        )
+    )
+
+
+async def _memory_fingerprint_stale(gateway: Any | None, run_row: Any, goal: str) -> bool:
+    """run.input_hash 尾段（Memory 快照哈希）与当前 Memory 是否一致。"""
+    if gateway is None or not run_row.get("input_hash"):
+        return False
+    try:
+        context = await gateway.read_context(query=goal)
+    except Exception:
+        # Memory 不可用：按确定性前缀判定，不反复触发再生成
+        return False
+    from backend.study.gateways.memory import context_hash
+    from backend.study.services.feed_service import feed_run_hash_with_memory
+
+    full = feed_run_hash_with_memory(
+        str(run_row["input_hash"]).split(":", 1)[0], context_hash(context)
+    )
+    return full != str(run_row["input_hash"])
 
 
 async def _trigger_weekly_replan(

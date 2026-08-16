@@ -115,6 +115,7 @@ class StudyOpenAIGateway:
                 status="failed",
                 validated_response=None,
                 error_code="STALE_RUNNING",
+                expected_status="running",
             )
             cached = await repo.get_model_call_row(
                 session,
@@ -135,6 +136,7 @@ class StudyOpenAIGateway:
                 status="running",
                 validated_response=None,
                 error_code=None,
+                expected_status="failed",
             )
             inserted = True
         else:
@@ -174,6 +176,7 @@ class StudyOpenAIGateway:
                     status="running",
                     validated_response=None,
                     error_code=None,
+                    expected_status="failed",
                 )
             else:
                 raise StudyPlanGenerationFailedError("模型调用并发冲突，请重试")
@@ -215,6 +218,7 @@ class StudyOpenAIGateway:
                 status="succeeded",
                 validated_response=validated,
                 usage=usage,
+                expected_status="running",
             )
             return parsed
         except OpenAISchemaInvalidError:
@@ -227,6 +231,19 @@ class StudyOpenAIGateway:
                 error_code="SCHEMA_INVALID",
             )
             raise
+        except TimeoutError as exc:
+            await repo.update_model_call_result(
+                session,
+                model_call_id=record_id,
+                status="failed",
+                validated_response=None,
+                usage=usage,
+                error_code="TIMEOUT",
+            )
+            # §9.1/D10：超时返回 retryable 503，而不是 500
+            raise StudyPlanGenerationFailedError(
+                f"模型调用超时（{self._timeouts.get(purpose, 60.0)}s），请重试"
+            ) from exc
         except Exception as exc:
             await repo.update_model_call_result(
                 session,
