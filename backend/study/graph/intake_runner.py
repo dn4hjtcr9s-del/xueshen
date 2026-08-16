@@ -216,13 +216,14 @@ async def confirm_intake(
     operation_id = uuid4()
     normalized = dict(intake_row["normalized_intent"] or {})
     normalized["_confirmed_operation_id"] = str(operation_id)
-    await session.execute(
+    # CAS on status='ready'：并发 confirm 只能有一个成功（评审必改 #3）
+    result = await session.execute(
         text(
             """
             UPDATE study_plan_intakes
             SET status = 'confirmed', normalized_intent = :normalized,
                 version = version + 1, updated_at = now()
-            WHERE intake_id = :intake_id
+            WHERE intake_id = :intake_id AND status = 'ready'
             """
         ),
         {
@@ -230,6 +231,14 @@ async def confirm_intake(
             "intake_id": intake_row["intake_id"],
         },
     )
+    if not getattr(result, "rowcount", 0):
+        refreshed = await _get_intake_row(session, UUID(str(intake_row["intake_id"])))
+        if refreshed is not None and refreshed["status"] == "confirmed":
+            existing = (refreshed["normalized_intent"] or {}).get("_confirmed_operation_id")
+            if existing:
+                await session.commit()
+                return UUID(str(existing))
+        raise StudyPlanInputIncompleteError("intake 状态已变化，confirm 失败（请重试）")
     await repo_insert_operation(session, operation_id, user_id, normalized)
     await session.commit()
     return operation_id

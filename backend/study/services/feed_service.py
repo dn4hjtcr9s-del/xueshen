@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.study.contracts.errors import StudyNoActivePlanError
+from backend.study.graph.builder import FEED_PROMPT_VERSION
 from backend.study.persistence import repositories as repo
 
 OP_DAILY_FEED = "daily_feed_generation"
@@ -42,12 +43,20 @@ async def ensure_daily_feed(
     plan_id = UUID(str(plan["plan_id"]))
     timezone = str(plan["timezone"])
     revision_id = plan["current_revision_id"]
-    current_hash = feed_input_hash(plan_id=plan_id, revision_id=revision_id, local_date=local_date)
+    current_hash = feed_input_hash(
+        plan_id=plan_id,
+        revision_id=revision_id,
+        local_date=local_date,
+        daily_feed_enabled=bool(settings.study_daily_feed_enabled),
+        memory_read_enabled=bool(settings.study_memory_read_enabled),
+    )
 
     existing = await _get_feed_run(session, user_id=user_id, plan_id=plan_id, local_date=local_date)
     if existing is not None:
         run_id = UUID(str(existing["feed_run_id"]))
-        if existing["status"] == "succeeded" and existing["input_hash"] == current_hash:
+        if existing["status"] == "succeeded" and feed_run_matches_deterministic(
+            existing["input_hash"], current_hash
+        ):
             return run_id, None
         if existing["status"] in ("queued", "running"):
             return run_id, existing["operation_id"]
@@ -71,6 +80,7 @@ async def ensure_daily_feed(
         )
     else:
         run_id = uuid4()
+        # 并发 ensure/scheduler 由唯一键兜底：ON CONFLICT DO NOTHING 后重查复用
         await session.execute(
             text(
                 """
@@ -78,6 +88,7 @@ async def ensure_daily_feed(
                     revision_id, local_date, timezone, status, input_hash)
                 VALUES (:run_id, :user_id, :plan_id, :revision_id, :local_date,
                     :timezone, 'queued', :input_hash)
+                ON CONFLICT (user_id, plan_id, local_date) DO NOTHING
                 """
             ),
             {
@@ -90,6 +101,38 @@ async def ensure_daily_feed(
                 "input_hash": current_hash,
             },
         )
+        existing = await _get_feed_run(
+            session, user_id=user_id, plan_id=plan_id, local_date=local_date
+        )
+        if existing is not None and UUID(str(existing["feed_run_id"])) != run_id:
+            # 并发创建：复用对方 run
+            if existing["status"] == "succeeded" and feed_run_matches_deterministic(
+                existing["input_hash"], current_hash
+            ):
+                await session.commit()
+                return UUID(str(existing["feed_run_id"])), None
+            if existing["status"] in ("queued", "running") and existing["operation_id"]:
+                await session.commit()
+                return UUID(str(existing["feed_run_id"])), UUID(str(existing["operation_id"]))
+            # 对方 run 失败/stale：由本轮继续在其上重试（generation+1）
+            await session.execute(
+                text(
+                    """
+                    UPDATE study_daily_feed_runs
+                    SET status = 'queued', generation = generation + 1,
+                        attempt_count = attempt_count + 1, input_hash = :input_hash,
+                        revision_id = :revision_id, updated_at = now(),
+                        last_error_code = NULL, operation_id = NULL
+                    WHERE feed_run_id = :run_id
+                    """
+                ),
+                {
+                    "input_hash": current_hash,
+                    "revision_id": revision_id,
+                    "run_id": existing["feed_run_id"],
+                },
+            )
+            run_id = UUID(str(existing["feed_run_id"]))
 
     operation_id = uuid4()
     await repo.insert_operation(
@@ -122,8 +165,12 @@ async def persist_feed_result(
     feed_run_id: UUID,
     items: list[dict[str, Any]],
     now: datetime,
+    memory_context_hash: str | None = None,
 ) -> None:
-    """Worker 落库 feed items（§7.8）：旧 active 原子 expired，插入新 items。"""
+    """Worker 落库 feed items（§7.8）：旧 active 原子 expired，插入新 items。
+
+    input_hash 由确定性前缀 + Memory 快照哈希组成（§7.7 推荐输入指纹）。
+    """
     await session.execute(
         text(
             """
@@ -161,14 +208,38 @@ async def persist_feed_result(
                 "expires_at": now.replace(hour=23, minute=59, second=59, microsecond=0),
             },
         )
-    await session.execute(
-        text(
-            "UPDATE study_daily_feed_runs SET status = 'succeeded', completed_at = :now, "
-            "updated_at = :now WHERE feed_run_id = :run_id"
-        ),
-        {"now": now, "run_id": feed_run_id},
-    )
+    run = await _get_feed_run_by_id(session, feed_run_id=feed_run_id)
+    if run is not None and run["input_hash"]:
+        deterministic = str(run["input_hash"]).split(":", 1)[0]
+        await session.execute(
+            text(
+                "UPDATE study_daily_feed_runs SET status = 'succeeded', completed_at = :now, "
+                "input_hash = :full_hash, updated_at = :now WHERE feed_run_id = :run_id"
+            ),
+            {
+                "now": now,
+                "full_hash": feed_run_hash_with_memory(deterministic, memory_context_hash),
+                "run_id": feed_run_id,
+            },
+        )
+    else:
+        await session.execute(
+            text(
+                "UPDATE study_daily_feed_runs SET status = 'succeeded', completed_at = :now, "
+                "updated_at = :now WHERE feed_run_id = :run_id"
+            ),
+            {"now": now, "run_id": feed_run_id},
+        )
     await session.commit()
+
+
+async def _get_feed_run_by_id(session: AsyncSession, *, feed_run_id: UUID) -> dict[str, Any] | None:
+    result = await session.execute(
+        text("SELECT * FROM study_daily_feed_runs WHERE feed_run_id = :run_id"),
+        {"run_id": feed_run_id},
+    )
+    row = result.mappings().first()
+    return dict(row) if row is not None else None
 
 
 async def fail_feed_run(session: AsyncSession, *, feed_run_id: UUID, error_code: str) -> None:
@@ -182,8 +253,22 @@ async def fail_feed_run(session: AsyncSession, *, feed_run_id: UUID, error_code:
     await session.commit()
 
 
-def feed_input_hash(*, plan_id: UUID, revision_id: UUID | None, local_date: date) -> str:
-    """§12.6：成功 run 复用判定用输入哈希。"""
+RECOMMENDATION_INPUT_VERSION = "v1"
+
+
+def feed_input_hash(
+    *,
+    plan_id: UUID,
+    revision_id: UUID | None,
+    local_date: date,
+    daily_feed_enabled: bool = False,
+    memory_read_enabled: bool = False,
+) -> str:
+    """§12.6/§7.7：成功 run 复用判定用确定性输入哈希。
+
+    包含推荐输入指纹（prompt 版本/推荐输入版本/开关），推荐生成逻辑变化时
+    旧 run 自动 stale（评审必改 #7）。
+    """
     from backend.study.services.idempotency import request_hash
 
     return request_hash(
@@ -191,8 +276,24 @@ def feed_input_hash(*, plan_id: UUID, revision_id: UUID | None, local_date: date
             "plan_id": str(plan_id),
             "revision_id": str(revision_id),
             "local_date": local_date.isoformat(),
+            "feed_prompt_version": FEED_PROMPT_VERSION,
+            "recommendation_input_version": RECOMMENDATION_INPUT_VERSION,
+            "daily_feed_enabled": daily_feed_enabled,
+            "memory_read_enabled": memory_read_enabled,
         }
     )
+
+
+def feed_run_hash_with_memory(deterministic_hash: str, memory_context_hash: str | None) -> str:
+    """持久化用完整指纹：确定性部分 + Memory 快照哈希（§7.7 推荐输入变化判定）。"""
+    return f"{deterministic_hash}:{memory_context_hash or 'none'}"
+
+
+def feed_run_matches_deterministic(run_input_hash: str | None, deterministic_hash: str) -> bool:
+    """ensure/home 的 O(1) 比较：只比较确定性前缀（不读取 Memory）。"""
+    if not run_input_hash:
+        return False
+    return run_input_hash.split(":", 1)[0] == deterministic_hash
 
 
 async def _get_feed_run(

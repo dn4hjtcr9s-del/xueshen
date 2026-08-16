@@ -15,7 +15,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
-from backend.study.contracts.domain import ISO_DAY_MAX, ISO_DAY_MIN, MAX_TASKS_PER_DAY
+from backend.study.contracts.domain import (
+    ISO_DAY_MAX,
+    ISO_DAY_MIN,
+    MAX_TASKS_PER_DAY,
+    REVIEW_INTERVAL_DAYS,
+    WEEKLY_BUFFER_RATIO,
+)
 from backend.study.contracts.errors import StudyPlanInfeasibleError
 
 #: §10.3：5 分钟粒度
@@ -49,22 +55,28 @@ class DayPlan:
 
 @dataclass
 class DayBucket:
-    """排期过程中的日负载累加器。"""
+    """排期过程中的日负载累加器（含周缓冲额度，§10.6）。"""
 
     day: DayPlan
     used_minutes: int = 0
     task_count: int = 0
     tasks: list[ScheduledTaskDraft] = field(default_factory=list)
+    week_key: str = ""
 
     def remaining_minutes(self) -> int:
         return max(0, self.day.available_minutes - self.used_minutes)
 
-    def can_accept(self, minutes: int) -> bool:
+    def can_accept(self, minutes: int, week_used: dict[str, int], week_cap: dict[str, int]) -> bool:
         if self.day.is_rest_day:
             return False
         if self.task_count >= MAX_TASKS_PER_DAY:
             return False
-        return self.used_minutes + minutes <= self.day.available_minutes
+        if self.used_minutes + minutes > self.day.available_minutes:
+            return False
+        # §10.6：每周预留约 10% 缓冲
+        if week_used.get(self.week_key, 0) + minutes > week_cap.get(self.week_key, 0):
+            return False
+        return True
 
 
 def normalize_minutes(
@@ -131,6 +143,12 @@ def plan_days(start: date, end: date, availability: dict[int, DayPlan]) -> list[
     return days
 
 
+def _week_key(day: date) -> str:
+    """ISO 年-周（周缓冲按计划内自然周计算，§10.6）。"""
+    iso = day.isocalendar()
+    return f"{iso.year}-{iso.week}"
+
+
 def schedule_manual_blueprint(
     *,
     days: list[DayPlan],
@@ -142,53 +160,99 @@ def schedule_manual_blueprint(
 
     blueprints 元素 = (title, task_type, estimated_minutes, topic_key, description)。
     规则：跳过休息日；每天最多 4 个任务；单日负载不超 available_minutes；
+    每周预留约 10% 缓冲（§10.6）；复习任务优先 1/3/7 天间隔（§10.7）；
     放不下 → 顺延；所有日期耗尽 → StudyPlanInfeasibleError。
     """
     if not blueprints:
         raise ValueError("task_blueprint 不能为空")
-    # 可行性预检（§10.12）：总需求不超过总供给
+
+    buckets = [
+        DayBucket(day=d, week_key=_week_key(d.local_date)) for d in days if not d.is_rest_day
+    ]
+    if not buckets:
+        raise StudyPlanInfeasibleError("计划周期内没有可学习日")
+
+    # §10.6：每周容量 = 周总可用分钟的 90%（单日上限仍为 available_minutes）
+    week_cap: dict[str, int] = {}
+    for bucket in buckets:
+        week_cap[bucket.week_key] = week_cap.get(bucket.week_key, 0) + bucket.day.available_minutes
+    for key in week_cap:
+        week_cap[key] = int(week_cap[key] * (1 - WEEKLY_BUFFER_RATIO))
+    week_used: dict[str, int] = {}
+
+    # 可行性预检（§10.12）：总需求不超过周缓冲后总供给
     total_needed = sum(bp[2] for bp in blueprints)
-    total_available = sum(d.available_minutes for d in days if not d.is_rest_day)
+    total_available = sum(week_cap.values())
     if total_needed > total_available:
         raise StudyPlanInfeasibleError(
             "当前时间预算无法在截止日期前完成目标：总需求"
-            f" {total_needed} 分钟超过可用 {total_available} 分钟"
+            f" {total_needed} 分钟超过周缓冲后可用 {total_available} 分钟"
         )
 
-    buckets = [DayBucket(day=d) for d in days if not d.is_rest_day]
-    bucket_index = 0
     result: list[ScheduledTaskDraft] = []
+    by_date = {b.day.local_date: b for b in buckets}
+    topic_placed: dict[str, list[date]] = {}
+
+    def _place(
+        *,
+        title: str,
+        task_type: str,
+        minutes: int,
+        raw_minutes: int,
+        basis: str,
+        topic_key: str | None,
+        description: str,
+        suffix: str,
+    ) -> bool:
+        candidates: list[DayBucket] = []
+        if task_type == "review" and topic_key and topic_key in topic_placed:
+            # §10.7：复习任务优先 1、3、7 天间隔（相对同主题最近任务）
+            anchor = max(topic_placed[topic_key])
+            for offset in REVIEW_INTERVAL_DAYS:
+                day = by_date.get(anchor + timedelta(days=offset))
+                if day is not None:
+                    candidates.append(day)
+        for bucket in [b for b in buckets if b not in candidates]:
+            candidates.append(bucket)
+        for bucket in candidates:
+            if not bucket.can_accept(minutes, week_used, week_cap):
+                continue
+            bucket.used_minutes += minutes
+            bucket.task_count += 1
+            week_used[bucket.week_key] = week_used.get(bucket.week_key, 0) + minutes
+            result.append(
+                ScheduledTaskDraft(
+                    title=title + suffix,
+                    task_type=task_type,
+                    estimated_minutes=minutes,
+                    model_estimated_minutes=raw_minutes,
+                    estimation_basis=basis,
+                    topic_key=topic_key,
+                    description=description,
+                    scheduled_date=bucket.day.local_date,
+                    order_index=bucket.task_count,
+                )
+            )
+            if topic_key:
+                topic_placed.setdefault(topic_key, []).append(bucket.day.local_date)
+            return True
+        return False
 
     for title, task_type, raw_minutes, topic_key, description in blueprints:
         pieces, basis = normalize_minutes(raw_minutes, session_min, session_max)
         piece_count = len(pieces)
         for piece_no, minutes in enumerate(pieces, start=1):
-            placed = False
-            attempts = 0
-            while attempts < len(buckets):
-                bucket = buckets[bucket_index % len(buckets)]
-                bucket_index += 1
-                attempts += 1
-                if bucket.can_accept(minutes):
-                    bucket.used_minutes += minutes
-                    bucket.task_count += 1
-                    suffix = f"（拆分 {piece_no}/{piece_count}）" if piece_count > 1 else ""
-                    result.append(
-                        ScheduledTaskDraft(
-                            title=title + suffix,
-                            task_type=task_type,
-                            estimated_minutes=minutes,
-                            model_estimated_minutes=raw_minutes,
-                            estimation_basis=basis,
-                            topic_key=topic_key,
-                            description=description,
-                            scheduled_date=bucket.day.local_date,
-                            order_index=bucket.task_count,
-                        )
-                    )
-                    placed = True
-                    break
-            if not placed:
+            suffix = f"（拆分 {piece_no}/{piece_count}）" if piece_count > 1 else ""
+            if not _place(
+                title=title,
+                task_type=task_type,
+                minutes=minutes,
+                raw_minutes=raw_minutes,
+                basis=basis,
+                topic_key=topic_key,
+                description=description,
+                suffix=suffix,
+            ):
                 raise StudyPlanInfeasibleError(f"任务「{title}」无法在截止日期前排入任何学习日")
     return result
 

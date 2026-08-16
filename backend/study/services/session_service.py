@@ -96,13 +96,17 @@ async def heartbeat(
         raise StudyRateLimitedError(
             "heartbeat 过快（小于最小有效间隔）", retry_after=max(1, min_interval_seconds)
         )
-    await repo.update_session_heartbeat(
+    updated = await repo.update_session_heartbeat(
         session,
         session_id=UUID(str(session_row["session_id"])),
+        user_id=UUID(str(session_row["user_id"])),
         seq=seq,
         now=now,
         added_seconds=added,
     )
+    if not updated:
+        # C14：CAS rowcount=0（并发更高 seq 已落库）→ 重读判定，不再静默成功
+        raise StudySessionConflictError("heartbeat 已被更新序列占用（并发冲突）")
     refreshed = await repo.get_session_row(
         session,
         user_id=UUID(str(session_row["user_id"])),
@@ -139,6 +143,7 @@ async def finish_session(
     updated = await repo.update_session_finish(
         session,
         session_id=UUID(str(session_row["session_id"])),
+        user_id=UUID(str(session_row["user_id"])),
         new_status="abandoned" if abandoned else "completed",
         now=now,
         added_seconds=added,

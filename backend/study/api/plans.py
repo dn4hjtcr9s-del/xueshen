@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Request
@@ -419,7 +419,20 @@ async def _revision_decision(
         decision=decision,
         reason=reason,
     )
-    content = RevisionOut.model_validate(revision).model_dump(mode="json")
+    content: dict[str, Any] = {
+        "revision": RevisionOut.model_validate(revision).model_dump(mode="json"),
+        "operation": None,
+    }
+    proposal_op = revision.get("proposal_operation_id")
+    if proposal_op is not None:
+        op_row = await repo.get_operation_row(
+            session, user_id=auth.user_id, operation_id=UUID(str(proposal_op))
+        )
+        content["operation"] = (
+            {"operation_id": str(proposal_op), "status": op_row["status"]}
+            if op_row is not None
+            else None
+        )
     await record_idempotent_result(
         session,
         user_id=auth.user_id,
@@ -481,6 +494,14 @@ async def adjust_plan(
             "reason": "user_adjustment",
             "user_requested": True,
         },
+    )
+    # C1：内联执行前先 CAS queued→running，Worker 只 claim queued，
+    # 不会二次执行产生重复 revision/任务
+    await repo.update_operation_status(
+        session,
+        operation_id=operation_id,
+        expected_status="queued",
+        new_status="running",
     )
     # 同步执行确定性 replan（无模型节点，与 Worker 路径同一函数）
     result = await run_replan_operation(

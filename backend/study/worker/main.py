@@ -63,11 +63,12 @@ async def _run_daily_feed(
         )
     except Exception as exc:
         if payload.get("feed_run_id"):
-            await feed_service.fail_feed_run(
-                session_factory,
-                feed_run_id=UUID(payload["feed_run_id"]),
-                error_code=type(exc).__name__,
-            )
+            async with session_factory() as session:
+                await feed_service.fail_feed_run(
+                    session,
+                    feed_run_id=UUID(payload["feed_run_id"]),
+                    error_code=type(exc).__name__,
+                )
         raise
     return {"feed_run_id": result.get("feed_run_id")}
 
@@ -244,7 +245,7 @@ async def _finish_operation(
             )
             attempts = int(row["attempt_count"]) if row else 0
             cap = int(row["max_attempts"]) if row and row["max_attempts"] else max_attempts
-            if status == "failed" and attempts < cap:
+            if status == "failed" and attempts < cap and attempts > 0:
                 # 重试：回 queued，指数退避由 lease_expires_at 置空 + 下次 claim 处理
                 await session.execute(
                     text(
@@ -360,10 +361,12 @@ async def run_forever(settings: Settings) -> None:
                         settings=settings,
                         logger=logger,
                     )
+                    # C2：执行结果自带终态（needs_input 等人工确认，不得覆写）
+                    terminal = str(result.get("status") or "succeeded")
                     await _finish_operation(
                         db.session_factory,
                         operation_id=operation_id,
-                        status="succeeded",
+                        status=terminal,
                         result_payload=result,
                     )
                 except Exception as exc:

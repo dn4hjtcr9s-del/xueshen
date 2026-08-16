@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -30,7 +31,8 @@ ROLE_MODELS = {
     "feed": "openai_study_feed_model",
 }
 
-ROLE_TIMEOUTS: dict[str, float] = {"intake": 8.0, "plan": 90.0, "feed": 60.0}
+#: stale running 缓存行的回收阈值（超过后允许重试，防止进程崩溃毒化 30 天）
+STALE_RUNNING_SECONDS = 600.0
 
 
 def input_hash_of(*parts: Any) -> str:
@@ -51,8 +53,13 @@ class StudyOpenAIGateway:
         self._client = AsyncOpenAI(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url or None,
-            timeout=max(ROLE_TIMEOUTS.values()),
         )
+        # §19/D10：intake 超时必须来自 STUDY_INTAKE_REQUEST_TIMEOUT_SECONDS
+        self._timeouts: dict[str, float] = {
+            "intake": settings.study_intake_request_timeout_seconds,
+            "plan": settings.study_operation_soft_timeout_seconds,
+            "feed": 60.0,
+        }
 
     def model_for(self, purpose: str) -> str:
         model = getattr(self._settings, ROLE_MODELS[purpose], "")
@@ -96,20 +103,54 @@ class StudyOpenAIGateway:
         if cached is not None and cached["status"] == "succeeded" and cached["validated_response"]:
             self._logger.info("模型响应缓存命中 purpose=%s", purpose)
             return text_format.model_validate(cached["validated_response"])
+        if cached is not None and cached["status"] == "running":
+            age = (now - cached["created_at"]).total_seconds()
+            if age <= STALE_RUNNING_SECONDS:
+                raise StudyPlanGenerationFailedError("同输入模型调用仍在执行")
+            # 进程崩溃遗留的 running 行：标记失败后允许重试（评审必改 #1）
+            self._logger.warning("回收 stale running 模型缓存 purpose=%s", purpose)
+            await repo.update_model_call_result(
+                session,
+                model_call_id=UUID(str(cached["model_call_id"])),
+                status="failed",
+                validated_response=None,
+                error_code="STALE_RUNNING",
+            )
+            cached = await repo.get_model_call_row(
+                session,
+                user_id=user_id,
+                purpose=purpose,
+                input_hash=input_hash,
+                prompt_version=prompt_version,
+                model=model,
+                schema_version=schema_version,
+            )
 
-        record_id = uuid4()
-        inserted = await repo.insert_model_call_row(
-            session,
-            model_call_id=record_id,
-            user_id=user_id,
-            operation_id=operation_id,
-            purpose=purpose,
-            input_hash=input_hash,
-            prompt_version=prompt_version,
-            model=model,
-            schema_version=schema_version,
-            expires_at=repo.model_cache_expiry(now, cache_retention_days),
-        )
+        if cached is not None and cached["status"] == "failed":
+            # 唯一键只有一行：回收失败行复用其 model_call_id 重试
+            record_id = UUID(str(cached["model_call_id"]))
+            await repo.update_model_call_result(
+                session,
+                model_call_id=record_id,
+                status="running",
+                validated_response=None,
+                error_code=None,
+            )
+            inserted = True
+        else:
+            record_id = uuid4()
+            inserted = await repo.insert_model_call_row(
+                session,
+                model_call_id=record_id,
+                user_id=user_id,
+                operation_id=operation_id,
+                purpose=purpose,
+                input_hash=input_hash,
+                prompt_version=prompt_version,
+                model=model,
+                schema_version=schema_version,
+                expires_at=repo.model_cache_expiry(now, cache_retention_days),
+            )
         if not inserted:
             # 并发同键：重查缓存
             cached = await repo.get_model_call_row(
@@ -124,7 +165,18 @@ class StudyOpenAIGateway:
             if cached is not None and cached["status"] == "succeeded":
                 assert cached["validated_response"] is not None
                 return text_format.model_validate(cached["validated_response"])
-            raise StudyPlanGenerationFailedError("模型调用并发冲突，请重试")
+            if cached is not None and cached["status"] == "failed":
+                # 竞争失败行：复用同一唯一键记录继续执行
+                record_id = UUID(str(cached["model_call_id"]))
+                await repo.update_model_call_result(
+                    session,
+                    model_call_id=record_id,
+                    status="running",
+                    validated_response=None,
+                    error_code=None,
+                )
+            else:
+                raise StudyPlanGenerationFailedError("模型调用并发冲突，请重试")
 
         raw: Any = None
         usage: dict[str, Any] = {}
@@ -134,17 +186,20 @@ class StudyOpenAIGateway:
             from openai.types.shared import ReasoningEffort
             from openai.types.shared_params import Reasoning
 
-            response = await self._client.responses.create(
-                model=model,
-                input=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-                ],
-                text={"format": _json_schema_format(text_format)},
-                max_output_tokens=2000,
-                reasoning=Reasoning(
-                    effort=cast(ReasoningEffort, self._settings.openai_reasoning_effort)
+            response = await asyncio.wait_for(
+                self._client.responses.create(
+                    model=model,
+                    input=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                    ],
+                    text={"format": _json_schema_format(text_format)},
+                    max_output_tokens=2000,
+                    reasoning=Reasoning(
+                        effort=cast(ReasoningEffort, self._settings.openai_reasoning_effort)
+                    ),
                 ),
+                timeout=self._timeouts.get(purpose, 60.0),
             )
             raw = response.output_text or ""
             if response.usage is not None:

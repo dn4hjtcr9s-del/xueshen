@@ -122,13 +122,20 @@ async def publish_once(db: StudyDatabase, settings: Settings, logger: logging.Lo
                             else 10
                         )
                         status = "dead_letter" if attempts >= cap else "pending"
+                        backoff = min(2 ** max(attempts, 1), 300)
                         await session.execute(
                             text(
                                 "UPDATE study_outbox SET status = :status, last_error = :err, "
-                                "lease_owner = NULL, lease_expires_at = NULL "
+                                "lease_owner = NULL, lease_expires_at = NULL, "
+                                "available_at = now() + make_interval(secs => :backoff) "
                                 "WHERE event_id = :event_id"
                             ),
-                            {"status": status, "err": str(exc)[:500], "event_id": event_id},
+                            {
+                                "status": status,
+                                "err": str(exc)[:500],
+                                "event_id": event_id,
+                                "backoff": backoff,
+                            },
                         )
     return delivered
 

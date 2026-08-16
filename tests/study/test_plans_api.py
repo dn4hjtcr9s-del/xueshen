@@ -170,8 +170,8 @@ class TestRevisionDecision:
             headers={**auth(USER_A), "Idempotency-Key": "acc-1"},
         )
         assert r.status_code == 200, r.text
-        assert r.json()["status"] == "active"
-        assert r.json()["decision_reason"] is None
+        assert r.json()["revision"]["status"] == "active"
+        assert r.json()["revision"]["decision_reason"] is None
 
     async def test_reject_keeps_current_state(self, client: AsyncClient) -> None:
         plan = await _create_plan(client)
@@ -182,8 +182,8 @@ class TestRevisionDecision:
             headers={**auth(USER_A), "Idempotency-Key": "rej-1"},
         )
         assert r.status_code == 200
-        assert r.json()["status"] == "rejected"
-        assert r.json()["decision_reason"] == "暂不需要"
+        assert r.json()["revision"]["status"] == "rejected"
+        assert r.json()["revision"]["decision_reason"] == "暂不需要"
 
     async def test_accept_twice_is_invalid_transition(self, client: AsyncClient) -> None:
         plan = await _create_plan(client)

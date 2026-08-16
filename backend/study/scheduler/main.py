@@ -113,6 +113,7 @@ async def scan_once(db: StudyDatabase, settings: Settings, logger: logging.Logge
                 triggered += 1
         except Exception as exc:
             logger.warning("daily feed ensure 失败 user=%s: %s", user_id, exc)
+    await _cleanup_retention(db, settings, logger)
     if triggered:
         logger.info("daily feed scan 触发 %s 个计划", triggered)
 
@@ -128,19 +129,21 @@ async def scan_once(db: StudyDatabase, settings: Settings, logger: logging.Logge
 async def _trigger_weekly_replan(
     db: StudyDatabase, settings: Settings, logger: logging.Logger
 ) -> int:
-    """每周复盘：每 active plan 每 ISO 周入队一次 replan operation（幂等）。"""
+    """每周复盘：每 active plan 按其自身时区的 ISO 周入队一次（幂等，评审必改 #13）。"""
+    from sqlalchemy.exc import IntegrityError
+
     from backend.study.persistence import repositories as repo
 
-    now = datetime.now().astimezone()
-    iso_year, iso_week, _ = now.isocalendar()
-    triggered = 0
     async with db.session_factory() as session:
         plans = (
             (
                 await session.execute(
                     text(
                         """
-                    SELECT plan_id, user_id FROM study_plans
+                    SELECT plan_id, user_id,
+                           EXTRACT(ISOYEAR FROM (now() AT TIME ZONE p.timezone))::int AS iso_year,
+                           EXTRACT(WEEK FROM (now() AT TIME ZONE p.timezone))::int AS iso_week
+                    FROM study_plans p
                     WHERE status = 'active' AND target_date >= current_date
                     """
                     )
@@ -149,9 +152,10 @@ async def _trigger_weekly_replan(
             .mappings()
             .all()
         )
+    triggered = 0
     for plan_row in plans:
         plan_id = UUID(str(plan_row["plan_id"]))
-        key = f"weekly_replan:{plan_id}:{iso_year}:{iso_week}"
+        key = f"weekly_replan:{plan_id}:{int(plan_row['iso_year'])}:{int(plan_row['iso_week'])}"
         try:
             async with db.session_factory() as session:
                 async with session.begin():
@@ -177,10 +181,28 @@ async def _trigger_weekly_replan(
                         },
                     )
                 triggered += 1
-        except Exception:
-            # 幂等键冲突 = 本周已触发；跳过
-            continue
+        except IntegrityError:
+            # 幂等键冲突 = 该计划本周已触发；回滚后跳过（不吞其他异常）
+            pass
     return triggered
+
+
+async def _cleanup_retention(db: StudyDatabase, settings: Settings, logger: logging.Logger) -> int:
+    """保留期清理（§15.1/§15.2）：幂等 7 天、模型缓存 30 天，分批删除。"""
+    removed = 0
+    async with db.session_factory() as session:
+        async with session.begin():
+            result = await session.execute(
+                text("DELETE FROM study_idempotency_requests WHERE expires_at < now()")
+            )
+            removed += int(getattr(result, "rowcount", 0) or 0)
+            result = await session.execute(
+                text("DELETE FROM study_model_call_records WHERE expires_at < now()")
+            )
+            removed += int(getattr(result, "rowcount", 0) or 0)
+    if removed:
+        logger.info("保留期清理删除 %s 行（幂等/模型缓存）", removed)
+    return removed
 
 
 async def run_forever(settings: Settings) -> None:

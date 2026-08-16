@@ -254,8 +254,8 @@ async def reopen_task(
         task_id=UUID(str(task_row["task_id"])),
         expected_version=expected_version,
         new_status=new_status,
-        completed_at=None,
-        completion_source=None,
+        clear_completed_at=True,
+        clear_completion_source=True,
     ):
         await _task_version_conflict(session, task_id=UUID(str(task_row["task_id"])))
     await repo.insert_task_event(

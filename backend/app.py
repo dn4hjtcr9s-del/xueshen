@@ -415,16 +415,22 @@ def create_app(
         current_version = getattr(exc, "current_version", None)
         retry_after = getattr(exc, "retry_after", None)
         headers = {"Retry-After": str(retry_after)} if retry_after else None
+        content: dict[str, object] = _public_error_body(
+            exc.code,
+            exc.message,
+            retryable=exc.retryable,
+            trace_id=trace_id,
+            field=exc.field,
+            current_version=current_version,
+        )
+        if getattr(exc, "adjustment_required", False):
+            # §12.3：SCHEDULE_CONFLICT 响应带 adjustment_required=true
+            error_body = dict(cast(dict[str, object], content["error"]))
+            error_body["adjustment_required"] = True
+            content["error"] = error_body
         return JSONResponse(
             status_code=exc.http_status,
-            content=_public_error_body(
-                exc.code,
-                exc.message,
-                retryable=exc.retryable,
-                trace_id=trace_id,
-                field=exc.field,
-                current_version=current_version,
-            ),
+            content=content,
             headers=headers,
         )
 
@@ -458,16 +464,22 @@ def create_app(
         current_version = getattr(exc, "current_version", None)
         retry_after = getattr(exc, "retry_after", None)
         headers = {"Retry-After": str(retry_after)} if retry_after else None
+        content: dict[str, object] = _public_error_body(
+            exc.code,
+            exc.message,
+            retryable=exc.retryable,
+            trace_id=trace_id,
+            field=exc.field,
+            current_version=current_version,
+        )
+        if getattr(exc, "adjustment_required", False):
+            # §12.3：SCHEDULE_CONFLICT 响应带 adjustment_required=true
+            error_body = dict(cast(dict[str, object], content["error"]))
+            error_body["adjustment_required"] = True
+            content["error"] = error_body
         return JSONResponse(
             status_code=exc.http_status,
-            content=_public_error_body(
-                exc.code,
-                exc.message,
-                retryable=exc.retryable,
-                trace_id=trace_id,
-                field=exc.field,
-                current_version=current_version,
-            ),
+            content=content,
             headers=headers,
         )
 

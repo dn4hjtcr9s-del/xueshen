@@ -21,7 +21,7 @@ from sqlalchemy import text
 
 from backend.auth.context import AuthContext
 from backend.shared.auth_context import get_auth_context
-from backend.study.api.dependencies import StudyRuntimeDep, StudySessionDep
+from backend.study.api.dependencies import StudyRuntime, StudyRuntimeDep, StudySessionDep
 from backend.study.contracts.api import EnsureTodayOut, HomeOut
 from backend.study.persistence import repositories as repo
 from backend.study.services import feed_service
@@ -35,7 +35,12 @@ router = APIRouter()
 
 
 async def _generation_status(
-    session: StudySessionDep, *, user_id: UUID, plan: dict[str, Any] | None, local_date: date
+    session: StudySessionDep,
+    *,
+    runtime: StudyRuntime,
+    user_id: UUID,
+    plan: dict[str, Any] | None,
+    local_date: date,
 ) -> tuple[str, list[dict[str, Any]]]:
     """§12.6：feed run 状态判定 + 当日 active 推荐。"""
     if plan is None:
@@ -59,8 +64,12 @@ async def _generation_status(
         plan_id=UUID(str(plan["plan_id"])),
         revision_id=plan["current_revision_id"],
         local_date=local_date,
+        daily_feed_enabled=bool(runtime.settings.study_daily_feed_enabled),
+        memory_read_enabled=bool(runtime.settings.study_memory_read_enabled),
     )
-    if row["status"] == "succeeded" and row["input_hash"] == current_hash:
+    if row["status"] == "succeeded" and feed_service.feed_run_matches_deterministic(
+        row["input_hash"], current_hash
+    ):
         items = (
             (
                 await session.execute(
@@ -106,7 +115,7 @@ async def get_home(
         )
     home = await aggregate_home(session, user_id=auth.user_id, local_date=local_date)
     status, recommendations = await _generation_status(
-        session, user_id=auth.user_id, plan=plan, local_date=local_date
+        session, runtime=runtime, user_id=auth.user_id, plan=plan, local_date=local_date
     )
     home["today"]["generation_status"] = status
     home["today"]["recommendations"] = [
@@ -120,7 +129,7 @@ async def get_home(
             "estimated_minutes": r["estimated_minutes"],
             "status": r["status"],
         }
-        for r in recommendations
+        for r in recommendations[:2]  # 验收 #10：最多两条额外自适应推荐
     ]
     return HomeOut.model_validate(home)
 

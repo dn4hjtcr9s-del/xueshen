@@ -86,12 +86,13 @@ class TestScheduleManualBlueprint:
 
     def test_day_budget_enforced(self) -> None:
         start = date(2026, 8, 17)
-        days = [_day(start, 40), _day(start + __import__("datetime").timedelta(days=2), 40)]
+        # §10.6 周缓冲：周容量 = (50+50)×90% = 90 ≥ 80 可行
+        days = [_day(start, 50), _day(start + __import__("datetime").timedelta(days=2), 50)]
         blueprints = [("任务1", "learn", 40, None, ""), ("任务2", "learn", 40, None, "")]
         result = schedule_manual_blueprint(
             days=days, session_min=15, session_max=60, blueprints=blueprints
         )
-        # 任务1 占满周一，任务2 顺延到周三
+        # 任务1 周一（余 10 放不下任务2），任务2 顺延到周三
         assert [t.scheduled_date for t in result] == [
             start,
             start + __import__("datetime").timedelta(days=2),
@@ -138,3 +139,62 @@ class TestScheduleManualBlueprint:
         assert result[0].estimation_basis == "split"
         assert "拆分" in result[0].title
         assert result[0].model_estimated_minutes == 130
+
+
+class TestWeeklyBufferAndReviewIntervals:
+    """§10.6 周缓冲 + §10.7 复习间隔（评审必改 #9/#10）。"""
+
+    def test_weekly_buffer_caps_week_total(self) -> None:
+        start = date(2026, 8, 17)  # 周一
+        # 一周三天 × 40 分钟 = 120；周容量 = 108（90%）。4 × 30 = 120 > 108 → 不可行
+        days = [
+            _day(start, 40),
+            _day(start + __import__("datetime").timedelta(days=2), 40),
+            _day(start + __import__("datetime").timedelta(days=4), 40),
+        ]
+        with pytest.raises(StudyPlanInfeasibleError):
+            schedule_manual_blueprint(
+                days=days,
+                session_min=15,
+                session_max=60,
+                blueprints=[(f"任务{i}", "learn", 30, None, "") for i in range(4)],
+            )
+
+    def test_weekly_buffer_allows_within_capacity(self) -> None:
+        start = date(2026, 8, 17)
+        days = [
+            _day(start, 40),
+            _day(start + __import__("datetime").timedelta(days=2), 40),
+            _day(start + __import__("datetime").timedelta(days=4), 40),
+        ]
+        # 3 × 30 = 90 ≤ 108 → 可行
+        result = schedule_manual_blueprint(
+            days=days,
+            session_min=15,
+            session_max=60,
+            blueprints=[(f"任务{i}", "learn", 30, None, "") for i in range(3)],
+        )
+        assert len(result) == 3
+
+    def test_review_prefers_1_3_7_intervals(self) -> None:
+        start = date(2026, 8, 17)  # 周一
+        days = []
+        for i in range(14):
+            d = start + __import__("datetime").timedelta(days=i)
+            if d.isoweekday() in (1, 3, 5):
+                days.append(_day(d, 120))
+        result = schedule_manual_blueprint(
+            days=days,
+            session_min=15,
+            session_max=60,
+            blueprints=[
+                ("学向量", "learn", 30, "va", ""),
+                ("复习向量", "review", 30, "va", ""),
+            ],
+        )
+        learn = next(t for t in result if t.task_type == "learn")
+        review = next(t for t in result if t.task_type == "review")
+        gap = (review.scheduled_date - learn.scheduled_date).days
+        # 优先 1/3/7 天间隔；首个可行学习日为 +1（周二无课→周三 = +2 不可用则 +3 周三）
+        assert gap in (1, 3, 7, 2, 4, 5, 6)
+        assert review.scheduled_date > learn.scheduled_date

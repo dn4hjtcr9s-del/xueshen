@@ -101,6 +101,11 @@ async def build_carryover_replan(
     返回 (revision_row, task_diff, major, high_impact)。
     task_diff 的 op：keep（复制，可含新日期）/ remove（移除）。
     """
+    # 计划行锁：同一计划的 replan/决策串行，next_revision_no 无竞态（必改 #4）
+    await session.execute(
+        text("SELECT plan_id FROM study_plans WHERE plan_id = :plan_id FOR UPDATE"),
+        {"plan_id": plan["plan_id"]},
+    )
     base_revision_id = plan["current_revision_id"]
     if base_revision_id is None:
         raise ValueError("计划缺少 active revision")
@@ -118,11 +123,22 @@ async def build_carryover_replan(
         cursor += timedelta(days=1)
 
     diff: list[dict[str, Any]] = []
+    # 容量负载只算未完成（completed 已完成，不占剩余容量；评审必改 #8a）
     day_load: dict[date, int] = {}
     day_count: dict[date, int] = {}
     for task in base_tasks:
         if task["status"] == "cancelled":
             diff.append({"op": "remove", "task_id": str(task["task_id"])})
+            continue
+        if task["status"] == "completed":
+            # 已完成任务保留并计入进度（§10.11 不得修改），但不占剩余容量
+            diff.append(
+                {
+                    "op": "keep",
+                    "task_id": str(task["task_id"]),
+                    "scheduled_date": task["scheduled_date"].isoformat(),
+                }
+            )
             continue
         d = task["scheduled_date"]
         day_load[d] = day_load.get(d, 0) + int(task["estimated_minutes"])
@@ -163,6 +179,10 @@ async def build_carryover_replan(
         if placed is None:
             impossible = True
             placed = task["scheduled_date"]
+        else:
+            # 从旧日负载中扣除，避免同一任务双计（评审必改 #8b）
+            old_date = task["scheduled_date"]
+            day_load[old_date] = max(0, day_load.get(old_date, 0) - minutes)
         moves.append(
             {
                 "op": "keep",
@@ -173,29 +193,43 @@ async def build_carryover_replan(
         )
         diff.append(moves[-1])
 
+    options: list[str] = []
+    major = impossible
+    high_impact = False
     if impossible:
-        # §10.13：无法在截止日期内顺延 → 必须待确认（提出延长目标日期）
-        new_target = target_date + timedelta(weeks=1)
+        # §10.12/§10.13：不静默改目标日期；在 revision 快照中提出可选方案
+        total_remaining = sum(
+            int(t["estimated_minutes"])
+            for t in base_tasks
+            if t["status"] not in ("completed", "cancelled")
+        )
+        weekly_minutes = int(plan["weekly_minutes"])
+        extra_weeks = max(1, -(-total_remaining // max(weekly_minutes, 1)))
+        options = [
+            f"延长截止日期约 {extra_weeks} 周",
+            "增加每周可用时间",
+            "缩小学习范围（移除部分未完成任务）",
+        ]
+        major = True
+        high_impact = extra_weeks >= 1
     else:
-        new_target = target_date
-
-    major, high_impact, _reasons = classify_adjustment(
-        base_daily_minutes=base_daily,
-        new_daily_minutes=day_load,
-        session_min_minutes=int(plan["session_min_minutes"]),
-        removed_incomplete_ratio=0.0,
-        base_target_date=target_date,
-        new_target_date=new_target,
-        scope_changed=False,
-        core_chapters_changed=False,
-    )
+        major, high_impact, _reasons = classify_adjustment(
+            base_daily_minutes=base_daily,
+            new_daily_minutes=day_load,
+            session_min_minutes=int(plan["session_min_minutes"]),
+            removed_incomplete_ratio=0.0,
+            base_target_date=target_date,
+            new_target_date=target_date,
+            scope_changed=False,
+            core_chapters_changed=False,
+        )
 
     revision = await _insert_replan_revision(
         session,
         plan=plan,
         reason=reason,
         diff=diff,
-        new_target_date=new_target,
+        options=options,
         proposal_operation_id=proposal_operation_id,
     )
     return revision, diff, major, high_impact
@@ -272,8 +306,8 @@ async def _insert_replan_revision(
     plan: dict[str, Any],
     reason: str,
     diff: list[dict[str, Any]],
-    new_target_date: date,
-    proposal_operation_id: UUID | None,
+    options: list[str] | None = None,
+    proposal_operation_id: UUID | None = None,
 ) -> dict[str, Any]:
     revision_id = uuid4()
     revision_no = await repo.next_revision_no(session, plan_id=UUID(str(plan["plan_id"])))
@@ -283,21 +317,17 @@ async def _insert_replan_revision(
         plan_id=UUID(str(plan["plan_id"])),
         revision_no=revision_no,
         reason=reason,
-        input_snapshot={"task_diff": diff, "new_target_date": new_target_date.isoformat()},
+        input_snapshot={"task_diff": diff, "options": options or []},
         personalization_status="not_requested",
         personalization_reason=None,
-        change_summary=f"自动调整（{reason}）：顺延未完成任务" if diff else "无变化调整",
+        change_summary=(
+            "顺延未完成任务；截止日期内放不下，需人工确认可选方案（§10.12）"
+            if options
+            else (f"自动调整（{reason}）：顺延未完成任务" if diff else "无变化调整")
+        ),
         proposal_operation_id=proposal_operation_id,
         base_revision_id=plan["current_revision_id"],
     )
-    if new_target_date != plan["target_date"]:
-        await session.execute(
-            text(
-                "UPDATE study_plans SET target_date = :target, version = version + 1, "
-                "updated_at = now() WHERE plan_id = :plan_id"
-            ),
-            {"target": new_target_date, "plan_id": plan["plan_id"]},
-        )
     await session.commit()
     row = await repo.get_revision_row(
         session, plan_id=UUID(str(plan["plan_id"])), revision_id=revision_id

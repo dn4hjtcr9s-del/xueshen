@@ -586,15 +586,20 @@ async def update_task_status_cas(
     completed_at: datetime | None = None,
     started_at: datetime | None = None,
     completion_source: str | None = None,
+    clear_completed_at: bool = False,
+    clear_completion_source: bool = False,
 ) -> int:
+    """CAS 状态转移；clear_* 显式置 NULL（reopen 语义，§12.3/D11）。"""
     result = await session.execute(
         text(
             """
             UPDATE study_tasks
             SET status = :new_status, version = version + 1,
-                completed_at = COALESCE(:completed_at, completed_at),
+                completed_at = CASE WHEN :clear_completed_at THEN NULL
+                                    ELSE COALESCE(:completed_at, completed_at) END,
                 started_at = COALESCE(:started_at, started_at),
-                completion_source = COALESCE(:completion_source, completion_source)
+                completion_source = CASE WHEN :clear_completion_source THEN NULL
+                                         ELSE COALESCE(:completion_source, completion_source) END
             WHERE task_id = :task_id AND version = :expected_version
             """
         ),
@@ -603,6 +608,8 @@ async def update_task_status_cas(
             "completed_at": completed_at,
             "started_at": started_at,
             "completion_source": completion_source,
+            "clear_completed_at": clear_completed_at,
+            "clear_completion_source": clear_completion_source,
             "task_id": task_id,
             "expected_version": expected_version,
         },
@@ -752,19 +759,20 @@ async def update_session_heartbeat(
     session: AsyncSession,
     *,
     session_id: UUID,
+    user_id: UUID,
     seq: int,
     now: datetime,
     added_seconds: int,
 ) -> int:
-    """heartbeat 落库：seq 递增 CAS（同 seq 由上层幂等短路，不进这里）。"""
+    """heartbeat 落库：seq 递增 CAS + user 谓词（同 seq 由上层幂等短路）。"""
     result = await session.execute(
         text(
             """
             UPDATE study_sessions
             SET last_heartbeat_at = :now, last_heartbeat_seq = :seq,
                 active_seconds = active_seconds + :added
-            WHERE session_id = :session_id AND status = 'active'
-              AND last_heartbeat_seq < :seq
+            WHERE session_id = :session_id AND user_id = :user_id
+              AND status = 'active' AND last_heartbeat_seq < :seq
             """
         ),
         {
@@ -772,6 +780,7 @@ async def update_session_heartbeat(
             "seq": seq,
             "added": added_seconds,
             "session_id": session_id,
+            "user_id": user_id,
         },
     )
     return _rowcount(result)
@@ -781,6 +790,7 @@ async def update_session_finish(
     session: AsyncSession,
     *,
     session_id: UUID,
+    user_id: UUID,
     new_status: str,
     now: datetime,
     added_seconds: int,
@@ -791,10 +801,16 @@ async def update_session_finish(
             UPDATE study_sessions
             SET status = :new_status, ended_at = :now,
                 active_seconds = active_seconds + :added
-            WHERE session_id = :session_id AND status = 'active'
+            WHERE session_id = :session_id AND user_id = :user_id AND status = 'active'
             """
         ),
-        {"new_status": new_status, "now": now, "added": added_seconds, "session_id": session_id},
+        {
+            "new_status": new_status,
+            "now": now,
+            "added": added_seconds,
+            "session_id": session_id,
+            "user_id": user_id,
+        },
     )
     return _rowcount(result)
 
@@ -912,15 +928,18 @@ async def update_operation_status(
     result_payload: dict[str, Any] | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
+    user_id: UUID | None = None,
 ) -> int:
+    """operation 终态更新；user_id 提供时加用户谓词（纵深防御，§18.2）。"""
     expected_clause = "status = :expected_status" if expected_status else "TRUE"
+    user_clause = "AND user_id = :user_id" if user_id is not None else ""
     result = await session.execute(
         text(
             f"""
             UPDATE study_operations
             SET status = :new_status, result = :result_payload,
                 error_code = :error_code, error_message = :error_message, updated_at = now()
-            WHERE operation_id = :operation_id AND {expected_clause}
+            WHERE operation_id = :operation_id AND {expected_clause} {user_clause}
             """
         ),
         {
@@ -930,6 +949,7 @@ async def update_operation_status(
             "error_message": error_message,
             "operation_id": operation_id,
             "expected_status": expected_status,
+            "user_id": user_id,
         },
     )
     return _rowcount(result)
@@ -1028,6 +1048,8 @@ async def insert_idempotency_row(
         )
         return True
     except IntegrityError:
+        # 并发同键：回滚失败事务后由上层重查（否则 session 处于 aborted 状态）
+        await session.rollback()
         return False
 
 
@@ -1135,6 +1157,7 @@ async def insert_model_call_row(
         )
         return True
     except IntegrityError:
+        await session.rollback()
         return False
 
 
@@ -1192,6 +1215,22 @@ PURGE_TABLE_ORDER: tuple[str, ...] = (
 )
 
 
+#: purge 静态 DELETE 语句（表名全字面量，杜绝 f-string SQL）
+_PURGE_USER_STATEMENTS: tuple[str, ...] = (
+    "DELETE FROM study_account_purge_ledger WHERE user_id = :uid",
+    "DELETE FROM study_user_leases WHERE user_id = :uid",
+    "DELETE FROM study_idempotency_requests WHERE user_id = :uid",
+    "DELETE FROM study_outbox WHERE user_id = :uid",
+    "DELETE FROM study_operations WHERE user_id = :uid",
+    "DELETE FROM study_model_call_records WHERE user_id = :uid",
+    "DELETE FROM study_daily_stats WHERE user_id = :uid",
+    "DELETE FROM study_sessions WHERE user_id = :uid",
+    "DELETE FROM study_daily_feed_runs WHERE user_id = :uid",
+    "DELETE FROM study_plans WHERE user_id = :uid",
+    "DELETE FROM study_plan_intakes WHERE user_id = :uid",
+)
+
+
 async def purge_user_data(session: AsyncSession, *, user_id: UUID) -> int:
     """删除某用户全部 Study 数据（§18.9：覆盖全部表，返回删除行数）。
 
@@ -1208,6 +1247,10 @@ async def purge_user_data(session: AsyncSession, *, user_id: UUID) -> int:
     await _delete(
         "DELETE FROM study_daily_feed_items WHERE feed_run_id IN "
         "(SELECT feed_run_id FROM study_daily_feed_runs WHERE user_id = :uid)",
+        {"uid": user_id},
+    )
+    await _delete(
+        "DELETE FROM study_sessions WHERE user_id = :uid",
         {"uid": user_id},
     )
     await _delete(
@@ -1231,20 +1274,9 @@ async def purge_user_data(session: AsyncSession, *, user_id: UUID) -> int:
         "(SELECT plan_id FROM study_plans WHERE user_id = :uid)",
         {"uid": user_id},
     )
-    for table in (
-        "study_account_purge_ledger",
-        "study_user_leases",
-        "study_idempotency_requests",
-        "study_outbox",
-        "study_operations",
-        "study_model_call_records",
-        "study_daily_stats",
-        "study_sessions",
-        "study_daily_feed_runs",
-        "study_plans",
-        "study_plan_intakes",
-    ):
-        await _delete(f"DELETE FROM {table} WHERE user_id = :uid", {"uid": user_id})
+    # 全部静态语句（表名不拼接、不参数注入；纵深防御 §18.2）
+    for sql in _PURGE_USER_STATEMENTS:
+        await _delete(sql, {"uid": user_id})
     return count
 
 
