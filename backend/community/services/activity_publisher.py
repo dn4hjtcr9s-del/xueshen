@@ -277,7 +277,9 @@ class ActivityPublisher:
         async with self._session_factory() as session:
             async with session.begin():
                 await outbox_repo.mark_delivered(
-                    session, row["event_id"], worker_id=self.worker_id,
+                    session,
+                    row["event_id"],
+                    worker_id=self.worker_id,
                     delivery_result="published",
                 )
         # §12.3：source deletion 投递延迟（事件创建到投递成功）
