@@ -22,6 +22,19 @@ CONVERSATION_ERROR_CODES: frozenset[str] = frozenset(
         "ANSWER_VALIDATION_FAILED",
         "REQUEST_IDEMPOTENCY_CONFLICT",
         "EVENT_REPLAY_EXPIRED",
+        "KNOWLEDGE_SUMMARY_NOT_FOUND",
+        "KNOWLEDGE_SUMMARY_GENERATION_NOT_FOUND",
+        "KNOWLEDGE_SUMMARY_SOURCE_NOT_FOUND",
+        "KNOWLEDGE_SUMMARY_VERSION_CONFLICT",
+        "KNOWLEDGE_SUMMARY_MERGE_CONFLICT",
+        "KNOWLEDGE_SUMMARY_GENERATION_NOT_READY",
+        "KNOWLEDGE_SUMMARY_REQUEST_IDEMPOTENCY_CONFLICT",
+        "KNOWLEDGE_SUMMARY_INVALID_CONTENT",
+        "KNOWLEDGE_SUMMARY_SOURCE_CHANGED",
+        "KNOWLEDGE_SUMMARY_RATE_LIMITED",
+        "KNOWLEDGE_SUMMARY_INVALID_CURSOR",
+        "KNOWLEDGE_SUMMARY_SOURCE_SUPPRESSED",
+        "KNOWLEDGE_SUMMARY_REVIEW_NOT_FOUND",
     }
 )
 
@@ -89,6 +102,25 @@ class ModelUnavailableError(ConversationError):
     retryable = True
 
 
+class StructuredOutputError(ModelUnavailableError):
+    """结构化输出无法可靠完成，保留不含正文的诊断元数据。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str,
+        attempts: int,
+        response_status: str | None = None,
+        incomplete_reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.attempts = attempts
+        self.response_status = response_status
+        self.incomplete_reason = incomplete_reason
+
+
 class RetrievalUnavailableError(ConversationError):
     code = "RETRIEVAL_UNAVAILABLE"
     http_status = 503
@@ -133,3 +165,89 @@ class EventReplayExpiredError(ConversationError):
 
     code = "EVENT_REPLAY_EXPIRED"
     http_status = 410
+
+
+# ---------------------------------------------------------------------------
+# KnowledgeSummary（知识总结方案 §16）
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeSummaryError(ConversationError):
+    """知识总结业务错误基类，保持在 Conversation 错误边界内。"""
+
+
+class KnowledgeSummaryNotFoundError(KnowledgeSummaryError):
+    code = "KNOWLEDGE_SUMMARY_NOT_FOUND"
+    http_status = 404
+
+
+class KnowledgeSummaryGenerationNotFoundError(KnowledgeSummaryError):
+    code = "KNOWLEDGE_SUMMARY_GENERATION_NOT_FOUND"
+    http_status = 404
+
+
+class KnowledgeSummarySourceNotFoundError(KnowledgeSummaryError):
+    code = "KNOWLEDGE_SUMMARY_SOURCE_NOT_FOUND"
+    http_status = 404
+
+
+class KnowledgeSummaryVersionConflictError(KnowledgeSummaryError):
+    """总结 PATCH/DELETE 的乐观并发版本冲突。"""
+
+    code = "KNOWLEDGE_SUMMARY_VERSION_CONFLICT"
+    http_status = 409
+
+    def __init__(self, message: str, *, current_version: int, field: str | None = None) -> None:
+        super().__init__(message, field=field)
+        self.current_version = current_version
+
+
+class KnowledgeSummaryMergeConflictError(KnowledgeSummaryError):
+    code = "KNOWLEDGE_SUMMARY_MERGE_CONFLICT"
+    http_status = 409
+
+
+class KnowledgeSummaryGenerationNotReadyError(KnowledgeSummaryError):
+    code = "KNOWLEDGE_SUMMARY_GENERATION_NOT_READY"
+    http_status = 409
+    retryable = True
+
+
+class KnowledgeSummaryRequestIdempotencyConflictError(KnowledgeSummaryError):
+    code = "KNOWLEDGE_SUMMARY_REQUEST_IDEMPOTENCY_CONFLICT"
+    http_status = 422
+
+
+class KnowledgeSummaryInvalidContentError(KnowledgeSummaryError):
+    code = "KNOWLEDGE_SUMMARY_INVALID_CONTENT"
+    http_status = 422
+
+
+class KnowledgeSummarySourceChangedError(KnowledgeSummaryError):
+    code = "KNOWLEDGE_SUMMARY_SOURCE_CHANGED"
+    http_status = 422
+
+
+class KnowledgeSummaryRateLimitedError(KnowledgeSummaryError):
+    code = "KNOWLEDGE_SUMMARY_RATE_LIMITED"
+    http_status = 429
+    retryable = True
+
+    def __init__(self, message: str, *, retry_after: int) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class KnowledgeSummaryInvalidCursorError(KnowledgeSummaryError):
+    code = "KNOWLEDGE_SUMMARY_INVALID_CURSOR"
+    http_status = 422
+
+
+class KnowledgeSummarySourceSuppressedError(KnowledgeSummaryError):
+    code = "KNOWLEDGE_SUMMARY_SOURCE_SUPPRESSED"
+    http_status = 409
+
+
+class KnowledgeSummaryReviewNotFoundError(KnowledgeSummaryError):
+    code = "KNOWLEDGE_SUMMARY_REVIEW_NOT_FOUND"
+    http_status = 404

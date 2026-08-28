@@ -81,11 +81,115 @@ class EvidenceAssessment(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# AnswerPayload（§15.4 / §15.5）
+# Answer 输出（§15.4 / §15.5）
 # ---------------------------------------------------------------------------
 
 
+class AnswerEvidenceAnnotation(BaseModel):
+    """回答合同中的证据标注，说明 chunk 与 task 的确定性关联。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str = Field(min_length=1, max_length=200)
+    chunk_ids: list[str] = Field(default_factory=list, max_length=20)
+    task_ids: list[str] = Field(default_factory=list, max_length=20)
+    roles: list[str] = Field(default_factory=list, max_length=10)
+    relevance_notes: list[str] = Field(default_factory=list, max_length=20)
+    coverage: Literal["covered", "partial", "unassigned"] = "unassigned"
+
+
+class AnswerTaskContract(BaseModel):
+    """回答合同中的子任务，绑定任务要求、证据和局部缺证据状态。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str = Field(min_length=1, max_length=200)
+    subquery_id: str | None = Field(default=None, max_length=200)
+    task_type: str = Field(default="", max_length=100)
+    question: str = Field(min_length=1, max_length=500)
+    required: bool = True
+    evidence_ids: list[str] = Field(default_factory=list, max_length=30)
+    evidence_roles: list[str] = Field(default_factory=list, max_length=10)
+    status: Literal["covered", "partially_covered", "missing"] = "missing"
+    missing_aspects: list[str] = Field(default_factory=list, max_length=20)
+
+
+class AnswerSubquestion(BaseModel):
+    """回答合同中的问题拆分结果。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subquery_id: str = Field(min_length=1, max_length=200)
+    question: str = Field(min_length=1, max_length=500)
+    intent: str = Field(default="", max_length=100)
+    coverage_target: str = Field(default="", max_length=200)
+
+
+class AnswerHistoryItem(BaseModel):
+    """回答所需的最小历史条目。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: str = Field(min_length=1, max_length=30)
+    content: str = Field(min_length=1)
+
+
+class AnswerMemoryContext(BaseModel):
+    """回答合同中的相关长期记忆；仅用于个性化，不作为教材证据。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["available", "degraded", "unavailable"] = "unavailable"
+    learner: dict[str, object] = Field(default_factory=dict)
+    mastery: list[dict[str, object]] = Field(default_factory=list)
+    truncated: bool = False
+
+
+class AnswerEvidenceBudget(BaseModel):
+    """回答证据预算的分配和实际选取结果。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_budget: int = Field(ge=0)
+    used_tokens: int = Field(ge=0)
+    truncated_tokens: int = Field(ge=0)
+    task_budgets: dict[str, int] = Field(default_factory=dict)
+    role_budgets: dict[str, dict[str, int]] = Field(default_factory=dict)
+    task_selected_evidence_ids: dict[str, list[str]] = Field(default_factory=dict)
+    selected_evidence_ids: list[str] = Field(default_factory=list)
+    dropped_evidence_ids: list[str] = Field(default_factory=list)
+
+
+class AnswerContract(BaseModel):
+    """回答输入合同：问题、任务、必要上下文、证据边界和预算分配。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    current_question: str = Field(min_length=1, max_length=10_000)
+    standalone_question: str = Field(min_length=1, max_length=1000)
+    subquestions: list[AnswerSubquestion] = Field(default_factory=list, max_length=6)
+    necessary_history: list[AnswerHistoryItem] = Field(default_factory=list, max_length=22)
+    relevant_memory: AnswerMemoryContext = Field(default_factory=AnswerMemoryContext)
+    tasks: list[AnswerTaskContract] = Field(default_factory=list, max_length=6)
+    evidence_annotations: list[AnswerEvidenceAnnotation] = Field(
+        default_factory=list, max_length=30
+    )
+    partial_refusal_rules: list[str] = Field(default_factory=list, max_length=10)
+    evidence_budget: AnswerEvidenceBudget
+
+
+class AnswerGenerationOutput(BaseModel):
+    """模型生成契约；Citation 由服务端证据集确定性注入。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    answer: str = Field(min_length=1)
+    followups: list[str] = Field(default_factory=list, max_length=3)
+
+
 class AnswerPayload(BaseModel):
+    """最终对外回答契约，包含服务端生成的 Citation。"""
+
     model_config = ConfigDict(extra="forbid")
 
     answer: str

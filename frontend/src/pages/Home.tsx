@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { ArrowRight, LogIn, MessageCircle, RotateCcw, Sparkles } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
 import { listConversations } from "../api/conversations";
+import { getKnowledgeSummaryStats } from "../api/knowledgeSummaries";
 import { getMemoryIndex, getMyGraphStates } from "../api/memory";
 import { planMeta, todayTasks, user, weekMinutes } from "../data";
 import type { PageKey } from "../data";
@@ -31,7 +32,7 @@ const FIRST_DAY_TASKS = [
     id: "review",
     title: "用自己的话完成一次回顾",
     description: "把结论、理由和仍然困惑的地方留下来。",
-    kind: "复习",
+    kind: "回顾",
     minutes: 5,
     prompt: "请带我做一次 5 分钟数学复盘，依次问我今天理解了什么、依据是什么、还有哪里不确定，并帮我整理成简短记录。",
   },
@@ -42,6 +43,7 @@ type HomeActivityState = "loading" | "new" | "returning";
 type HomePageProps = {
   goChat: (prompt?: string) => void;
   go: (page: PageKey) => void;
+  knowledgeSummaryAvailable?: boolean;
 };
 
 function useHomeActivityState(): HomeActivityState {
@@ -121,7 +123,7 @@ function NewUserHome({ goChat, go }: HomePageProps) {
             从一个<span className="mark">真正的问题</span>开始。
           </h1>
           <p className="onboarding-lead">
-            你的学习记录现在是空的，这正是它应有的样子。下面只提供一份可执行的首日学习单；完成后，主页才会逐步形成属于你的任务、知识状态与复习线索。
+            你的学习记录现在是空的，这正是它应有的样子。下面只提供一份可执行的首日学习单；完成后，主页才会逐步形成属于你的任务、知识状态与回顾线索。
           </p>
           <div className="hero-actions onboarding-actions">
             <button
@@ -169,7 +171,7 @@ function NewUserHome({ goChat, go }: HomePageProps) {
                   <span className="t-description">{task.description}</span>
                 </span>
                 <span className="t-meta">
-                  <span className={`tag ${task.kind === "复习" ? "red" : task.kind === "练" ? "gold" : ""}`}>
+                  <span className={`tag ${task.kind === "回顾" ? "red" : task.kind === "练" ? "gold" : ""}`}>
                     {task.kind}
                   </span>
                   {task.minutes}min
@@ -230,7 +232,7 @@ function NewUserHome({ goChat, go }: HomePageProps) {
             </div>
             <div className="stat-cell">
               <div className="stat-num">0<em>篇</em></div>
-              <div className="stat-label">错题本收藏</div>
+              <div className="stat-label">知识总结</div>
             </div>
           </div>
         </div>
@@ -239,10 +241,16 @@ function NewUserHome({ goChat, go }: HomePageProps) {
   );
 }
 
-function ReturningUserHome({ goChat, go }: HomePageProps) {
+function ReturningUserHome({ goChat, go, knowledgeSummaryAvailable = false }: HomePageProps) {
   const { user: authUser } = useAuth();
   const done = todayTasks.filter((task) => task.done).length;
   const maxMin = Math.max(...weekMinutes, 1);
+  const [summaryStats, setSummaryStats] = useState<Awaited<ReturnType<typeof getKnowledgeSummaryStats>> | null>(null);
+
+  useEffect(() => {
+    if (!knowledgeSummaryAvailable) return;
+    void getKnowledgeSummaryStats().then(setSummaryStats).catch(() => setSummaryStats(null));
+  }, [knowledgeSummaryAvailable]);
 
   return (
     <>
@@ -256,15 +264,17 @@ function ReturningUserHome({ goChat, go }: HomePageProps) {
         </h1>
         <div className="hero-sub">
           「{planMeta.goal}」进行到{planMeta.weekLabel}，今日 {todayTasks.length} 项任务已完成 {done} 项。
-          还有 3 条错题到期，复习完正好闭环。
+          最近的问答会在这里沉淀成可复用知识，随时可以回来看。
         </div>
         <div className="hero-actions">
           <button className="btn btn-red" onClick={() => goChat()}>
             <MessageCircle size={15} /> 去问 AI
           </button>
-          <button className="btn btn-ghost" onClick={() => go("notebook")}>
-            <RotateCcw size={15} /> 复习到期错题
-          </button>
+          {knowledgeSummaryAvailable && (
+            <button className="btn btn-ghost" onClick={() => go("summaries")}>
+              <RotateCcw size={15} /> 查看最近更新
+            </button>
+          )}
         </div>
 
         <div className="hero-seal">
@@ -298,7 +308,7 @@ function ReturningUserHome({ goChat, go }: HomePageProps) {
                   <span className="t-title">{task.title}</span>
                 </span>
                 <span className="t-meta">
-                  <span className={`tag ${task.kind === "复习" ? "red" : task.kind === "练" ? "gold" : ""}`}>
+                  <span className={`tag ${task.kind === "回顾" ? "red" : task.kind === "练" ? "gold" : ""}`}>
                     {task.kind}
                   </span>
                   {task.minutes}min
@@ -350,8 +360,8 @@ function ReturningUserHome({ goChat, go }: HomePageProps) {
               <div className="stat-label">已掌握知识点</div>
             </div>
             <div className="stat-cell">
-              <div className="stat-num">5<em>篇</em></div>
-              <div className="stat-label">错题本收藏</div>
+              <div className="stat-num">{summaryStats?.active_count ?? "—"}<em>篇</em></div>
+              <div className="stat-label">知识总结</div>
             </div>
           </div>
         </div>

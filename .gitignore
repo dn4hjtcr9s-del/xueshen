@@ -17,6 +17,9 @@ tmp/
 frontend/node_modules/
 frontend/dist/
 
+OPUS-5.md
+codex-rs/
+
 ocr_text/
 math_text/
 clean_text/

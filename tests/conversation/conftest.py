@@ -43,6 +43,18 @@ def require_conversation_test_database(url: str) -> str:
 
 # Conversation 域用户数据表（每测试清空）
 CONVERSATION_TABLES = (
+    "conversation.knowledge_summary_admin_audit",
+    "conversation.knowledge_summary_runtime_control",
+    "conversation.knowledge_summary_duplicate_candidates",
+    "conversation.knowledge_summary_reviews",
+    "conversation.knowledge_summary_tombstone_turns",
+    "conversation.knowledge_summary_tombstones",
+    "conversation.knowledge_summary_revisions",
+    "conversation.knowledge_summary_sources",
+    "conversation.knowledge_summary_model_calls",
+    "conversation.knowledge_summary_generation_jobs",
+    "conversation.knowledge_summary_aliases",
+    "conversation.knowledge_summaries",
     "conversation.conversation_jobs",
     "conversation.conversation_summaries",
     "conversation.conversation_outbox",

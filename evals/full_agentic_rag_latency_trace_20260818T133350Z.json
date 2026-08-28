@@ -1,0 +1,158 @@
+{
+  "evaluator": "full_agentic_rag_latency",
+  "run_at": "2026-08-18T13:33:50.048095+00:00",
+  "account": {
+    "account": "2428938672",
+    "user_id": "66213a1c-45dc-4482-942b-fb18029be0ab"
+  },
+  "memory_snapshot_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+  "case_count": 1,
+  "cases": [
+    {
+      "case_id": "ret-001",
+      "trace_id": "f2c56209a37c409698e4fddd04f01395",
+      "user_account": "2428938672",
+      "user_id": "66213a1c-45dc-4482-942b-fb18029be0ab",
+      "status": "succeeded",
+      "memory_snapshot_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+      "stages": {
+        "memory_read": {
+          "duration_ms": 14.009,
+          "status": "succeeded",
+          "mode": "frozen_snapshot_replay",
+          "query": "数学教材学习者长期记忆固定评测快照",
+          "memory_snapshot_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+          "live_memory_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+          "snapshot_match": true,
+          "learner_present": false,
+          "mastery_count": 0,
+          "graph_state_count": 0,
+          "recommendation_count": 5
+        },
+        "snapshot_context_pack": {
+          "duration_ms": 0.204,
+          "status": "succeeded",
+          "snapshot_hash": "a7a26f5e859f6c49fb1c8505cf6a1777151aa7f9a5aee9ae3132b709cecd1037",
+          "fixed_memory_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+          "context_counts": {
+            "current_message_tokens": 34,
+            "recent_message_tokens": 1,
+            "memory_tokens_estimated": 369
+          },
+          "recent_message_count": 0
+        },
+        "rewrite": {
+          "duration_ms": 6171.78,
+          "status": "succeeded",
+          "model": "deepseek-v4-flash",
+          "plan_revision": 1,
+          "need_retrieval": true,
+          "answer_mode": "rag",
+          "subquery_count": 1,
+          "subqueries_tokens_estimated": 179
+        },
+        "embedding": {
+          "duration_ms": 309.233,
+          "status": "succeeded",
+          "model": "text-embedding-v4",
+          "query_count": 1,
+          "dimensions": 1024
+        },
+        "retrieval": {
+          "duration_ms": 158.536,
+          "status": "succeeded",
+          "method": "hybrid_search",
+          "parallel": true,
+          "subquery_count": 1,
+          "candidate_count": 20,
+          "worker_statuses": [
+            "succeeded"
+          ],
+          "worker_latencies_ms": [
+            156.777
+          ],
+          "per_subquery": [
+            {
+              "subquery_id": "sq-0-0-4ada72f57db5",
+              "status": "succeeded",
+              "candidate_count": 20,
+              "latency_ms": 156.777
+            }
+          ]
+        },
+        "fusion": {
+          "duration_ms": 0.145,
+          "status": "succeeded",
+          "deduplicated_candidate_count": 20,
+          "matched_subquery_count": 0
+        },
+        "rerank": {
+          "duration_ms": 5887.002,
+          "status": "succeeded",
+          "model": "qwen3-rerank",
+          "query_strategy": "raw-query/no-rewrite/v3",
+          "document_strategy": "raw-content-text/no-metadata-prefix/v3",
+          "candidate_count": 20,
+          "top_n": 20,
+          "selected_count": 20,
+          "document_tokens_estimated": 7536
+        },
+        "evidence_pack": {
+          "duration_ms": 3.996,
+          "status": "succeeded",
+          "evidence_item_count": 7,
+          "evidence_tokens": 3937,
+          "evidence_text_tokens_estimated": 2692
+        },
+        "evidence_assessment": {
+          "duration_ms": 7471.539,
+          "status": "succeeded",
+          "model": "deepseek-v4-flash",
+          "status_value": "sufficient",
+          "missing_aspect_count": 0,
+          "covered_aspect_count": 4,
+          "reason_codes": [
+            "definition_directly_present",
+            "unique_image_explicitly_stated",
+            "notation_covered",
+            "textbook_source_snippet_available",
+            "no_additional_search_needed"
+          ]
+        },
+        "context_packing": {
+          "duration_ms": 0.011,
+          "status": "succeeded",
+          "evidence_item_count": 7,
+          "evidence_tokens": 3937,
+          "answer_context_tokens_estimated": 3034,
+          "answer_context_chars": 5064,
+          "snapshot_hash": "a7a26f5e859f6c49fb1c8505cf6a1777151aa7f9a5aee9ae3132b709cecd1037"
+        },
+        "answer": {
+          "duration_ms": 20858.916,
+          "status": "succeeded",
+          "model": "deepseek-v4-flash",
+          "output_chars": 638,
+          "output_tokens_estimated": 427,
+          "citation_count": 7
+        },
+        "citation_validation": {
+          "duration_ms": 0.064,
+          "status": "succeeded",
+          "degraded_flags": [],
+          "valid_citation_count": 7
+        }
+      },
+      "total_duration_ms": 40888.78,
+      "accounted_stage_duration_ms": 40875.435,
+      "unattributed_duration_ms": 13.345,
+      "retrieval_iteration_count": 0,
+      "final_subquery_count": 1,
+      "final_candidate_count": 20,
+      "final_evidence_count": 7,
+      "context_tokens_estimated": 3034,
+      "degraded_flags": [],
+      "errors": []
+    }
+  ]
+}

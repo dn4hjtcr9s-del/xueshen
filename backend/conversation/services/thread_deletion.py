@@ -2,6 +2,7 @@
 
 delete_thread 是 deleting → deleted 的唯一协调器：
 - 清理前必须确认该线程无 accepted/running/cancelling Turn（R4）；有则等待重试；
+- 本地清理包含知识总结 Job 取消、来源失效和计数重算；不删除总结正文或 Revision；
 - 本地清理完成后检查本 deletion_generation 全部 deletion Outbox：
   仍有 pending/processing/retry_wait 时进入 waiting + next_attempt_at
   （不递增 attempt_count，R3）；
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.conversation.persistence import events as events_repo
 from backend.conversation.persistence import jobs as jobs_repo
+from backend.conversation.persistence import knowledge_summaries as knowledge_summaries_repo
 from backend.conversation.persistence import messages as messages_repo
 from backend.conversation.persistence import outbox as outbox_repo
 from backend.conversation.persistence import threads as threads_repo
@@ -50,7 +52,15 @@ async def execute_delete_thread(
         )
         return "wait"
 
-    # 2. 本地清理：消息、Turn Event、摘要/标题（终态 Turn 才能删，已确认无活动）
+    # 2. 本地清理：知识总结与会话消息独立维护，终态 Turn 才能删。
+    # processing 的知识总结 Job 由 Thread deleting 状态与 Worker fencing 在提交前自行取消。
+    await knowledge_summaries_repo.cancel_generation_jobs_for_thread(session, thread_id=thread_id)
+    affected_summary_ids = await knowledge_summaries_repo.mark_sources_unavailable_for_thread(
+        session, thread_id=thread_id
+    )
+    await knowledge_summaries_repo.lock_and_recalculate_source_counts(
+        session, summary_ids=affected_summary_ids
+    )
     await messages_repo.mark_messages_deleted_for_thread(session, thread_id)
     await events_repo.delete_events_for_thread(session, thread_id)
     await _delete_summaries_for_thread(session, thread_id)

@@ -8,8 +8,8 @@ import type {
   TurnStatus,
 } from "../types/conversation";
 
-/** Conversation API 路径前缀（开发代理 /memory-api 映射同一 FastAPI App）。 */
-const V1 = "/memory-api/api/v1/conversations";
+/** Conversation API 相对路径；共享请求层会统一拼接 /memory-api/api/v1 基础路径。 */
+const V1 = "/conversations";
 
 export class ConversationApiError extends Error {
   readonly status: number;
@@ -59,7 +59,7 @@ export async function createTurn(
 ): Promise<CreateTurnResponse> {
   try {
     return await request<CreateTurnResponse>("POST", `${V1}/${threadId}/turns`, {
-      body: JSON.stringify(body),
+      body,
     });
   } catch (error) {
     if (error instanceof Error && "code" in error) {

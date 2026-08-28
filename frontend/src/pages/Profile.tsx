@@ -5,6 +5,8 @@
 // 未登录（访客）时展示登录/注册表单——登录不是浏览前置条件，仅作为可选项。
 import { useState } from "react";
 import { LogOut, Pencil, ShieldCheck } from "lucide-react";
+import { useEffect } from "react";
+import { getKnowledgeSummaryStats } from "../api/knowledgeSummaries";
 import { user } from "../data";
 import { useAuth } from "../auth/AuthContext";
 import { SectionHead } from "../ui";
@@ -17,6 +19,12 @@ const SHOW_MOCK = import.meta.env.DEV;
 export function ProfilePage() {
   const { user: authUser, initials, logout } = useAuth();
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [summaryCount, setSummaryCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!authUser || import.meta.env.VITE_KNOWLEDGE_SUMMARY_ENABLED !== "true") return;
+    void getKnowledgeSummaryStats().then((stats) => setSummaryCount(stats.active_count)).catch(() => setSummaryCount(null));
+  }, [authUser]);
 
   // 访客：个人中心展示登录/注册表单（可切换），登录成功后自动回到已登录视图
   if (authUser === null) {
@@ -54,8 +62,8 @@ export function ProfilePage() {
                 <div className="l">已掌握知识点</div>
               </div>
               <div className="profile-stat">
-                <div className="n">5</div>
-                <div className="l">错题收藏</div>
+                <div className="n">{summaryCount ?? "—"}</div>
+                <div className="l">知识总结</div>
               </div>
             </div>
             <button

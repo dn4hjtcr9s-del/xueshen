@@ -1,0 +1,295 @@
+{
+  "evaluator": "full_agentic_rag_latency",
+  "run_at": "2026-08-18T13:46:23.258993+00:00",
+  "started_at": "2026-08-18T13:46:01.944570+00:00",
+  "dataset": {
+    "path": "evals/retrieval_cases_v1.jsonl",
+    "case_count": 1
+  },
+  "account": {
+    "account": "2428938672",
+    "user_id": "66213a1c-45dc-4482-942b-fb18029be0ab",
+    "memory_snapshot_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4"
+  },
+  "execution": {
+    "chain": [
+      "memory_read",
+      "snapshot_context_pack",
+      "rewrite",
+      "embedding",
+      "retrieval_parallel_hybrid",
+      "fusion",
+      "qwen3_rerank",
+      "evidence_pack",
+      "evidence_assessment",
+      "context_packing",
+      "answer_non_streaming_plain_text_compat",
+      "citation_validation"
+    ],
+    "memory_mode": "frozen_snapshot_replay",
+    "answer_generation_mode": "plain_text_compat_real_model",
+    "writes_disabled_in_harness": [
+      "persist_turn",
+      "memory_ack",
+      "memory_submit",
+      "learning_state_update",
+      "conversation_outbox_write"
+    ],
+    "feature_flags": {
+      "agentic_rag": true,
+      "multi_query": true,
+      "evidence_loop": true,
+      "memory_read": true,
+      "memory_submit": false
+    }
+  },
+  "services": {
+    "before_running": [
+      "conversation-outbox-publisher",
+      "conversation-worker",
+      "frontend",
+      "memory-api",
+      "memory-outbox-consumer",
+      "memory-scheduler",
+      "memory-worker",
+      "postgres"
+    ],
+    "stopped_for_eval": [
+      "memory-worker",
+      "memory-scheduler",
+      "memory-outbox-consumer",
+      "conversation-worker",
+      "conversation-outbox-publisher"
+    ],
+    "after_running": [
+      "conversation-outbox-publisher",
+      "conversation-worker",
+      "frontend",
+      "memory-api",
+      "memory-outbox-consumer",
+      "memory-scheduler",
+      "memory-worker",
+      "postgres"
+    ],
+    "restore_error": null
+  },
+  "summary": {
+    "case_count": 1,
+    "succeeded": 1,
+    "failed": 0,
+    "total_latency": {
+      "count": 1,
+      "avg_ms": 16931.755,
+      "p50_ms": 16931.755,
+      "p90_ms": 16931.755,
+      "p95_ms": 16931.755,
+      "min_ms": 16931.755,
+      "max_ms": 16931.755
+    },
+    "stage_latency": {
+      "answer": {
+        "count": 1,
+        "avg_ms": 4973.443,
+        "p50_ms": 4973.443,
+        "p90_ms": 4973.443,
+        "p95_ms": 4973.443,
+        "min_ms": 4973.443,
+        "max_ms": 4973.443,
+        "total_ms": 4973.443,
+        "share_of_total": 0.293735
+      },
+      "citation_validation": {
+        "count": 1,
+        "avg_ms": 0.036,
+        "p50_ms": 0.036,
+        "p90_ms": 0.036,
+        "p95_ms": 0.036,
+        "min_ms": 0.036,
+        "max_ms": 0.036,
+        "total_ms": 0.036,
+        "share_of_total": 2e-06
+      },
+      "context_packing": {
+        "count": 1,
+        "avg_ms": 0.007,
+        "p50_ms": 0.007,
+        "p90_ms": 0.007,
+        "p95_ms": 0.007,
+        "min_ms": 0.007,
+        "max_ms": 0.007,
+        "total_ms": 0.007,
+        "share_of_total": 0.0
+      },
+      "embedding": {
+        "count": 1,
+        "avg_ms": 345.872,
+        "p50_ms": 345.872,
+        "p90_ms": 345.872,
+        "p95_ms": 345.872,
+        "min_ms": 345.872,
+        "max_ms": 345.872,
+        "total_ms": 345.872,
+        "share_of_total": 0.020427
+      },
+      "evidence_assessment": {
+        "count": 1,
+        "avg_ms": 3568.851,
+        "p50_ms": 3568.851,
+        "p90_ms": 3568.851,
+        "p95_ms": 3568.851,
+        "min_ms": 3568.851,
+        "max_ms": 3568.851,
+        "total_ms": 3568.851,
+        "share_of_total": 0.210779
+      },
+      "evidence_pack": {
+        "count": 1,
+        "avg_ms": 2.825,
+        "p50_ms": 2.825,
+        "p90_ms": 2.825,
+        "p95_ms": 2.825,
+        "min_ms": 2.825,
+        "max_ms": 2.825,
+        "total_ms": 2.825,
+        "share_of_total": 0.000167
+      },
+      "fusion": {
+        "count": 1,
+        "avg_ms": 0.221,
+        "p50_ms": 0.221,
+        "p90_ms": 0.221,
+        "p95_ms": 0.221,
+        "min_ms": 0.221,
+        "max_ms": 0.221,
+        "total_ms": 0.221,
+        "share_of_total": 1.3e-05
+      },
+      "memory_read": {
+        "count": 1,
+        "avg_ms": 16.904,
+        "p50_ms": 16.904,
+        "p90_ms": 16.904,
+        "p95_ms": 16.904,
+        "min_ms": 16.904,
+        "max_ms": 16.904,
+        "total_ms": 16.904,
+        "share_of_total": 0.000998
+      },
+      "rerank": {
+        "count": 1,
+        "avg_ms": 614.43,
+        "p50_ms": 614.43,
+        "p90_ms": 614.43,
+        "p95_ms": 614.43,
+        "min_ms": 614.43,
+        "max_ms": 614.43,
+        "total_ms": 614.43,
+        "share_of_total": 0.036289
+      },
+      "retrieval": {
+        "count": 1,
+        "avg_ms": 762.854,
+        "p50_ms": 762.854,
+        "p90_ms": 762.854,
+        "p95_ms": 762.854,
+        "min_ms": 762.854,
+        "max_ms": 762.854,
+        "total_ms": 762.854,
+        "share_of_total": 0.045055
+      },
+      "rewrite": {
+        "count": 1,
+        "avg_ms": 6630.928,
+        "p50_ms": 6630.928,
+        "p90_ms": 6630.928,
+        "p95_ms": 6630.928,
+        "min_ms": 6630.928,
+        "max_ms": 6630.928,
+        "total_ms": 6630.928,
+        "share_of_total": 0.391627
+      },
+      "snapshot_context_pack": {
+        "count": 1,
+        "avg_ms": 0.232,
+        "p50_ms": 0.232,
+        "p90_ms": 0.232,
+        "p95_ms": 0.232,
+        "min_ms": 0.232,
+        "max_ms": 0.232,
+        "total_ms": 0.232,
+        "share_of_total": 1.4e-05
+      }
+    },
+    "rerank_fallback_cases": 0,
+    "memory_snapshot_mismatch_cases_ignored": 0,
+    "degraded_case_count": 0
+  },
+  "factors": {
+    "by_final_subquery_count": {
+      "2": {
+        "count": 1,
+        "avg_ms": 16931.755,
+        "p50_ms": 16931.755,
+        "p90_ms": 16931.755,
+        "p95_ms": 16931.755,
+        "min_ms": 16931.755,
+        "max_ms": 16931.755
+      }
+    },
+    "by_final_candidate_count_bucket": {
+      "1-20": {
+        "count": 1,
+        "avg_ms": 16931.755,
+        "p50_ms": 16931.755,
+        "p90_ms": 16931.755,
+        "p95_ms": 16931.755,
+        "min_ms": 16931.755,
+        "max_ms": 16931.755
+      }
+    },
+    "by_context_tokens_bucket": {
+      "2501+": {
+        "count": 1,
+        "avg_ms": 16931.755,
+        "p50_ms": 16931.755,
+        "p90_ms": 16931.755,
+        "p95_ms": 16931.755,
+        "min_ms": 16931.755,
+        "max_ms": 16931.755
+      }
+    },
+    "by_retrieval_iteration_count": {
+      "0": {
+        "count": 1,
+        "avg_ms": 16931.755,
+        "p50_ms": 16931.755,
+        "p90_ms": 16931.755,
+        "p95_ms": 16931.755,
+        "min_ms": 16931.755,
+        "max_ms": 16931.755
+      }
+    }
+  },
+  "slow_cases": [
+    {
+      "case_id": "ret-001",
+      "total_duration_ms": 16931.755,
+      "status": "succeeded",
+      "degraded_flags": [],
+      "stage_durations_ms": {
+        "memory_read": 16.904,
+        "snapshot_context_pack": 0.232,
+        "rewrite": 6630.928,
+        "embedding": 345.872,
+        "retrieval": 762.854,
+        "fusion": 0.221,
+        "rerank": 614.43,
+        "evidence_pack": 2.825,
+        "evidence_assessment": 3568.851,
+        "context_packing": 0.007,
+        "answer": 4973.443,
+        "citation_validation": 0.036
+      }
+    }
+  ]
+}

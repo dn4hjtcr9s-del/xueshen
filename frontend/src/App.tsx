@@ -1,9 +1,9 @@
 // 生产前端样例骨架：左侧图标窄轨 + 顶部工具条 + 页面切换 + 通知面板。
 // 通知面板（方案 §6.5/§6.6）：Memory + Community 双域合并展示。
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Bell,
-  BookMarked,
+  BookOpenText,
   CalendarCheck,
   Home,
   MessageCircle,
@@ -28,16 +28,18 @@ import { HomePage } from "./pages/Home";
 import { ChatPage } from "./pages/Chat";
 import { PlanPage } from "./pages/Plan";
 import { KnowledgeMapPage } from "./pages/KnowledgeMap";
-import { NotebookPage } from "./pages/Notebook";
+import { KnowledgeSummariesPage } from "./pages/KnowledgeSummaries";
 import { CommunityPage } from "./pages/Community";
 import { ProfilePage } from "./pages/Profile";
+
+const KNOWLEDGE_SUMMARY_ENABLED = import.meta.env.VITE_KNOWLEDGE_SUMMARY_ENABLED === "true";
 
 const NAV: { key: PageKey; label: string; icon: typeof Home }[] = [
   { key: "home", label: "今日", icon: Home },
   { key: "chat", label: "AI 对话", icon: MessageCircle },
   { key: "plan", label: "学习计划", icon: CalendarCheck },
   { key: "map", label: "知识地图", icon: Network },
-  { key: "notebook", label: "错题本", icon: BookMarked },
+  { key: "summaries", label: "知识总结", icon: BookOpenText },
   { key: "community", label: "社区", icon: Users },
 ];
 
@@ -53,7 +55,7 @@ const MASTHEADS: Record<PageKey, { kicker: string; title: string; aside: string[
   chat: { kicker: "Ask · 有问必答", title: "AI 对话", aside: ["讲解模式", "引用可溯源"] },
   plan: { kicker: "Plan · 循序渐进", title: "学习计划", aside: ["等待你的第一个目标", "由 AI 生成并动态调整"] },
   map: { kicker: "Atlas · 了如指掌", title: "知识地图", aside: ["11 个知识点", "3 个领域"] },
-  notebook: { kicker: "Notebook · 温故知新", title: "错题本", aside: ["等待首次收藏", "按间隔重复安排复习"] },
+  summaries: { kicker: "Knowledge Summary · 对话沉淀", title: "知识总结", aside: ["定义 · 定理 · 公式", "来源可追溯"] },
   community: { kicker: "Community · 教学相长", title: "社区", aside: ["讨论区 · 小组 · 打卡"] },
   profile: { kicker: "Profile · 君子慎独", title: "个人中心", aside: ["记忆透明可管"] },
 };
@@ -163,6 +165,11 @@ export default function App() {
   const [unreadTotal, setUnreadTotal] = useState(0);
   // §6.5：Community 通知点击 → 切社区 Tab 并打开详情；详情打开/关闭后清空
   const [communityTargetPostId, setCommunityTargetPostId] = useState<string | null>(null);
+  const [chatTarget, setChatTarget] = useState<{ threadId: string; turnId: string } | null>(null);
+  const [summaryTargetId, setSummaryTargetId] = useState<string | null>(null);
+  const [summaryFeatureUnavailable, setSummaryFeatureUnavailable] = useState(false);
+  const summaryDiagnosticRecorded = useRef(false);
+  const knowledgeSummaryAvailable = KNOWLEDGE_SUMMARY_ENABLED && !summaryFeatureUnavailable;
 
   const loadNotifications = useCallback(async () => {
     // §6.5：Promise.allSettled 并行读取；任一域失败仍展示另一域 + 局部错误提示
@@ -220,8 +227,32 @@ export default function App() {
   // 页面间联动：知识地图/计划里的"去问 AI"跳转到对话页。
   const goChat = (prompt = "") => {
     setChatDraft(prompt);
+    setChatTarget(null);
     setPage("chat");
   };
+
+  const openChatTarget = (threadId: string, turnId: string) => {
+    setChatDraft("");
+    setChatTarget(threadId && turnId ? { threadId, turnId } : null);
+    setPage("chat");
+  };
+
+  const openKnowledgeSummary = (summaryId?: string) => {
+    setSummaryTargetId(summaryId ?? null);
+    setPage("summaries");
+  };
+
+  const handleSummaryFeatureUnavailable = useCallback(() => {
+    if (!summaryDiagnosticRecorded.current) {
+      summaryDiagnosticRecorded.current = true;
+      // 当前项目没有 telemetry 上报端点，按冻结方案记录一次可检索的发布错配事件。
+      console.warn("knowledge_summary.feature_unavailable", { reason: "backend_404" });
+    }
+    setSummaryFeatureUnavailable(true);
+    setPage("home");
+    setChatTarget(null);
+    setSummaryTargetId(null);
+  }, []);
   const masthead = MASTHEADS[page];
 
   const openCommunityPost = (postId: string) => {
@@ -241,7 +272,7 @@ export default function App() {
           </div>
         </div>
         <nav className="nav">
-          {NAV.map(({ key, label, icon: Icon }) => (
+          {NAV.filter(({ key }) => key !== "summaries" || knowledgeSummaryAvailable).map(({ key, label, icon: Icon }) => (
             <button
               key={key}
               type="button"
@@ -263,7 +294,7 @@ export default function App() {
           <div className="utility-date">{formatStudioDate(new Date())}</div>
           <div className="topbar-search">
             <Search size={13} />
-            <span>搜索知识点、对话、笔记…</span>
+            <span>搜索知识点、对话、总结…</span>
           </div>
           <button className="icon-btn" onClick={toggleNotif} aria-label="通知">
             <Bell size={15} strokeWidth={1.8} />
@@ -285,11 +316,18 @@ export default function App() {
                 ))}
               />
             )}
-            {page === "home" && <HomePage goChat={goChat} go={(p) => setPage(p)} />}
-            {page === "chat" && <ChatPage initialPrompt={chatDraft} />}
+            {page === "home" && <HomePage goChat={goChat} go={(p) => setPage(p)} knowledgeSummaryAvailable={knowledgeSummaryAvailable} />}
+            {page === "chat" && <ChatPage initialPrompt={chatDraft} chatTarget={chatTarget} onOpenSummary={openKnowledgeSummary} />}
             {page === "plan" && <PlanPage goChat={goChat} />}
             {page === "map" && <KnowledgeMapPage goChat={goChat} />}
-            {page === "notebook" && <NotebookPage goChat={goChat} />}
+            {page === "summaries" && knowledgeSummaryAvailable && (
+              <KnowledgeSummariesPage
+                onOpenChat={openChatTarget}
+                targetSummaryId={summaryTargetId}
+                onTargetConsumed={() => setSummaryTargetId(null)}
+                onFeatureUnavailable={handleSummaryFeatureUnavailable}
+              />
+            )}
             {page === "community" && (
               <CommunityPage
                 targetPostId={communityTargetPostId}

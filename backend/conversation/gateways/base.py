@@ -28,7 +28,7 @@ class OpenAIGateway(Protocol):
     async def stream_answer(
         self, *, answer_context: dict[str, Any]
     ) -> tuple[list[str], dict[str, Any]]:
-        """stream_answer(answer_context) -> (deltas, AnswerPayload)（§19.2）。"""
+        """完整校验回答后返回应用层正文切片与生成结果（§19.2）。"""
         ...
 
     async def summarize_conversation(

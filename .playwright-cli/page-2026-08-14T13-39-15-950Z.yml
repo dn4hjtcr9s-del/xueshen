@@ -1,0 +1,25 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic "学神 · Math Studio" [ref=e5]:
+      - generic [ref=e6]: 学
+      - generic [ref=e7]:
+        - strong [ref=e8]: 学神数学
+        - generic [ref=e9]: MATH STUDIO
+    - navigation [ref=e10]:
+      - button "今日" [ref=e11] [cursor=pointer]
+      - button "AI 对话" [ref=e16] [cursor=pointer]
+      - button "学习计划" [ref=e20] [cursor=pointer]
+      - button "知识地图" [ref=e25] [cursor=pointer]
+      - button "错题本" [ref=e32] [cursor=pointer]
+      - button "社区" [ref=e37] [cursor=pointer]
+    - generic [ref=e44]: 学神致知
+  - generic [ref=e45]:
+    - banner [ref=e46]:
+      - generic [ref=e47]: 2026.08.14 — XUESHEN MATH STUDIO
+      - generic [ref=e48]: 搜索知识点、对话、笔记…
+      - button "通知" [ref=e53] [cursor=pointer]
+      - button "个人中心" [ref=e57] [cursor=pointer]: 学
+    - main [ref=e58]:
+      - status [ref=e60]:
+        - generic [ref=e61]: ∴
+        - generic [ref=e62]: 正在准备你的学习主页…

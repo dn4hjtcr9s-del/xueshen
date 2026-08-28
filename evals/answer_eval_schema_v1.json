@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "answer-eval-case-v1",
+  "title": "Answer Eval Case v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "case_id",
+    "fixture_id",
+    "case_type",
+    "conversation",
+    "target_user_message_index",
+    "source",
+    "expected"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "answer-eval-case/v1"
+    },
+    "case_id": {
+      "type": "string",
+      "pattern": "^answer-(single|multi)-[0-9]{3}$"
+    },
+    "fixture_id": {
+      "const": "answer-eval-shared-state-v1"
+    },
+    "case_type": {
+      "enum": [
+        "single_turn",
+        "multi_turn"
+      ]
+    },
+    "conversation": {
+      "type": "array",
+      "minItems": 1
+    },
+    "target_user_message_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "source": {
+      "type": "object"
+    },
+    "expected": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

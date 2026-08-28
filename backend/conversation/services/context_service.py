@@ -187,8 +187,10 @@ class ContextService:
         evidence_summary: str,
         evidence_refs: list[str],
         degraded_flags: list[str],
+        answer_contract: dict[str, Any] | None = None,
+        evidence_assessment: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """AnswerContextView（§9.4）：裁剪掉检索内部诊断。"""
+        """AnswerContextView（§9.4）：注入回答合同和局部证据状态。"""
         return {
             "current_user_request": snapshot.current_message,
             "conversation_context": {
@@ -204,6 +206,8 @@ class ContextService:
             "standalone_question": standalone_question,
             "evidence": evidence_summary,
             "evidence_refs": evidence_refs,
+            "answer_contract": answer_contract or {},
+            "evidence_assessment": evidence_assessment or {},
             "degraded_flags": degraded_flags,
             "answer_rules": {
                 "max_followups": 3,

@@ -10,8 +10,11 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
+from langgraph.graph import END, START, StateGraph
+
 from backend.conversation.graph.builder import build_conversation_graph
 from backend.conversation.graph.runner import ConversationGraphRunner
+from backend.conversation.graph.state import ConversationGraphState
 from tests.conversation.graph_fixtures import (
     FakeMemoryGateway,
     FakeOpenAIGateway,
@@ -267,7 +270,11 @@ async def test_flag_agentic_rag_disabled_single_query() -> None:
     ]
     runtime.retriever_gateway = retriever
     state = _initial_state()
-    state["conversation_context"] = {"current_message": "勾股定理是什么？"}
+    state["snapshot"] = {
+        "current_message": "勾股定理是什么？",
+        "recent_messages": [],
+        "conversation_summary": None,
+    }
     result, _ = await _run_graph(runtime, state)
     assert result["rewrite_plan"]["need_retrieval"] is True
     assert result["rewrite_plan"]["reason_codes"] == ["agentic_rag_disabled"]
@@ -302,13 +309,11 @@ async def test_flag_evidence_loop_disabled_skips_evaluate() -> None:
 
 
 async def test_streaming_json_parsed_answer_and_followups() -> None:
-    """第三轮必改 1：流式 JSON 片段被解析为 AnswerPayload，
-    answer 取 payload.answer（非原始 JSON），followups 非空。"""
-    import json as _json
+    """应用层正文切片最终写入回答，正文中不混入结构化 JSON。"""
 
-    from tests.conversation.graph_fixtures import JsonStreamingOpenAIGateway
+    from tests.conversation.graph_fixtures import ValidatedAnswerOpenAIGateway
 
-    openai = JsonStreamingOpenAIGateway()
+    openai = ValidatedAnswerOpenAIGateway()
     openai.rewrite_queue.append(default_rewrite_plan(subqueries=0, need_retrieval=False))
     openai.answer_payloads.append(
         {
@@ -322,7 +327,7 @@ async def test_streaming_json_parsed_answer_and_followups() -> None:
     answer = result["answer_payload"]["answer"]
     # answer 必须是模型生成的正文，不是 JSON 文本
     assert answer == "正弦定理：a/sinA = b/sinB"
-    assert _json.loads(_json.dumps(answer)) == answer  # 不是 JSON 序列化结果
+    assert not answer.startswith("{")
     assert result["answer_payload"]["followups"] == ["余弦定理是什么？", "怎么推导？"]
     assert result["answer_buffer"] == answer
 
@@ -331,9 +336,9 @@ async def test_citation_validation_matches_server_hex_id() -> None:
     """第三轮必改 2：服务端生成 12 位 hex citation_id，正文引用可被验证器识别；
     伪造 ID 被移除并标记 citation_degraded。"""
 
-    from tests.conversation.graph_fixtures import JsonStreamingOpenAIGateway
+    from tests.conversation.graph_fixtures import ValidatedAnswerOpenAIGateway
 
-    openai = JsonStreamingOpenAIGateway()
+    openai = ValidatedAnswerOpenAIGateway()
     openai.rewrite_queue.append(default_rewrite_plan(subqueries=1))
     openai.assess_queue.append({"status": "sufficient", "reason_codes": ["ok"]})
     retriever = FakeRetrieverGateway()
@@ -358,7 +363,7 @@ async def test_citation_validation_matches_server_hex_id() -> None:
     assert real_citation[1:].isalnum()
 
     # 第二遍：正文引用伪造 ID（合法形状但不在证据集）→ 应被移除
-    openai2 = JsonStreamingOpenAIGateway()
+    openai2 = ValidatedAnswerOpenAIGateway()
     openai2.rewrite_queue.append(default_rewrite_plan(subqueries=1))
     openai2.assess_queue.append({"status": "sufficient", "reason_codes": ["ok"]})
     retriever2 = FakeRetrieverGateway()
@@ -387,3 +392,40 @@ async def test_citation_validation_matches_server_hex_id() -> None:
     # 伪造引用被移除、degraded 标记（引用校验正则与服务端 ID 形状一致）
     assert fake_id not in result2["answer_payload"]["answer"]
     assert "citation_degraded" in result2.get("degraded_flags", [])
+
+
+async def test_load_context_is_written_to_graph_state() -> None:
+    """上下文节点的返回值必须写入 conversation_context，不能被 StateGraph 丢弃。"""
+    openai = FakeOpenAIGateway()
+    openai.rewrite_queue.append(default_rewrite_plan(subqueries=0, need_retrieval=False))
+    openai.answer_payloads.append({"answer": "回答", "citations": [], "followups": []})
+    runtime = build_runtime(openai_gateway=openai)
+    state = _initial_state()
+    state["snapshot"] = {
+        "current_message": "请解释勾股定理",
+        "recent_messages": [],
+        "conversation_summary": None,
+    }
+
+    result, _ = await _run_graph(runtime, state)
+
+    assert result["conversation_context"]["current_message"] == "请解释勾股定理"
+    assert result["snapshot"]["current_message"] == "请解释勾股定理"
+
+
+async def test_graph_state_preserves_user_message_id() -> None:
+    """用户消息 ID 必须进入 LangGraph State，供生产上下文节点读取提问正文。"""
+    user_message_id = uuid4()
+    seen: list[object] = []
+    graph: StateGraph = StateGraph(ConversationGraphState)
+
+    async def capture(state: ConversationGraphState) -> dict[str, Any]:
+        seen.append(state.get("user_message_id"))
+        return {}
+
+    graph.add_node("capture", capture)
+    graph.add_edge(START, "capture")
+    graph.add_edge("capture", END)
+    await graph.compile().ainvoke({"user_message_id": user_message_id})
+
+    assert seen == [user_message_id]

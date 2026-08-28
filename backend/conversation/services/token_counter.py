@@ -20,6 +20,8 @@ class Tokenizer(Protocol):
 
     def count(self, text: str) -> int: ...
 
+    def truncate(self, text: str, max_tokens: int) -> str: ...
+
 
 class TiktokenTokenizer:
     """生产 tokenizer：tiktoken o200k_base（延迟导入，保证测试环境无依赖也可跑）。"""
@@ -37,12 +39,25 @@ class TiktokenTokenizer:
     def count(self, text: str) -> int:
         return len(self._encoding().encode(text))
 
+    def truncate(self, text: str, max_tokens: int) -> str:
+        """按 o200k_base 取前 max_tokens 个 token，避免字符截断破坏预算口径。"""
+        if max_tokens <= 0:
+            return ""
+        encoding = self._encoding()
+        return str(encoding.decode(encoding.encode(text)[:max_tokens]))
+
 
 class WhitespaceTokenizer:
     """测试 tokenizer：确定性（按空白切分），不依赖 tiktoken。"""
 
     def count(self, text: str) -> int:
         return len(text.split())
+
+    def truncate(self, text: str, max_tokens: int) -> str:
+        """测试 tokenizer 的确定性前缀截断。"""
+        if max_tokens <= 0:
+            return ""
+        return " ".join(text.split()[:max_tokens])
 
 
 class TokenCounter:
@@ -53,6 +68,10 @@ class TokenCounter:
 
     def count(self, text: str) -> int:
         return self._tokenizer.count(text)
+
+    def truncate(self, text: str, max_tokens: int) -> str:
+        """使用统一 tokenizer 截断文本，供知识总结上下文摘要预算复用。"""
+        return self._tokenizer.truncate(text, max_tokens)
 
     def count_messages(self, messages: list[dict[str, object]]) -> int:
         """按消息 content 字段累计 token（§A.7：全链路同一口径）。"""

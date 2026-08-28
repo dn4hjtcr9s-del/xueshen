@@ -1,0 +1,5 @@
+[     210ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://localhost:4173/api/v1/auth/refresh:0
+[  339122ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://localhost:4173/api/v1/auth/refresh:0
+[ 2797106ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://localhost:4173/api/v1/auth/refresh:0
+[ 2797990ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://localhost:4173/api/v1/auth/refresh:0
+[ 2798589ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://localhost:4173/api/v1/auth/refresh:0

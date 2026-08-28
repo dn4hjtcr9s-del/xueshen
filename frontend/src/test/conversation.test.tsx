@@ -2,7 +2,7 @@
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTurn, listConversations } from "../api/conversations";
+import { createConversation, createTurn, listConversations } from "../api/conversations";
 import { startTurnEventStream } from "../api/turnEvents";
 import { useConversation } from "../hooks/useConversation";
 import { server } from "./server";
@@ -43,10 +43,24 @@ describe("conversations API client", () => {
     expect(page.items).toEqual([]);
   });
 
+  it("创建会话使用共享请求层的相对路径", async () => {
+    server.use(
+      http.post("/memory-api/api/v1/conversations", () =>
+        HttpResponse.json({ thread_id: THREAD, version: 0 }, { status: 201 }),
+      ),
+    );
+    await expect(createConversation()).resolves.toEqual({ thread_id: THREAD, version: 0 });
+  });
+
   it("创建 Turn 返回 event_stream_path", async () => {
     server.use(
-      http.post("*/memory-api/api/v1/conversations/:threadId/turns", () =>
-        HttpResponse.json(
+      http.post("*/memory-api/api/v1/conversations/:threadId/turns", async ({ request }) => {
+        expect(await request.json()).toEqual({
+          client_request_id: "req-1",
+          content: "你好",
+          expected_thread_version: 0,
+        });
+        return HttpResponse.json(
           {
             thread_id: THREAD,
             turn_id: TURN,
@@ -56,8 +70,8 @@ describe("conversations API client", () => {
             event_stream_path: `/api/v1/conversations/${THREAD}/turns/${TURN}/events`,
           },
           { status: 202 },
-        ),
-      ),
+        );
+      }),
     );
     const response = await createTurn(THREAD, {
       client_request_id: "req-1",

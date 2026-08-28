@@ -26,6 +26,10 @@ def _normalized_spec() -> str:
         study_domain_enabled=True,
         study_database_url="postgresql+psycopg://study:study@127.0.0.1:55432/study",
         study_account_purge_service_token="contract-test-purge-token",
+        conversation_knowledge_summary_enabled=True,
+        conversation_knowledge_summary_generation_enabled=True,
+        openai_knowledge_summary_model="contract-test-model",
+        conversation_knowledge_summary_structured_output_models="contract-test-model",
     )
     app = create_app(settings)
     spec = app.openapi()
@@ -66,6 +70,15 @@ def test_openapi_contains_spec_routes() -> None:
         "/api/v1/memory/notifications",
         "/api/v1/memory/notifications/{notification_id}/read",
         "/api/v1/knowledge-graph/nodes",
+        "/api/v1/knowledge-summaries",
+        "/api/v1/knowledge-summaries/topic-groups",
+        "/api/v1/knowledge-summaries/stats",
+        "/api/v1/knowledge-summaries/{summary_id}",
+        "/api/v1/knowledge-summaries/{summary_id}/sources",
+        "/api/v1/conversations/{thread_id}/turns/{turn_id}/knowledge-summary-generations",
+        "/api/v1/conversations/{thread_id}/turns/{turn_id}/knowledge-summary-generation",
+        "/api/v1/knowledge-summary-generations/{generation_id}",
+        "/api/v1/knowledge-summary-generations/{generation_id}/dismiss-review",
         "/api/v1/knowledge-graph/me/nodes",
         "/api/v1/knowledge-graph/me/nodes/{node_id}",
         "/api/v1/knowledge-graph/me/nodes/{node_id}/state",
@@ -116,3 +129,34 @@ def test_openapi_contains_study_routes() -> None:
         "/api/v1/internal/study-accounts/purge",
     }
     assert expected_study_paths <= set(spec["paths"])
+
+
+def test_knowledge_summary_routes_hidden_when_read_flag_disabled() -> None:
+    """方案 §15 / §19：主读取开关关闭时，不在 OpenAPI 误暴露用户端点。"""
+    settings = Settings(
+        app_env="test",
+        memory_storage_root="/tmp/memory-contract-test",
+        conversation_knowledge_summary_enabled=False,
+    )
+    paths = create_app(settings).openapi()["paths"]
+    assert not any(path.startswith("/api/v1/knowledge-summaries") for path in paths)
+    assert not any("knowledge-summary-generation" in path for path in paths)
+
+
+def test_knowledge_summary_generation_write_routes_hidden_when_generation_flag_disabled() -> None:
+    """方案 §17.10：生成开关关闭时保留历史读取，隐藏手动生成和 dismiss 写路径。"""
+    settings = Settings(
+        app_env="test",
+        memory_storage_root="/tmp/memory-contract-test",
+        conversation_knowledge_summary_enabled=True,
+        conversation_knowledge_summary_generation_enabled=False,
+    )
+    paths = create_app(settings).openapi()["paths"]
+    assert any(path.startswith("/api/v1/knowledge-summaries") for path in paths)
+    assert "/api/v1/conversations/{thread_id}/turns/{turn_id}/knowledge-summary-generation" in paths
+    assert "/api/v1/knowledge-summary-generations/{generation_id}" in paths
+    assert (
+        "/api/v1/conversations/{thread_id}/turns/{turn_id}/knowledge-summary-generations"
+        not in paths
+    )
+    assert "/api/v1/knowledge-summary-generations/{generation_id}/dismiss-review" not in paths

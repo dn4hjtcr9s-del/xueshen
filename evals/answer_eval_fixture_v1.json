@@ -1,0 +1,337 @@
+{
+  "schema_version": "answer-eval-fixture/v1",
+  "fixture_id": "answer-eval-shared-state-v1",
+  "description": "100 个 Answer Eval Case 共享的只读测试账号、长期记忆与知识图谱状态。",
+  "account": {
+    "user_id": "2be72e49-22bc-5635-bddb-810acfa32791",
+    "username": "answer_eval_2026",
+    "email": "answer-eval-2026@example.invalid",
+    "issuer": "gewu-auth",
+    "external_subject": "2be72e49-22bc-5635-bddb-810acfa32791",
+    "status": "active",
+    "credential_file": ".local/answer_eval_account.json"
+  },
+  "fixed_at": "2026-08-18T00:00:00Z",
+  "memory": {
+    "learner": {
+      "version": 1,
+      "preferences": [
+        "使用简体中文回答数学问题",
+        "先说明核心概念和直观意义，再给出严格定义或公式",
+        "复杂推导按步骤展开，不跳过关键代数变形",
+        "公式必须同时说明符号含义和适用条件",
+        "在有帮助时给出一个简短例子，但避免无关扩展"
+      ],
+      "goals": [
+        "系统复习从初中到大学的数学核心知识",
+        "能够准确区分相近概念、定理条件和常见误区",
+        "提高证明题、综合题和数学表达的严谨性"
+      ],
+      "plans": [
+        "依次复习函数与极限、导数与积分、线性代数、概率统计和几何",
+        "对掌握不足的知识点优先补充定义、直观解释和典型例子"
+      ],
+      "evidence_refs": [
+        "fixture:answer-eval-shared-state-v1:learner"
+      ],
+      "confidence": 0.98
+    },
+    "mastery": [
+      {
+        "topic_key": "函数的概念与性质",
+        "topic_title": "函数的概念与性质",
+        "version": 1,
+        "overview": "已掌握函数、定义域、值域和基本性质，复合函数与抽象函数问题仍需关注条件。",
+        "understood": [
+          "函数的基本定义",
+          "定义域和值域",
+          "单调性、奇偶性和周期性的基本判断"
+        ],
+        "difficulties": [
+          "复合函数定义域",
+          "抽象函数性质的综合判断"
+        ],
+        "review_advice": [
+          "遇到函数问题先明确对应关系、定义域和值域，再分析性质"
+        ],
+        "evidence_refs": [
+          "fixture:answer-eval-shared-state-v1:mastery:functions"
+        ],
+        "confidence": 0.86,
+        "graph_node_id": "n038",
+        "graph_status": "proficient"
+      },
+      {
+        "topic_key": "导数与微分",
+        "topic_title": "导数与微分",
+        "version": 1,
+        "overview": "知道导数表示瞬时变化率，但几何意义、可导与连续的关系仍不稳定。",
+        "understood": [
+          "导数是差商的极限",
+          "基本求导规则"
+        ],
+        "difficulties": [
+          "导数与切线斜率的关系",
+          "可导、连续和可微之间的区别"
+        ],
+        "review_advice": [
+          "解释导数时优先结合割线趋近切线的图像，再给出极限定义"
+        ],
+        "evidence_refs": [
+          "fixture:answer-eval-shared-state-v1:mastery:derivative"
+        ],
+        "confidence": 0.72,
+        "graph_node_id": "n123",
+        "graph_status": "learning"
+      },
+      {
+        "topic_key": "定积分",
+        "topic_title": "定积分",
+        "version": 1,
+        "overview": "理解定积分的累积量和面积直观，积分定义、换元和微积分基本定理需要加强。",
+        "understood": [
+          "定积分表示有向累积量",
+          "简单函数的定积分计算"
+        ],
+        "difficulties": [
+          "积分和定义",
+          "换元积分的上下限变化",
+          "微积分基本定理的条件"
+        ],
+        "review_advice": [
+          "先说明分割、近似求和和取极限，再解释计算公式"
+        ],
+        "evidence_refs": [
+          "fixture:answer-eval-shared-state-v1:mastery:integral"
+        ],
+        "confidence": 0.7,
+        "graph_node_id": "n126",
+        "graph_status": "learning"
+      },
+      {
+        "topic_key": "向量组的线性相关性",
+        "topic_title": "向量组的线性相关性",
+        "version": 1,
+        "overview": "会做矩阵初等变换，但对线性相关、生成空间和秩的抽象联系理解不够。",
+        "understood": [
+          "矩阵初等变换",
+          "线性方程组的基本求解"
+        ],
+        "difficulties": [
+          "线性相关与非零线性组合",
+          "向量组的秩与生成空间"
+        ],
+        "review_advice": [
+          "在线性代数问题中同时给出方程组、矩阵和几何三个视角"
+        ],
+        "evidence_refs": [
+          "fixture:answer-eval-shared-state-v1:mastery:linear-algebra"
+        ],
+        "confidence": 0.68,
+        "graph_node_id": "n101",
+        "graph_status": "learning"
+      },
+      {
+        "topic_key": "概率论的基本概念",
+        "topic_title": "概率论的基本概念",
+        "version": 1,
+        "overview": "已掌握样本空间、事件和条件概率，独立与互斥的区别需要持续检查。",
+        "understood": [
+          "样本空间与随机事件",
+          "条件概率与乘法公式",
+          "全概率公式和贝叶斯公式"
+        ],
+        "difficulties": [
+          "独立事件与互斥事件的区别"
+        ],
+        "review_advice": [
+          "概率问题先明确样本空间和事件，再判断使用的公式及条件"
+        ],
+        "evidence_refs": [
+          "fixture:answer-eval-shared-state-v1:mastery:probability"
+        ],
+        "confidence": 0.84,
+        "graph_node_id": "n083",
+        "graph_status": "proficient"
+      },
+      {
+        "topic_key": "勾股定理",
+        "topic_title": "勾股定理",
+        "version": 1,
+        "overview": "能使用勾股定理计算边长，并理解常见面积证明。",
+        "understood": [
+          "勾股定理及其逆定理",
+          "面积法证明",
+          "直角三角形中的基本应用"
+        ],
+        "difficulties": [
+          "复杂图形中识别可用的直角三角形"
+        ],
+        "review_advice": [
+          "几何问题先标明已知边、直角和目标量，再选择定理"
+        ],
+        "evidence_refs": [
+          "fixture:answer-eval-shared-state-v1:mastery:pythagorean"
+        ],
+        "confidence": 0.9,
+        "graph_node_id": "n022",
+        "graph_status": "proficient"
+      },
+      {
+        "topic_key": "无穷级数",
+        "topic_title": "无穷级数",
+        "version": 1,
+        "overview": "了解级数收敛的含义，但判别法的选择和适用边界容易混淆。",
+        "understood": [
+          "部分和与级数收敛的定义",
+          "几何级数和调和级数"
+        ],
+        "difficulties": [
+          "比值、根值、比较和 Leibniz 判别法的选择",
+          "绝对收敛与条件收敛"
+        ],
+        "review_advice": [
+          "使用判别法时必须先写出适用条件，再说明结论"
+        ],
+        "evidence_refs": [
+          "fixture:answer-eval-shared-state-v1:mastery:series"
+        ],
+        "confidence": 0.64,
+        "graph_node_id": "n133",
+        "graph_status": "learning"
+      },
+      {
+        "topic_key": "多元函数微分法及其应用",
+        "topic_title": "多元函数微分法及其应用",
+        "version": 1,
+        "overview": "会计算简单偏导数，对方向导数、梯度和全微分的关系理解不牢。",
+        "understood": [
+          "偏导数的基本计算",
+          "二元函数的简单全微分"
+        ],
+        "difficulties": [
+          "方向导数与梯度的关系",
+          "可微与偏导数存在的区别"
+        ],
+        "review_advice": [
+          "解释梯度时结合最陡上升方向，并明确单位方向向量条件"
+        ],
+        "evidence_refs": [
+          "fixture:answer-eval-shared-state-v1:mastery:multivariable"
+        ],
+        "confidence": 0.63,
+        "graph_node_id": "n130",
+        "graph_status": "learning"
+      }
+    ]
+  },
+  "graph_states": [
+    {
+      "node_id": "n022",
+      "status": "proficient",
+      "version": 1,
+      "status_source": "summary_memory",
+      "source_memory_id": "mastery:勾股定理",
+      "source_memory_version": 1,
+      "reason_codes": [
+        "SUMMARY_MEMORY_SIGNAL"
+      ],
+      "explanation_summary": "能够使用勾股定理并理解面积证明。"
+    },
+    {
+      "node_id": "n038",
+      "status": "proficient",
+      "version": 1,
+      "status_source": "summary_memory",
+      "source_memory_id": "mastery:函数的概念与性质",
+      "source_memory_version": 1,
+      "reason_codes": [
+        "SUMMARY_MEMORY_SIGNAL"
+      ],
+      "explanation_summary": "函数基础较稳，复合函数和抽象性质仍需检查条件。"
+    },
+    {
+      "node_id": "n083",
+      "status": "proficient",
+      "version": 1,
+      "status_source": "summary_memory",
+      "source_memory_id": "mastery:概率论的基本概念",
+      "source_memory_version": 1,
+      "reason_codes": [
+        "SUMMARY_MEMORY_SIGNAL"
+      ],
+      "explanation_summary": "概率基础较稳，需避免混淆独立与互斥。"
+    },
+    {
+      "node_id": "n101",
+      "status": "learning",
+      "version": 1,
+      "status_source": "summary_memory",
+      "source_memory_id": "mastery:向量组的线性相关性",
+      "source_memory_version": 1,
+      "reason_codes": [
+        "CONTINUE_LEARNING"
+      ],
+      "explanation_summary": "矩阵计算已入门，线性相关的抽象理解仍需加强。"
+    },
+    {
+      "node_id": "n123",
+      "status": "learning",
+      "version": 1,
+      "status_source": "summary_memory",
+      "source_memory_id": "mastery:导数与微分",
+      "source_memory_version": 1,
+      "reason_codes": [
+        "CONTINUE_LEARNING"
+      ],
+      "explanation_summary": "导数定义已接触，几何意义和概念关系仍需复习。"
+    },
+    {
+      "node_id": "n126",
+      "status": "learning",
+      "version": 1,
+      "status_source": "summary_memory",
+      "source_memory_id": "mastery:定积分",
+      "source_memory_version": 1,
+      "reason_codes": [
+        "CONTINUE_LEARNING"
+      ],
+      "explanation_summary": "定积分直观已建立，严格定义和基本定理仍需加强。"
+    },
+    {
+      "node_id": "n130",
+      "status": "learning",
+      "version": 1,
+      "status_source": "summary_memory",
+      "source_memory_id": "mastery:多元函数微分法及其应用",
+      "source_memory_version": 1,
+      "reason_codes": [
+        "CONTINUE_LEARNING"
+      ],
+      "explanation_summary": "偏导计算已入门，方向导数和梯度仍需加强。"
+    },
+    {
+      "node_id": "n133",
+      "status": "learning",
+      "version": 1,
+      "status_source": "summary_memory",
+      "source_memory_id": "mastery:无穷级数",
+      "source_memory_version": 1,
+      "reason_codes": [
+        "CONTINUE_LEARNING",
+        "PREREQUISITE_GAP"
+      ],
+      "explanation_summary": "级数概念已接触，收敛判别法选择仍不稳定。"
+    }
+  ],
+  "freeze_policy": {
+    "memory_read_enabled": true,
+    "memory_submit_enabled": false,
+    "memory_documents_read_only_during_eval": true,
+    "graph_states_read_only_during_eval": true,
+    "conversation_evidence_submit_enabled": false,
+    "explicit_remember_write_enabled": false,
+    "reset_conversation_between_cases": true,
+    "verify_fixture_hash_before_and_after_each_case": true
+  }
+}

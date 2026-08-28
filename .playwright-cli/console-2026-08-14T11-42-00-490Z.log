@@ -1,0 +1,7 @@
+[    1388ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:4173/favicon.ico:0
+[    1484ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://localhost:4173/api/v1/auth/refresh:0
+[   92983ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:4173/memory-api/api/v1/memory-api/api/v1/conversations?limit=50:0
+[  104998ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:4173/memory-api/api/v1/memory-api/api/v1/conversations?limit=50:0
+[  105657ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:4173/memory-api/api/v1/memory-api/api/v1/conversations?limit=50:0
+[  109160ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:4173/memory-api/api/v1/memory-api/api/v1/conversations?limit=50:0
+[  111506ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:4173/memory-api/api/v1/memory-api/api/v1/conversations?limit=50:0

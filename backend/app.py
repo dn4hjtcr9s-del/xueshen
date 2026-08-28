@@ -362,6 +362,16 @@ def create_app(
             community_metrics.community_api_requests_total.labels(
                 route=route_path, status=str(response.status_code)
             ).inc()
+        if (
+            request.url.path.startswith("/api/v1/knowledge-summaries")
+            or "knowledge-summary-generation" in request.url.path
+        ):
+            # §21.2：知识总结 API 指标只使用稳定路由模板和 HTTP 状态。
+            from backend.conversation import metrics as knowledge_summary_metrics
+
+            knowledge_summary_metrics.knowledge_summary_api_requests_total.labels(
+                route=route_path, status=str(response.status_code)
+            ).inc()
         return response
 
     async def _write_break_glass_body_audit(

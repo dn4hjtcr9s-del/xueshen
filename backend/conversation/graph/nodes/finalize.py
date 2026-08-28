@@ -14,7 +14,7 @@ source_checkpoint_id 由 canonical manifest（build_source_manifest）生成（�
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
@@ -187,6 +187,16 @@ async def persist_turn(
                 user_id=user_id,
                 token_counter=runtime.token_counter,
             )
+            # 8. 知识总结自动生成 Job 入队（Phase 4 / §14.1）。
+            #    使用 savepoint 隔离，局部失败不回滚聊天主事务。
+            await _enqueue_knowledge_summary_auto_job(
+                session,
+                runtime=runtime,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                user_id=user_id,
+                source_checkpoint_id=source_checkpoint_id,
+            )
     return {
         "assistant_message_id": str(assistant_message_id),
         "outbox_event_id": outbox_event_id,
@@ -267,6 +277,112 @@ async def _enqueue_title_and_summary_jobs(
                 user_id=user_id,
                 target_sequence=int(latest or 0),
             )
+
+
+async def _enqueue_knowledge_summary_auto_job(
+    session: AsyncSession,
+    *,
+    runtime: ConversationRuntimeContext,
+    thread_id: UUID,
+    turn_id: UUID,
+    user_id: UUID,
+    source_checkpoint_id: str,
+) -> None:
+    """在 finalize 主事务内尝试为 completed Turn 创建知识总结自动 Job（§14.1）。
+
+    - 三级开关或 runtime control 暂停时直接保持 not_requested；
+    - 使用 savepoint 隔离 Job 插入，约束/序列化错误只回滚 savepoint；
+    - 任何失败只将 Turn 标记为 enqueue_failed 并设置退避，不阻断回答。
+    """
+    settings = runtime.settings
+    if settings is None:
+        return
+    flags = settings.knowledge_summary_flags
+    if not (flags["enabled"] and flags["generation"] and flags["auto_generate"]):
+        return
+
+    from backend.conversation.persistence import (
+        knowledge_summaries as summaries_repo,
+    )
+
+    runtime_control = await summaries_repo.get_runtime_control(session)
+    if runtime_control is not None and runtime_control["auto_generation_suspended"]:
+        return
+
+    # 读取主来源 user message 的 occurred_at 作为冻结 Turn 时间。
+    result = await session.execute(
+        text(
+            "SELECT occurred_at FROM conversation.conversation_messages "
+            "WHERE thread_id = :thread_id AND turn_id = :turn_id AND role = 'user' "
+            "  AND status = 'completed' "
+            "ORDER BY sequence LIMIT 1"
+        ),
+        {"thread_id": thread_id, "turn_id": turn_id},
+    )
+    row = result.mappings().first()
+    primary_occurred_at = row["occurred_at"] if row is not None else datetime.now(UTC)
+
+    from backend.conversation.persistence import (
+        knowledge_summary_generations as generations_repo,
+    )
+
+    generation_id = uuid4()
+    idempotency_key = f"knowledge-summary:auto:{turn_id}:{source_checkpoint_id}"
+    now = datetime.now(UTC)
+    try:
+        async with session.begin_nested():
+            inserted = await generations_repo.insert_generation_job(
+                session,
+                generation_id=generation_id,
+                idempotency_key=idempotency_key,
+                client_request_id=None,
+                user_id=user_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                source_checkpoint_id=source_checkpoint_id,
+                trigger="auto",
+                primary_turn_occurred_at=primary_occurred_at,
+            )
+            if inserted:
+                await session.execute(
+                    text(
+                        "UPDATE conversation.conversation_turns "
+                        "SET knowledge_summary_enqueue_status = 'enqueued', "
+                        "    knowledge_summary_enqueue_attempts = 1, "
+                        "    knowledge_summary_enqueue_next_attempt_at = NULL, "
+                        "    updated_at = :now "
+                        "WHERE turn_id = :turn_id"
+                    ),
+                    {"turn_id": turn_id, "now": now},
+                )
+            else:
+                # 幂等命中：已有自动 Job，标记为 enqueued。
+                await session.execute(
+                    text(
+                        "UPDATE conversation.conversation_turns "
+                        "SET knowledge_summary_enqueue_status = 'enqueued', "
+                        "    knowledge_summary_enqueue_attempts = "
+                        "        GREATEST(knowledge_summary_enqueue_attempts, 1), "
+                        "    updated_at = :now "
+                        "WHERE turn_id = :turn_id"
+                    ),
+                    {"turn_id": turn_id, "now": now},
+                )
+    except Exception:
+        # savepoint 已回滚；记录 enqueue_failed，30s 后修复扫描重试。
+        next_attempt = now + timedelta(seconds=30)
+        await session.execute(
+            text(
+                "UPDATE conversation.conversation_turns "
+                "SET knowledge_summary_enqueue_status = 'enqueue_failed', "
+                "    knowledge_summary_enqueue_attempts = "
+                "        knowledge_summary_enqueue_attempts + 1, "
+                "    knowledge_summary_enqueue_next_attempt_at = :next_attempt, "
+                "    updated_at = :now "
+                "WHERE turn_id = :turn_id"
+            ),
+            {"turn_id": turn_id, "next_attempt": next_attempt, "now": now},
+        )
 
 
 def _validated_graph_hints(state: dict[str, Any]) -> list[str]:

@@ -88,11 +88,14 @@ def build_conversation_graph(
     # 注意：节点必须是 async 函数（返回 await 结果），不能返回 coroutine 对象。
 
     async def _node_load_context(state: ConversationGraphState) -> dict[str, Any]:
-        return await context_node.load_conversation_context(
+        conversation_context = await context_node.load_conversation_context(
             dict(state),
             session_factory=repo.session_factory,
             max_messages=int(settings.conversation_context_max_messages),
         )
+        # 上下文节点返回的是内容字典，必须挂到 Graph State 的 conversation_context 字段，
+        # 否则 LangGraph 会丢弃 current_message/recent_messages，回答模型只能看到空问题。
+        return {"conversation_context": conversation_context}
 
     async def _node_recall_memory(state: ConversationGraphState) -> dict[str, Any]:
         return await memory_node.recall_memory(dict(state), runtime=runtime_context)

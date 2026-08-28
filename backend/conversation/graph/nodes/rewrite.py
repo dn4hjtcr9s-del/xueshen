@@ -10,6 +10,7 @@ from __future__ import annotations
 from hashlib import sha256
 from typing import Any
 
+from backend.conversation.contracts.errors import ModelUnavailableError
 from backend.conversation.contracts.graph import RewritePlan
 from backend.conversation.graph.state import ConversationRuntimeContext, normalize_plan_mode
 
@@ -35,7 +36,11 @@ async def rewrite_and_plan(
 
     if not flags.get("agentic_rag", True):
         # 附录 A.10：AGENTIC_RAG_ENABLED=false → 当前消息原文单查询
-        return _single_query_plan(state, plan_revision)
+        return _single_query_plan(
+            state,
+            plan_revision,
+            reason_code="agentic_rag_disabled",
+        )
 
     snapshot_obj = _snapshot_obj(snapshot)
     view = context_service.build_rewrite_view(
@@ -44,7 +49,23 @@ async def rewrite_and_plan(
         executed_queries=executed,
         missing_aspects=missing,
     )
-    raw = await runtime.openai_gateway.rewrite_and_plan(context_view=view, prior_attempts=0)
+    try:
+        raw = await runtime.openai_gateway.rewrite_and_plan(
+            context_view=view,
+            prior_attempts=0,
+        )
+    except ModelUnavailableError as exc:
+        runtime.logger.warning(
+            "Rewrite Structured Output 降级为原问题单查询 reason=%s attempts=%s",
+            getattr(exc, "reason", "model_unavailable"),
+            getattr(exc, "attempts", None),
+        )
+        return _single_query_plan(
+            state,
+            plan_revision,
+            reason_code="rewrite_structured_fallback",
+            degraded_flags=["rewrite_structured_fallback"],
+        )
     plan = RewritePlan.model_validate(raw)
     plan = normalize_plan_mode(plan, max_subqueries=max_subqueries)
     if not flags.get("multi_query", True) and plan.subqueries:
@@ -72,33 +93,48 @@ def _snapshot_obj(snapshot: dict[str, Any]) -> Any:
     return snapshot_from_dict(snapshot)
 
 
-def _single_query_plan(state: dict[str, Any], plan_revision: int) -> dict[str, Any]:
+def _single_query_plan(
+    state: dict[str, Any],
+    plan_revision: int,
+    *,
+    reason_code: str,
+    degraded_flags: list[str] | None = None,
+) -> dict[str, Any]:
     """降级：standalone=当前消息，强制单子查询进检索（附录 A.10）。"""
-    current = str((state.get("snapshot") or {}).get("current_message") or "")
+    current = str((state.get("snapshot") or {}).get("current_message") or "").strip()
+    if not current:
+        current = "请回答当前用户问题"
+    standalone_question = current[:1000]
+    query_text = current[:500]
+    executed = list(state.get("executed_query_fingerprints") or [])
     from backend.conversation.contracts.graph import RetrievalSubquery
 
     plan = RewritePlan(
         plan_revision=plan_revision,
-        standalone_question=current,
+        standalone_question=standalone_question,
         answer_mode="rag",
         need_retrieval=True,
         subqueries=[
             RetrievalSubquery(
                 subquery_id="sq-0",
-                query_text=current[:500],
+                query_text=query_text,
                 intent="fallback",
                 coverage_target="",
                 semantic_filters={},
             )
         ],
-        reason_codes=["agentic_rag_disabled"],
+        reason_codes=[reason_code],
     )
     next_revision = plan_revision + 1
     plan = plan.model_copy(update={"plan_revision": next_revision})
     return {
         "rewrite_plan": plan.model_dump(mode="json"),
         "plan_revision": next_revision,
-        "executed_query_fingerprints": [],
+        "executed_query_fingerprints": [
+            *executed,
+            sha256(query_text.lower().encode()).hexdigest(),
+        ],
+        "degraded_flags": degraded_flags or [],
     }
 
 

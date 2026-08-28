@@ -26,6 +26,8 @@ class ConversationGraphState(TypedDict, total=False):
     user_id: UUID
     thread_id: UUID
     turn_id: UUID
+    # 当前用户消息 ID 必须随 Graph State 持久化，load_conversation_context 依赖它读取提问正文。
+    user_message_id: UUID
     request_id: str
     run_id: str
     expected_thread_version: int

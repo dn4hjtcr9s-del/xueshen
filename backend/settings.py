@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -173,6 +173,10 @@ class Settings(BaseSettings):
     conversation_turn_rate_limit_per_minute: int = Field(
         default=10, alias="CONVERSATION_TURN_RATE_LIMIT_PER_MINUTE"
     )
+    # 可信代理 CIDR（知识总结手动生成限流用；默认空 = 仅信任直连对端）
+    conversation_trusted_proxy_cidrs: list[str] = Field(
+        default_factory=list, alias="CONVERSATION_TRUSTED_PROXY_CIDRS"
+    )
     conversation_internal_tester_user_ids: list[str] = Field(
         default_factory=list, alias="CONVERSATION_INTERNAL_TESTER_USER_IDS"
     )
@@ -276,6 +280,104 @@ class Settings(BaseSettings):
     openai_answer_model: str = Field(default="", alias="OPENAI_ANSWER_MODEL")
     openai_conversation_summary_model: str = Field(
         default="", alias="OPENAI_CONVERSATION_SUMMARY_MODEL"
+    )
+
+    # ------------------------------------------------------------------
+    # Conversation KnowledgeSummary（知识总结方案 §19）
+    # ------------------------------------------------------------------
+    # 三层开关均默认关闭；实现完成不代表允许用户访问或调用模型。
+    conversation_knowledge_summary_enabled: bool = Field(
+        default=False, alias="CONVERSATION_KNOWLEDGE_SUMMARY_ENABLED"
+    )
+    conversation_knowledge_summary_generation_enabled: bool = Field(
+        default=False, alias="CONVERSATION_KNOWLEDGE_SUMMARY_GENERATION_ENABLED"
+    )
+    conversation_knowledge_summary_auto_generate_enabled: bool = Field(
+        default=False, alias="CONVERSATION_KNOWLEDGE_SUMMARY_AUTO_GENERATE_ENABLED"
+    )
+    openai_knowledge_summary_model: str = Field(default="", alias="OPENAI_KNOWLEDGE_SUMMARY_MODEL")
+    # 使用逗号分隔，避免 .env 为 list 字段时要求 JSON 数组的歧义。
+    conversation_knowledge_summary_structured_output_models: str = Field(
+        default="", alias="CONVERSATION_KNOWLEDGE_SUMMARY_STRUCTURED_OUTPUT_MODELS"
+    )
+    conversation_knowledge_summary_poll_seconds: float = Field(
+        default=1.0, gt=0, alias="CONVERSATION_KNOWLEDGE_SUMMARY_POLL_SECONDS"
+    )
+    conversation_knowledge_summary_lease_seconds: int = Field(
+        default=60, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_LEASE_SECONDS"
+    )
+    conversation_knowledge_summary_max_attempts: int = Field(
+        default=5, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_MAX_ATTEMPTS"
+    )
+    conversation_knowledge_summary_context_messages: int = Field(
+        default=6, ge=0, le=6, alias="CONVERSATION_KNOWLEDGE_SUMMARY_CONTEXT_MESSAGES"
+    )
+    conversation_knowledge_summary_context_token_budget: int = Field(
+        default=4000, ge=1, le=4000, alias="CONVERSATION_KNOWLEDGE_SUMMARY_CONTEXT_TOKEN_BUDGET"
+    )
+    conversation_knowledge_summary_auto_confidence: float = Field(
+        default=0.75, ge=0, le=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_AUTO_CONFIDENCE"
+    )
+    conversation_knowledge_summary_manual_confidence: float = Field(
+        default=0.60, ge=0, le=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_MANUAL_CONFIDENCE"
+    )
+    conversation_knowledge_summary_merge_confidence: float = Field(
+        default=0.90, ge=0, le=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_MERGE_CONFIDENCE"
+    )
+    conversation_knowledge_summary_manual_rate_limit_per_minute: int = Field(
+        default=6, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_MANUAL_RATE_LIMIT_PER_MINUTE"
+    )
+    conversation_knowledge_summary_ip_rate_limit_per_minute: int = Field(
+        default=30, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_IP_RATE_LIMIT_PER_MINUTE"
+    )
+    conversation_knowledge_summary_worker_concurrency: int = Field(
+        default=4, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_WORKER_CONCURRENCY"
+    )
+    conversation_knowledge_summary_manual_reserved_slots: int = Field(
+        default=1, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_MANUAL_RESERVED_SLOTS"
+    )
+    conversation_knowledge_summary_model_timeout_seconds: int = Field(
+        default=30, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_MODEL_TIMEOUT_SECONDS"
+    )
+    conversation_knowledge_summary_extract_max_output_tokens: int = Field(
+        default=6000, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_EXTRACT_MAX_OUTPUT_TOKENS"
+    )
+    conversation_knowledge_summary_merge_max_output_tokens: int = Field(
+        default=6000, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_MERGE_MAX_OUTPUT_TOKENS"
+    )
+    conversation_knowledge_summary_sdk_max_retries: int = Field(
+        default=0, ge=0, le=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_SDK_MAX_RETRIES"
+    )
+    conversation_knowledge_summary_daily_token_budget: int | None = Field(
+        default=None, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_DAILY_TOKEN_BUDGET"
+    )
+    conversation_knowledge_summary_auto_queue_depth_limit: int = Field(
+        default=5000, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_AUTO_QUEUE_DEPTH_LIMIT"
+    )
+    conversation_knowledge_summary_auto_oldest_job_seconds: int = Field(
+        default=600, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_AUTO_OLDEST_JOB_SECONDS"
+    )
+    conversation_knowledge_summary_auto_failure_rate: float = Field(
+        default=0.50, gt=0, le=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_AUTO_FAILURE_RATE"
+    )
+    conversation_knowledge_summary_auto_failure_min_calls: int = Field(
+        default=20, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_AUTO_FAILURE_MIN_CALLS"
+    )
+    # §20.5：维护任务统一从 Settings 读取保留期限和批量大小。
+    conversation_knowledge_summary_model_call_payload_retention_days: int = Field(
+        default=14, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_MODEL_CALL_PAYLOAD_RETENTION_DAYS"
+    )
+    conversation_knowledge_summary_job_payload_retention_days: int = Field(
+        default=30, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_JOB_PAYLOAD_RETENTION_DAYS"
+    )
+    conversation_knowledge_summary_deleted_summary_retention_days: int = Field(
+        default=30, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_DELETED_SUMMARY_RETENTION_DAYS"
+    )
+    conversation_knowledge_summary_generation_retention_days: int = Field(
+        default=180, ge=1, alias="CONVERSATION_KNOWLEDGE_SUMMARY_GENERATION_RETENTION_DAYS"
+    )
+    conversation_knowledge_summary_retention_batch_size: int = Field(
+        default=100, ge=1, le=1000, alias="CONVERSATION_KNOWLEDGE_SUMMARY_RETENTION_BATCH_SIZE"
     )
 
     # ------------------------------------------------------------------
@@ -475,6 +577,34 @@ class Settings(BaseSettings):
         }
 
     @property
+    def knowledge_summary_structured_output_model_allowlist(self) -> frozenset[str]:
+        """解析部署在环境变量中维护的 Responses Structured Outputs 模型白名单。"""
+        return frozenset(
+            model_name.strip()
+            for model_name in self.conversation_knowledge_summary_structured_output_models.split(
+                ","
+            )
+            if model_name.strip()
+        )
+
+    @property
+    def knowledge_summary_flags(self) -> dict[str, bool]:
+        """知识总结三级开关快照，所有进程必须使用同一解释。"""
+        return {
+            "enabled": self.conversation_knowledge_summary_enabled,
+            "generation": self.conversation_knowledge_summary_generation_enabled,
+            "auto_generate": self.conversation_knowledge_summary_auto_generate_enabled,
+        }
+
+    @field_validator("conversation_knowledge_summary_daily_token_budget", mode="before")
+    @classmethod
+    def blank_knowledge_summary_daily_token_budget_to_none(cls, value: object) -> object:
+        """允许 `.env` 用空值表示“自动生成尚未启用，因此无预算”。"""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @property
     def study_flags(self) -> dict[str, bool]:
         """Study Feature Flag 快照（§19：进程启动时读入，运行中不热切换）。"""
         return {
@@ -489,6 +619,36 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_environment_rules(self) -> Settings:
         """生产环境安全约束（§18.1 / §6.3）。"""
+        if self.conversation_knowledge_summary_generation_enabled:
+            if not self.conversation_knowledge_summary_enabled:
+                raise ValueError(
+                    "启用知识总结生成必须同时设置 CONVERSATION_KNOWLEDGE_SUMMARY_ENABLED=true"
+                )
+            model_name = self.openai_knowledge_summary_model.strip()
+            if not model_name:
+                raise ValueError("启用知识总结生成必须配置 OPENAI_KNOWLEDGE_SUMMARY_MODEL")
+            if model_name not in self.knowledge_summary_structured_output_model_allowlist:
+                raise ValueError(
+                    "OPENAI_KNOWLEDGE_SUMMARY_MODEL 必须位于 "
+                    "CONVERSATION_KNOWLEDGE_SUMMARY_STRUCTURED_OUTPUT_MODELS 白名单"
+                )
+        if self.conversation_knowledge_summary_auto_generate_enabled:
+            if not self.conversation_knowledge_summary_generation_enabled:
+                raise ValueError(
+                    "启用知识总结自动生成必须同时设置 "
+                    "CONVERSATION_KNOWLEDGE_SUMMARY_GENERATION_ENABLED=true"
+                )
+            if self.conversation_knowledge_summary_daily_token_budget is None:
+                raise ValueError(
+                    "启用知识总结自动生成必须配置 CONVERSATION_KNOWLEDGE_SUMMARY_DAILY_TOKEN_BUDGET"
+                )
+        if (
+            self.conversation_knowledge_summary_manual_reserved_slots
+            > self.conversation_knowledge_summary_worker_concurrency
+        ):
+            raise ValueError(
+                "CONVERSATION_KNOWLEDGE_SUMMARY_MANUAL_RESERVED_SLOTS 不得超过 Worker 并发数"
+            )
         if self.app_env == "production":
             if self.dev_auth_enabled or self.dev_auth_allow_scope_override:
                 raise ValueError("生产环境禁止 DEV_AUTH_ENABLED / DEV_AUTH_ALLOW_SCOPE_OVERRIDE")

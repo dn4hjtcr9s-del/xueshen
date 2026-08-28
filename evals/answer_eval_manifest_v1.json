@@ -1,0 +1,83 @@
+{
+  "schema_version": "answer-eval-manifest/v1",
+  "suite_id": "answer-eval-v1",
+  "prepared_on": "2026-08-18",
+  "description": "共享同一测试账号、固定长期记忆和固定知识图谱状态的 100 条 Answer Eval Case。",
+  "account": {
+    "user_id": "2be72e49-22bc-5635-bddb-810acfa32791",
+    "username": "answer_eval_2026",
+    "email": "answer-eval-2026@example.invalid",
+    "issuer": "gewu-auth",
+    "external_subject": "2be72e49-22bc-5635-bddb-810acfa32791",
+    "status": "active",
+    "credential_file": ".local/answer_eval_account.json"
+  },
+  "fixture": {
+    "fixture_id": "answer-eval-shared-state-v1",
+    "path": "evals/answer_eval_fixture_v1.json",
+    "sha256": "8d79a87ed9e08d723fbfcd84c90a5d351fd962bccdc9c7cc41a231e4c4ea96b1",
+    "learner_documents": 1,
+    "mastery_documents": 8,
+    "graph_states": 8
+  },
+  "cases": {
+    "path": "evals/answer_eval_cases_v1.jsonl",
+    "sha256": "84457c4c02914251791f16b87834d57cad4210be5d0187b479ab1954098893a5",
+    "total": 100,
+    "by_type": {
+      "single_turn": 60,
+      "multi_turn": 40
+    },
+    "by_grade": {
+      "大学": 70,
+      "初中": 12,
+      "高中": 18
+    },
+    "by_content_role": {
+      "definition": 33,
+      "body": 35,
+      "theorem": 27,
+      "exercise": 4,
+      "formula": 1
+    },
+    "multi_turn_categories": {
+      "pronoun_resolution": 8,
+      "condition_followup": 8,
+      "formula_followup": 8,
+      "why_followup": 8,
+      "current_request_override": 4,
+      "long_context_followup": 4
+    },
+    "unique_books": 21,
+    "unique_retrieval_cases": 70
+  },
+  "sources": {
+    "retrieval_cases_path": "evals/retrieval_cases_v1.jsonl",
+    "retrieval_cases_sha256": "882a53ac0736edba1a7c462d7534387784ebac697e6180137175379a748b428a",
+    "embedding_manifest_path": "embedding_artifacts/v1/manifest.json",
+    "embedding_manifest_sha256": "de45ac14a744fded2ac7fb620e527bb9d667335dfb6d037787dfe47b02b7591d"
+  },
+  "database_expected_state": {
+    "auth_user_status": "active",
+    "memory_documents": 10,
+    "memory_index_entries": 9,
+    "active_memory_graph_links": 8,
+    "graph_user_states": 8
+  },
+  "freeze_policy": {
+    "memory_read_enabled": true,
+    "memory_submit_enabled": false,
+    "memory_documents_read_only_during_eval": true,
+    "graph_states_read_only_during_eval": true,
+    "conversation_evidence_submit_enabled": false,
+    "explicit_remember_write_enabled": false,
+    "reset_conversation_between_cases": true,
+    "verify_fixture_hash_before_and_after_each_case": true
+  },
+  "not_executed": [
+    "Answer Eval",
+    "ConversationGraph",
+    "LLM 调用",
+    "测试套件"
+  ]
+}

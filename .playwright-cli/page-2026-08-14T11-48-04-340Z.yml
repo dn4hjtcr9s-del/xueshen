@@ -1,0 +1,21 @@
+- generic [ref=f1e3]:
+  - complementary [ref=f1e4]:
+    - generic "格物 · Math Studio" [ref=f1e5]: 格
+    - navigation [ref=f1e6]:
+      - button "今日" [ref=f1e7] [cursor=pointer]
+      - button "AI 对话" [ref=f1e11] [cursor=pointer]
+      - button "学习计划" [ref=f1e14] [cursor=pointer]
+      - button "知识地图" [ref=f1e18] [cursor=pointer]
+      - button "错题本" [ref=f1e24] [cursor=pointer]
+      - button "社区" [ref=f1e28] [cursor=pointer]
+    - generic [ref=f1e34]: 格物致知
+  - generic [ref=f1e35]:
+    - banner [ref=f1e36]:
+      - generic [ref=f1e37]: 2026.08.14 — GEWU MATH STUDIO
+      - generic [ref=f1e38]: 搜索知识点、对话、笔记…
+      - button "通知" [ref=f1e43] [cursor=pointer]
+      - button "个人中心" [ref=f1e47] [cursor=pointer]: 格
+    - main [ref=f1e48]:
+      - status [ref=f1e50]:
+        - generic [ref=f1e51]: ∴
+        - generic [ref=f1e52]: 正在准备你的学习主页…

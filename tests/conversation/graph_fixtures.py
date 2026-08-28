@@ -58,28 +58,20 @@ class FakeOpenAIGateway:
         return deltas, payload
 
 
-class JsonStreamingOpenAIGateway(FakeOpenAIGateway):
-    """模拟真实 OpenAI 网关的流式行为（第三轮必改 1 回归测试）。
-
-    真实请求带 text.format=json_schema，stream 的 output_text.delta 是结构化
-    JSON 的片段；本 Fake 把 payload 序列化为 JSON 后按字符切分作为 deltas，
-    并像真实 gateway 一样把累计文本解析为 AnswerPayload 返回
-    （与 backend/conversation/gateways/openai.py::stream_answer 同构）。
-    """
+class ValidatedAnswerOpenAIGateway(FakeOpenAIGateway):
+    """模拟完整结构化校验后由应用层切分正文的网关行为。"""
 
     async def stream_answer(
         self, *, answer_context: dict[str, Any]
     ) -> tuple[list[str], dict[str, Any]]:
         from backend.conversation.contracts.graph import AnswerPayload
-        from backend.memory.graph.openai_client import _parse_lenient
 
         self.records.append({"call": "answer"})
         if not self.answer_payloads:
             raise RuntimeError("Fake answer 队列已空")
         payload = self.answer_payloads.pop(0)
-        raw = __import__("json").dumps(payload, ensure_ascii=False)
-        deltas = list(raw)
-        parsed = _parse_lenient(AnswerPayload, raw)
+        parsed = AnswerPayload.model_validate(payload)
+        deltas = list(parsed.answer)
         return deltas, parsed.model_dump(mode="json")
 
     async def summarize_conversation(

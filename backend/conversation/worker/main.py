@@ -140,11 +140,40 @@ async def _run() -> None:
             )
             graph_worker.install_signal_handlers()
             job_worker.install_signal_handlers()
-            await asyncio.gather(
+            from backend.conversation.worker.knowledge_summary_maintenance import (
+                KnowledgeSummaryMaintenanceWorker,
+            )
+
+            knowledge_summary_maintenance = KnowledgeSummaryMaintenanceWorker(
+                session_factory=db.session_factory,
+                settings=settings,
+            )
+            worker_tasks = [
                 graph_worker.run_forever(),
                 job_worker.run_forever(),
                 graph_worker.run_maintenance_loop(),
-            )
+                knowledge_summary_maintenance.run_forever(),
+            ]
+            # §14.4：仅 generation 开关开启时装配专用 Gateway/Worker；关闭时不发送
+            # 探测请求，也不因知识总结模型配置影响既有 Conversation Worker 启动。
+            if settings.conversation_knowledge_summary_generation_enabled:
+                from backend.conversation.gateways.knowledge_summary_openai import (
+                    KnowledgeSummaryOpenAIGateway,
+                )
+                from backend.conversation.worker.knowledge_summary_worker import (
+                    KnowledgeSummaryWorker,
+                )
+
+                knowledge_summary_worker = KnowledgeSummaryWorker(
+                    session_factory=db.session_factory,
+                    config=settings,
+                    gateway=KnowledgeSummaryOpenAIGateway(settings=settings, logger=logger),
+                    token_counter=token_counter,
+                    worker_id=f"knowledge-summary-worker-{uuid4()}",
+                )
+                knowledge_summary_worker.install_signal_handlers()
+                worker_tasks.append(knowledge_summary_worker.run_forever())
+            await asyncio.gather(*worker_tasks)
     finally:
         await db.close()
 

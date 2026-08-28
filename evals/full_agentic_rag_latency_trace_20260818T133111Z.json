@@ -1,0 +1,160 @@
+{
+  "evaluator": "full_agentic_rag_latency",
+  "run_at": "2026-08-18T13:31:11.275835+00:00",
+  "account": {
+    "account": "2428938672",
+    "user_id": "66213a1c-45dc-4482-942b-fb18029be0ab"
+  },
+  "memory_snapshot_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+  "case_count": 1,
+  "cases": [
+    {
+      "case_id": "ret-001",
+      "trace_id": "437adbe638f941fea48c3db68ce10ace",
+      "user_account": "2428938672",
+      "user_id": "66213a1c-45dc-4482-942b-fb18029be0ab",
+      "status": "failed",
+      "memory_snapshot_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+      "stages": {
+        "memory_read": {
+          "duration_ms": 18.652,
+          "status": "succeeded",
+          "mode": "frozen_snapshot_replay",
+          "query": "数学教材学习者长期记忆固定评测快照",
+          "memory_snapshot_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+          "live_memory_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+          "snapshot_match": true,
+          "learner_present": false,
+          "mastery_count": 0,
+          "graph_state_count": 0,
+          "recommendation_count": 5
+        },
+        "snapshot_context_pack": {
+          "duration_ms": 0.485,
+          "status": "succeeded",
+          "snapshot_hash": "a7a26f5e859f6c49fb1c8505cf6a1777151aa7f9a5aee9ae3132b709cecd1037",
+          "fixed_memory_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+          "context_counts": {
+            "current_message_tokens": 34,
+            "recent_message_tokens": 1,
+            "memory_tokens_estimated": 369
+          },
+          "recent_message_count": 0
+        },
+        "rewrite": {
+          "duration_ms": 10508.56,
+          "status": "succeeded",
+          "model": "deepseek-v4-flash",
+          "plan_revision": 1,
+          "need_retrieval": true,
+          "answer_mode": "rag",
+          "subquery_count": 2,
+          "subqueries_tokens_estimated": 214
+        },
+        "embedding": {
+          "duration_ms": 383.185,
+          "status": "succeeded",
+          "model": "text-embedding-v4",
+          "query_count": 2,
+          "dimensions": 1024
+        },
+        "retrieval": {
+          "duration_ms": 219.047,
+          "status": "succeeded",
+          "method": "hybrid_search",
+          "parallel": true,
+          "subquery_count": 2,
+          "candidate_count": 40,
+          "worker_statuses": [
+            "succeeded",
+            "succeeded"
+          ],
+          "worker_latencies_ms": [
+            217.629,
+            214.388
+          ],
+          "per_subquery": [
+            {
+              "subquery_id": "sq-0-0-ff97d34ef5b8",
+              "status": "succeeded",
+              "candidate_count": 20,
+              "latency_ms": 217.629
+            },
+            {
+              "subquery_id": "sq-0-1-b63973ff19d8",
+              "status": "succeeded",
+              "candidate_count": 20,
+              "latency_ms": 214.388
+            }
+          ]
+        },
+        "fusion": {
+          "duration_ms": 0.19,
+          "status": "succeeded",
+          "deduplicated_candidate_count": 29,
+          "matched_subquery_count": 11
+        },
+        "rerank": {
+          "duration_ms": 20976.704,
+          "status": "succeeded",
+          "model": "qwen3-rerank",
+          "query_strategy": "raw-query/no-rewrite/v3",
+          "document_strategy": "raw-content-text/no-metadata-prefix/v3",
+          "candidate_count": 29,
+          "top_n": 20,
+          "selected_count": 20,
+          "document_tokens_estimated": 11813
+        },
+        "evidence_pack": {
+          "duration_ms": 3.077,
+          "status": "succeeded",
+          "evidence_item_count": 6,
+          "evidence_tokens": 3892,
+          "evidence_text_tokens_estimated": 2860
+        },
+        "evidence_assessment": {
+          "duration_ms": 7601.401,
+          "status": "succeeded",
+          "model": "deepseek-v4-flash",
+          "status_value": "sufficient",
+          "missing_aspect_count": 1,
+          "covered_aspect_count": 5,
+          "reason_codes": [
+            "multiple_textbook_definitions_available",
+            "core_definition_fully_covered",
+            "terminology_covered",
+            "minor_supplement_optional"
+          ]
+        },
+        "context_packing": {
+          "duration_ms": 0.013,
+          "status": "succeeded",
+          "evidence_item_count": 6,
+          "evidence_tokens": 3892,
+          "answer_context_tokens_estimated": 3230,
+          "answer_context_chars": 5567,
+          "snapshot_hash": "a7a26f5e859f6c49fb1c8505cf6a1777151aa7f9a5aee9ae3132b709cecd1037"
+        },
+        "answer": {
+          "duration_ms": 27831.095,
+          "status": "failed",
+          "error_type": "OpenAISchemaInvalidError",
+          "error": "模型输出无法解析为结构化 Schema: 1 validation error for AnswerPayload\n  Invalid JSON: EOF while parsing a value at line 1 column 0 [type=json_invalid, input_value='', input_type=str]\n    For further information visit https://errors.p"
+        }
+      },
+      "total_duration_ms": 390260.554,
+      "retrieval_iteration_count": 0,
+      "final_subquery_count": 2,
+      "final_candidate_count": 20,
+      "final_evidence_count": 6,
+      "context_tokens_estimated": 3230,
+      "degraded_flags": [],
+      "errors": [
+        {
+          "type": "OpenAISchemaInvalidError",
+          "message": "模型输出无法解析为结构化 Schema: 1 validation error for AnswerPayload\n  Invalid JSON: EOF while parsing a value at line 1 column 0 [type=json_invalid, input_value='', input_type=str]\n    For further information visit https://errors.p"
+        }
+      ]
+    }
+  ]
+}

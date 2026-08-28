@@ -39,8 +39,11 @@ from backend.memory.graph.llm_schemas import MutationPlanResult
 from backend.memory.graph.policies import (
     LLMBudgetExceededError,
     LLMCallBudget,
+    candidate_evidence_issues,
     classify_candidate,
     classify_topic_similarity,
+    evidence_gate_disposition,
+    validate_commit_evidence_refs,
 )
 from backend.memory.graph.prompt_loader import BUILD_MUTATION_PLAN_PROMPT_VERSION
 from backend.memory.graph.state import MemoryManagerState, MemoryRuntimeContext
@@ -175,19 +178,29 @@ async def extract_candidates(
 async def apply_scope_and_value_policy(
     state: MemoryManagerState, runtime: Runtime[MemoryRuntimeContext]
 ) -> dict[str, Any]:
-    """确定性长期价值/置信度分类（§9.3），不调用模型。"""
+    """确定性长期价值、置信度和证据门禁分类（§9.3），不调用模型。"""
     ctx = runtime.context
     candidates = _candidates(state)
+    bundle = SourceBundle.model_validate(state["source_bundle"])
+    source_items = [item.model_dump(mode="json") for item in bundle.items]
+    warnings = _warnings(state)
     for entry in candidates:
         disposition = classify_candidate(
             long_term_value=entry["long_term_value"],
             confidence=float(entry["confidence"]),
             settings=ctx.settings,
         )
-        entry["_disposition"] = disposition
+        issues = candidate_evidence_issues(entry, source_items)
+        entry["_disposition"] = evidence_gate_disposition(
+            candidate=entry,
+            source_items=source_items,
+            disposition=disposition,
+        )
+        if issues:
+            entry["_policy_reason_codes"] = issues
+            warnings.append(f"候选证据门禁调整为 {entry['_disposition']}: {','.join(issues)}")
     kept = [c for c in candidates if c["_disposition"] != "discard"]
     discarded = len(candidates) - len(kept)
-    warnings = _warnings(state)
     if discarded:
         warnings.append(f"{discarded} 条候选因低置信/无长期价值被丢弃")
     return {"candidates": kept, "warnings": warnings}
@@ -602,6 +615,9 @@ async def prepare_commit_mutation_plans(
             if not indexes or any(i >= len(candidates) or i < 0 for i in indexes):
                 warnings.append("草稿包含非法 candidate_indexes，已拒绝")
                 continue
+            if len(set(indexes)) != len(indexes):
+                warnings.append("草稿包含重复 candidate_indexes，已拒绝")
+                continue
             primary = resolutions.get(indexes[0])
             if primary is None:
                 warnings.append("草稿引用了不可写入候选，已拒绝")
@@ -610,6 +626,28 @@ async def prepare_commit_mutation_plans(
             target_type = "learner" if memory_id == "learner" else "mastery"
             if draft["target_memory_type"] != target_type:
                 warnings.append("草稿 target_memory_type 与解析目标不一致，已拒绝")
+                continue
+            if any(candidates[index]["memory_type"] != target_type for index in indexes):
+                warnings.append("草稿 candidate 类型与目标记忆类型不一致，已拒绝")
+                continue
+            if any(resolutions.get(index, {}).get("memory_id") != memory_id for index in indexes):
+                warnings.append("草稿跨目标合并 candidate，已拒绝")
+                continue
+            evidence_refs = [e["evidence_ref"] for i in indexes for e in candidates[i]["evidence"]]
+            allowed_refs = {
+                item.source_ref
+                for item in SourceBundle.model_validate(state["source_bundle"]).items
+            }
+            patch_refs = list((draft.get("mastery_patch") or {}).get("evidence_refs_to_add") or [])
+            try:
+                validate_commit_evidence_refs(
+                    evidence_refs=evidence_refs,
+                    allowed_refs=allowed_refs,
+                )
+                if set(patch_refs) - allowed_refs:
+                    raise ValueError("mastery_patch 包含未授权证据引用")
+            except ValueError as exc:
+                warnings.append(f"草稿证据校验失败，已拒绝: {exc}")
                 continue
             expected = await _active_version(session, operation, memory_id)
             if draft["action"] == "create":
@@ -646,9 +684,7 @@ async def prepare_commit_mutation_plans(
             plans.append(
                 {
                     "plan": plan.model_dump(mode="json"),
-                    "evidence_refs": [
-                        e["evidence_ref"] for i in indexes for e in candidates[i]["evidence"]
-                    ],
+                    "evidence_refs": evidence_refs,
                     "graph_nodes": node_entries,
                 }
             )
@@ -712,6 +748,55 @@ async def commit_summary_memories(
         }
     if not entries:
         return {"commit_result": {"mutations": [], "replayed": False}}
+    allowed_refs = {
+        item.source_ref for item in SourceBundle.model_validate(state["source_bundle"]).items
+    }
+    valid_entries: list[dict[str, Any]] = []
+    warnings = _warnings(state)
+    candidates = _candidates(state)
+    resolutions = {r["candidate_index"]: r for r in state.get("existing_memories", [])}
+    for entry in entries:
+        try:
+            plan = CommitMutationPlan.model_validate(entry["plan"])
+            indexes = plan.candidate_indexes
+            if not indexes or len(set(indexes)) != len(indexes):
+                raise ValueError("candidate_indexes 为空或包含重复项")
+            if any(index < 0 or index >= len(candidates) for index in indexes):
+                raise ValueError("candidate_indexes 越界")
+            if any(candidates[index].get("_disposition") != "auto_save" for index in indexes):
+                raise ValueError("candidate_indexes 引用了不可自动写入候选")
+            if any(
+                candidates[index].get("memory_type") != plan.target_memory_type for index in indexes
+            ):
+                raise ValueError("candidate 类型与目标记忆类型不一致")
+            if any(
+                resolutions.get(index, {}).get("memory_id") != plan.memory_id for index in indexes
+            ):
+                raise ValueError("candidate 解析目标与计划 memory_id 不一致")
+            expected_refs = {
+                str(evidence["evidence_ref"])
+                for index in indexes
+                for evidence in candidates[index]["evidence"]
+            }
+            if set(entry.get("evidence_refs") or []) != expected_refs:
+                raise ValueError("计划证据引用与 candidate 不一致")
+            validate_commit_evidence_refs(
+                evidence_refs=list(entry.get("evidence_refs") or []),
+                allowed_refs=allowed_refs,
+            )
+            patch_refs = set(plan.mastery_patch.evidence_refs_to_add if plan.mastery_patch else [])
+            if patch_refs - expected_refs:
+                raise ValueError("mastery_patch 包含 candidate 之外的证据引用")
+        except ValueError as exc:
+            warnings.append(f"提交前证据校验失败，计划已跳过: {exc}")
+            continue
+        valid_entries.append(entry)
+    if not valid_entries:
+        return {
+            "commit_result": {"mutations": [], "replayed": False},
+            "warnings": warnings,
+        }
+    entries = valid_entries
     # 评审二轮 #3：Lease fencing token 传入 commit 入口做 CAS
     fencing = state.get("fencing") or {}
     outcome = await ctx.memory_service.commit_plans(
@@ -738,7 +823,8 @@ async def commit_summary_memories(
             "mutations": [m.model_dump(mode="json") for m in outcome.mutations],
             "warnings": outcome.warnings,
             "replayed": outcome.replayed,
-        }
+        },
+        "warnings": warnings,
     }
 
 

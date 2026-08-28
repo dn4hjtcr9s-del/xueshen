@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 from uuid import UUID, uuid4
 
 import pytest
@@ -286,3 +287,166 @@ async def test_delete_thread_holds_on_dead_letter(
     async with conversation_session_factory() as session:
         row = await threads_repo.get_thread(session, thread_id)
     assert row["status"] == "deleting"
+
+
+async def test_delete_thread_cancels_summary_jobs_and_marks_sources_unavailable(
+    conversation_session_factory: async_sessionmaker,
+) -> None:
+    """§18.3：删除会话不删总结正文，但必须取消待处理 Job 并重算可用来源计数。"""
+    thread_id, user_id, generation = await _seed_deleting_thread(conversation_session_factory)
+    summary_id = uuid4()
+    knowledge_job_id = uuid4()
+    source_id = uuid4()
+    async with conversation_session_factory() as session:
+        async with session.begin():
+            turn = await turns_repo.get_active_turn(session, thread_id, for_update=True)
+            assert turn is not None
+            assert await turns_repo.cancel_accepted_turn(session, turn["turn_id"]) is True
+            message_id = (
+                await session.execute(
+                    text(
+                        "SELECT message_id FROM conversation.conversation_messages "
+                        "WHERE thread_id = :thread_id"
+                    ),
+                    {"thread_id": thread_id},
+                )
+            ).scalar_one()
+            content = {
+                "schema_version": 1,
+                "overview": {
+                    "item_id": str(uuid4()),
+                    "text": "会话删除不应删除该总结内容。",
+                    "origin": "user",
+                    "source_ids": [],
+                },
+                "definitions": [],
+                "theorems": [],
+                "formulas": [],
+                "properties": [],
+                "methods": [],
+                "pitfalls": [],
+            }
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO conversation.knowledge_summaries (
+                        summary_id, user_id, topic_group_title, topic_title,
+                        normalized_topic_group, normalized_topic_title, status, review_state,
+                        content_schema_version, content, search_text, protected_sections, version,
+                        source_count, available_source_count, source_message_count,
+                        content_hash, state_hash, created_at, updated_at
+                    ) VALUES (
+                        :summary_id, :user_id, '测试主题', '会话删除来源',
+                        '测试主题', '会话删除来源', 'active', 'clean',
+                        1, CAST(:content AS jsonb), '测试主题\n会话删除来源', '{}', 1,
+                        1, 1, 1, :hash, :hash, now(), now()
+                    )
+                    """
+                ),
+                {
+                    "summary_id": summary_id,
+                    "user_id": user_id,
+                    "content": json.dumps(content, ensure_ascii=False),
+                    "hash": "0" * 64,
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO conversation.knowledge_summary_sources (
+                        source_id, summary_id, user_id, thread_id, turn_id, message_id,
+                        message_role, source_checkpoint_id, first_generation_id, first_trigger,
+                        status, message_occurred_at, message_sequence, created_at
+                    ) VALUES (
+                        :source_id, :summary_id, :user_id, :thread_id, :turn_id, :message_id,
+                        'user', 'checkpoint', NULL, 'manual',
+                        'available', now(), 1, now()
+                    )
+                    """
+                ),
+                {
+                    "source_id": source_id,
+                    "summary_id": summary_id,
+                    "user_id": user_id,
+                    "thread_id": thread_id,
+                    "turn_id": turn["turn_id"],
+                    "message_id": message_id,
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO conversation.knowledge_summary_generation_jobs (
+                        generation_id, idempotency_key, user_id, thread_id, turn_id,
+                        source_checkpoint_id, trigger, status, primary_turn_occurred_at,
+                        created_at, updated_at
+                    ) VALUES (
+                        :generation_id, :idempotency_key, :user_id, :thread_id, :turn_id,
+                        'checkpoint', 'auto', 'pending', now(), now(), now()
+                    )
+                    """
+                ),
+                {
+                    "generation_id": knowledge_job_id,
+                    "idempotency_key": f"knowledge-delete:{knowledge_job_id}",
+                    "user_id": user_id,
+                    "thread_id": thread_id,
+                    "turn_id": turn["turn_id"],
+                },
+            )
+
+    job_id, worker_id = await _claim_delete_job(conversation_session_factory, thread_id)
+    async with conversation_session_factory() as session:
+        async with session.begin():
+            result = await execute_delete_thread(
+                session,
+                job_id=job_id,
+                thread_id=thread_id,
+                deletion_generation=generation,
+                worker_id=worker_id,
+            )
+    assert result == "done"
+
+    async with conversation_session_factory() as session:
+        summary = (
+            (
+                await session.execute(
+                    text(
+                        """
+                    SELECT status, source_count, available_source_count, source_message_count
+                    FROM conversation.knowledge_summaries
+                    WHERE summary_id = :summary_id
+                    """
+                    ),
+                    {"summary_id": summary_id},
+                )
+            )
+            .mappings()
+            .one()
+        )
+        source_status = (
+            await session.execute(
+                text(
+                    "SELECT status FROM conversation.knowledge_summary_sources "
+                    "WHERE source_id = :source_id"
+                ),
+                {"source_id": source_id},
+            )
+        ).scalar_one()
+        generation_status = (
+            await session.execute(
+                text(
+                    "SELECT status FROM conversation.knowledge_summary_generation_jobs "
+                    "WHERE generation_id = :generation_id"
+                ),
+                {"generation_id": knowledge_job_id},
+            )
+        ).scalar_one()
+    assert dict(summary) == {
+        "status": "active",
+        "source_count": 1,
+        "available_source_count": 0,
+        "source_message_count": 1,
+    }
+    assert source_status == "unavailable"
+    assert generation_status == "cancelled"

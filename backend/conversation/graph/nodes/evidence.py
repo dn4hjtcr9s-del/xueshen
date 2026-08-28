@@ -16,6 +16,7 @@ from typing import Any
 from uuid import uuid4
 
 from backend.conversation.contracts.api import Citation
+from backend.conversation.contracts.errors import ModelUnavailableError
 from backend.conversation.contracts.graph import EvidenceAssessment
 from backend.conversation.contracts.retrieval import (
     EvidenceSet,
@@ -269,11 +270,28 @@ async def evaluate_evidence(
     evidence_set = state.get("evidence_set") or {}
     items = evidence_set.get("items") or []
     summary = "\n".join(_evidence_line(item) for item in items)
-    assessment_raw = await runtime.openai_gateway.assess_evidence(
-        question=str(state.get("rewrite_plan", {}).get("standalone_question") or ""),
-        evidence_summary=summary[:8000] or "（无证据）",
-        budget_remaining=str(evidence_set.get("total_tokens") or 0),
-    )
+    try:
+        assessment_raw = await runtime.openai_gateway.assess_evidence(
+            question=str(state.get("rewrite_plan", {}).get("standalone_question") or ""),
+            evidence_summary=summary[:8000] or "（无证据）",
+            budget_remaining=str(evidence_set.get("total_tokens") or 0),
+        )
+    except ModelUnavailableError as exc:
+        runtime.logger.warning(
+            "Evidence Structured Output 使用确定性降级 reason=%s attempts=%s has_evidence=%s",
+            getattr(exc, "reason", "model_unavailable"),
+            getattr(exc, "attempts", None),
+            bool(items),
+        )
+        assessment = EvidenceAssessment(
+            status="sufficient" if items else "insufficient",
+            unsupported_claim_risk="medium" if items else "high",
+            reason_codes=["evidence_structured_fallback"],
+        )
+        return {
+            "evidence_assessment": assessment.model_dump(mode="json"),
+            "degraded_flags": ["evidence_structured_fallback"],
+        }
     assessment = EvidenceAssessment.model_validate(assessment_raw)
     # retrieval_iteration 的递增由 rewrite 节点在补检索轮处理（builder._node_rewrite），
     # evaluate 只产出评估结果（第三轮必改 3）。

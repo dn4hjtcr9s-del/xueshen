@@ -191,6 +191,47 @@
         "title": "ActivityEvidence",
         "type": "object"
       },
+      "AffectedKnowledgeSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "summary_id": {
+            "format": "uuid",
+            "title": "Summary Id",
+            "type": "string"
+          },
+          "topic_group_title": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Topic Group Title",
+            "type": "string"
+          },
+          "topic_title": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Topic Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary_id",
+          "topic_group_title",
+          "topic_title"
+        ],
+        "title": "AffectedKnowledgeSummary",
+        "type": "object"
+      },
+      "AllKnowledgeSection": {
+        "enum": [
+          "overview",
+          "definitions",
+          "theorems",
+          "formulas",
+          "properties",
+          "methods",
+          "pitfalls"
+        ],
+        "type": "string"
+      },
       "CalendarDayOut": {
         "properties": {
           "available_minutes": {
@@ -669,6 +710,29 @@
         "title": "CreateConversationResponse",
         "type": "object"
       },
+      "CreateKnowledgeSummaryGenerationRequest": {
+        "additionalProperties": false,
+        "description": "手动生成、重试与重新整理的 API 请求。",
+        "properties": {
+          "client_request_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]{1,200}$",
+            "title": "Client Request Id",
+            "type": "string"
+          },
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "client_request_id"
+        ],
+        "title": "CreateKnowledgeSummaryGenerationRequest",
+        "type": "object"
+      },
       "CreateTurnRequest": {
         "additionalProperties": false,
         "properties": {
@@ -746,6 +810,23 @@
           "event_stream_path"
         ],
         "title": "CreateTurnResponse",
+        "type": "object"
+      },
+      "CurrentTurnKnowledgeSummaryGenerationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/KnowledgeSummaryGenerationStatusResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "CurrentTurnKnowledgeSummaryGenerationResponse",
         "type": "object"
       },
       "CursorPage_DeletedMemoryItem_": {
@@ -934,6 +1015,22 @@
           "restore_until"
         ],
         "title": "DeletedMemoryItem",
+        "type": "object"
+      },
+      "DismissReviewRequest": {
+        "additionalProperties": false,
+        "description": "忽略待确认建议请求。",
+        "properties": {
+          "review_id": {
+            "format": "uuid",
+            "title": "Review Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id"
+        ],
+        "title": "DismissReviewRequest",
         "type": "object"
       },
       "EnsureTodayOut": {
@@ -1826,6 +1923,824 @@
           "synced_at"
         ],
         "title": "KnowledgeGraphSnapshot",
+        "type": "object"
+      },
+      "KnowledgeItemOrigin": {
+        "enum": [
+          "ai",
+          "user"
+        ],
+        "type": "string"
+      },
+      "KnowledgeSection": {
+        "enum": [
+          "definitions",
+          "theorems",
+          "formulas",
+          "properties",
+          "methods",
+          "pitfalls"
+        ],
+        "type": "string"
+      },
+      "KnowledgeSummaryContent": {
+        "additionalProperties": false,
+        "description": "`knowledge_summaries.content` 的 schema v1。",
+        "properties": {
+          "definitions": {
+            "items": {
+              "$ref": "#/components/schemas/KnowledgeSummaryItem"
+            },
+            "maxItems": 12,
+            "title": "Definitions",
+            "type": "array"
+          },
+          "formulas": {
+            "items": {
+              "$ref": "#/components/schemas/KnowledgeSummaryItem"
+            },
+            "maxItems": 12,
+            "title": "Formulas",
+            "type": "array"
+          },
+          "methods": {
+            "items": {
+              "$ref": "#/components/schemas/KnowledgeSummaryItem"
+            },
+            "maxItems": 12,
+            "title": "Methods",
+            "type": "array"
+          },
+          "overview": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/KnowledgeSummaryItem"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pitfalls": {
+            "items": {
+              "$ref": "#/components/schemas/KnowledgeSummaryItem"
+            },
+            "maxItems": 12,
+            "title": "Pitfalls",
+            "type": "array"
+          },
+          "properties": {
+            "items": {
+              "$ref": "#/components/schemas/KnowledgeSummaryItem"
+            },
+            "maxItems": 12,
+            "title": "Properties",
+            "type": "array"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "theorems": {
+            "items": {
+              "$ref": "#/components/schemas/KnowledgeSummaryItem"
+            },
+            "maxItems": 12,
+            "title": "Theorems",
+            "type": "array"
+          }
+        },
+        "title": "KnowledgeSummaryContent",
+        "type": "object"
+      },
+      "KnowledgeSummaryDetailResponse": {
+        "additionalProperties": false,
+        "description": "知识总结详情、结构化评审和可能重复建议。",
+        "properties": {
+          "available_source_count": {
+            "minimum": 0.0,
+            "title": "Available Source Count",
+            "type": "integer"
+          },
+          "content": {
+            "$ref": "#/components/schemas/KnowledgeSummaryContent"
+          },
+          "content_schema_version": {
+            "const": 1,
+            "title": "Content Schema Version",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "last_generated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Generated At"
+          },
+          "pending_review_count": {
+            "minimum": 0.0,
+            "title": "Pending Review Count",
+            "type": "integer"
+          },
+          "pending_reviews": {
+            "items": {
+              "$ref": "#/components/schemas/PendingReviewView"
+            },
+            "maxItems": 10,
+            "title": "Pending Reviews",
+            "type": "array"
+          },
+          "possible_duplicates": {
+            "items": {
+              "$ref": "#/components/schemas/PossibleDuplicateView"
+            },
+            "maxItems": 5,
+            "title": "Possible Duplicates",
+            "type": "array"
+          },
+          "protected_sections": {
+            "items": {
+              "$ref": "#/components/schemas/AllKnowledgeSection"
+            },
+            "title": "Protected Sections",
+            "type": "array"
+          },
+          "review_state": {
+            "$ref": "#/components/schemas/KnowledgeSummaryReviewState"
+          },
+          "source_count": {
+            "minimum": 0.0,
+            "title": "Source Count",
+            "type": "integer"
+          },
+          "source_message_count": {
+            "minimum": 0.0,
+            "title": "Source Message Count",
+            "type": "integer"
+          },
+          "status": {
+            "const": "active",
+            "title": "Status",
+            "type": "string"
+          },
+          "summary_id": {
+            "format": "uuid",
+            "title": "Summary Id",
+            "type": "string"
+          },
+          "topic_group_title": {
+            "title": "Topic Group Title",
+            "type": "string"
+          },
+          "topic_title": {
+            "title": "Topic Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "summary_id",
+          "topic_group_title",
+          "topic_title",
+          "status",
+          "review_state",
+          "version",
+          "content_schema_version",
+          "content",
+          "protected_sections",
+          "source_count",
+          "available_source_count",
+          "source_message_count",
+          "created_at",
+          "updated_at",
+          "pending_review_count",
+          "pending_reviews",
+          "possible_duplicates"
+        ],
+        "title": "KnowledgeSummaryDetailResponse",
+        "type": "object"
+      },
+      "KnowledgeSummaryGenerationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "generation_id": {
+            "format": "uuid",
+            "title": "Generation Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/KnowledgeSummaryGenerationStatus"
+          },
+          "status_path": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Status Path",
+            "type": "string"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/KnowledgeSummaryGenerationTrigger"
+          }
+        },
+        "required": [
+          "generation_id",
+          "trigger",
+          "status",
+          "status_path"
+        ],
+        "title": "KnowledgeSummaryGenerationResponse",
+        "type": "object"
+      },
+      "KnowledgeSummaryGenerationStatus": {
+        "enum": [
+          "pending",
+          "processing",
+          "retry_wait",
+          "succeeded",
+          "no_change",
+          "needs_review",
+          "dead_letter",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "KnowledgeSummaryGenerationStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "affected_summaries": {
+            "items": {
+              "$ref": "#/components/schemas/AffectedKnowledgeSummary"
+            },
+            "title": "Affected Summaries",
+            "type": "array"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "generation_id": {
+            "format": "uuid",
+            "title": "Generation Id",
+            "type": "string"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "review_reason_codes": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewReasonCode"
+            },
+            "title": "Review Reason Codes",
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/KnowledgeSummaryGenerationStatus"
+          },
+          "thread_id": {
+            "format": "uuid",
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/KnowledgeSummaryGenerationTrigger"
+          },
+          "turn_id": {
+            "format": "uuid",
+            "title": "Turn Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "warning_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warning Codes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "generation_id",
+          "thread_id",
+          "turn_id",
+          "trigger",
+          "status",
+          "retryable",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "KnowledgeSummaryGenerationStatusResponse",
+        "type": "object"
+      },
+      "KnowledgeSummaryGenerationTrigger": {
+        "enum": [
+          "auto",
+          "manual",
+          "manual_refresh",
+          "manual_retry",
+          "ops_retry"
+        ],
+        "type": "string"
+      },
+      "KnowledgeSummaryItem": {
+        "additionalProperties": false,
+        "description": "当前总结 content 中的可编辑条目。",
+        "properties": {
+          "item_id": {
+            "format": "uuid",
+            "title": "Item Id",
+            "type": "string"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/KnowledgeItemOrigin"
+          },
+          "source_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Source Ids",
+            "type": "array"
+          },
+          "text": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "item_id",
+          "text",
+          "origin"
+        ],
+        "title": "KnowledgeSummaryItem",
+        "type": "object"
+      },
+      "KnowledgeSummaryItemEditInput": {
+        "additionalProperties": false,
+        "description": "用户编辑数组章节时提交的条目；空 ID 表示服务端新建。",
+        "properties": {
+          "item_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Id"
+          },
+          "text": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "KnowledgeSummaryItemEditInput",
+        "type": "object"
+      },
+      "KnowledgeSummaryListItem": {
+        "additionalProperties": false,
+        "properties": {
+          "available_source_count": {
+            "minimum": 0.0,
+            "title": "Available Source Count",
+            "type": "integer"
+          },
+          "overview_excerpt": {
+            "anyOf": [
+              {
+                "maxLength": 280,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overview Excerpt"
+          },
+          "review_state": {
+            "$ref": "#/components/schemas/KnowledgeSummaryReviewState"
+          },
+          "section_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/AllKnowledgeSection"
+            },
+            "title": "Section Counts",
+            "type": "object"
+          },
+          "source_count": {
+            "minimum": 0.0,
+            "title": "Source Count",
+            "type": "integer"
+          },
+          "source_message_count": {
+            "minimum": 0.0,
+            "title": "Source Message Count",
+            "type": "integer"
+          },
+          "summary_id": {
+            "format": "uuid",
+            "title": "Summary Id",
+            "type": "string"
+          },
+          "topic_group_title": {
+            "title": "Topic Group Title",
+            "type": "string"
+          },
+          "topic_title": {
+            "title": "Topic Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "summary_id",
+          "topic_group_title",
+          "topic_title",
+          "section_counts",
+          "source_count",
+          "available_source_count",
+          "source_message_count",
+          "review_state",
+          "version",
+          "updated_at"
+        ],
+        "title": "KnowledgeSummaryListItem",
+        "type": "object"
+      },
+      "KnowledgeSummaryListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/KnowledgeSummaryListItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "has_more"
+        ],
+        "title": "KnowledgeSummaryListResponse",
+        "type": "object"
+      },
+      "KnowledgeSummaryPatchRequest": {
+        "additionalProperties": false,
+        "description": "PATCH 总结请求；字段缺失由 API 层通过 model_fields_set 区分。",
+        "properties": {
+          "expected_version": {
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "overview": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OverviewEditInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sections": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/components/schemas/KnowledgeSummaryItemEditInput"
+              },
+              "type": "array"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/KnowledgeSection"
+            },
+            "title": "Sections",
+            "type": "object"
+          },
+          "topic_group_title": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic Group Title"
+          },
+          "topic_title": {
+            "anyOf": [
+              {
+                "maxLength": 240,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic Title"
+          },
+          "unlock_sections": {
+            "items": {
+              "$ref": "#/components/schemas/AllKnowledgeSection"
+            },
+            "maxItems": 7,
+            "title": "Unlock Sections",
+            "type": "array"
+          }
+        },
+        "required": [
+          "expected_version"
+        ],
+        "title": "KnowledgeSummaryPatchRequest",
+        "type": "object"
+      },
+      "KnowledgeSummaryReviewState": {
+        "enum": [
+          "clean",
+          "possible_duplicate",
+          "conflict"
+        ],
+        "type": "string"
+      },
+      "KnowledgeSummarySourcePage": {
+        "additionalProperties": false,
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/KnowledgeSummarySourceView"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "has_more"
+        ],
+        "title": "KnowledgeSummarySourcePage",
+        "type": "object"
+      },
+      "KnowledgeSummarySourceView": {
+        "additionalProperties": false,
+        "description": "按 Turn 聚合的来源卡；不暴露内部消息级 source_id。",
+        "properties": {
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "question_excerpt": {
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question Excerpt"
+          },
+          "source_turn_id": {
+            "format": "uuid",
+            "title": "Source Turn Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "support_message_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Support Message Ids",
+            "type": "array"
+          },
+          "support_roles": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRole"
+            },
+            "title": "Support Roles",
+            "type": "array"
+          },
+          "thread_id": {
+            "format": "uuid",
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "turn_id": {
+            "format": "uuid",
+            "title": "Turn Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_turn_id",
+          "thread_id",
+          "turn_id",
+          "status",
+          "occurred_at"
+        ],
+        "title": "KnowledgeSummarySourceView",
+        "type": "object"
+      },
+      "KnowledgeSummaryStatsResponse": {
+        "additionalProperties": false,
+        "description": "首页和个人中心使用的知识总结统计。",
+        "properties": {
+          "active_count": {
+            "minimum": 0.0,
+            "title": "Active Count",
+            "type": "integer"
+          },
+          "available_source_count": {
+            "minimum": 0.0,
+            "title": "Available Source Count",
+            "type": "integer"
+          },
+          "pending_review_count": {
+            "minimum": 0.0,
+            "title": "Pending Review Count",
+            "type": "integer"
+          },
+          "updated_last_7_days": {
+            "minimum": 0.0,
+            "title": "Updated Last 7 Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "active_count",
+          "updated_last_7_days",
+          "pending_review_count",
+          "available_source_count"
+        ],
+        "title": "KnowledgeSummaryStatsResponse",
+        "type": "object"
+      },
+      "KnowledgeSummaryTopicGroup": {
+        "additionalProperties": false,
+        "description": "当前用户可筛选的大主题聚合项。",
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "summary_count": {
+            "minimum": 0.0,
+            "title": "Summary Count",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "title",
+          "summary_count",
+          "updated_at"
+        ],
+        "title": "KnowledgeSummaryTopicGroup",
+        "type": "object"
+      },
+      "KnowledgeSummaryTopicGroupResponse": {
+        "additionalProperties": false,
+        "description": "大主题分页响应。",
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/KnowledgeSummaryTopicGroup"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "has_more"
+        ],
+        "title": "KnowledgeSummaryTopicGroupResponse",
         "type": "object"
       },
       "LaunchOut": {
@@ -3222,6 +4137,92 @@
         "title": "OverrideLearnerProfileCommand",
         "type": "object"
       },
+      "OverviewEditInput": {
+        "additionalProperties": false,
+        "description": "用户编辑 overview 的结构化输入。",
+        "properties": {
+          "item_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Id"
+          },
+          "text": {
+            "maxLength": 800,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "OverviewEditInput",
+        "type": "object"
+      },
+      "PendingReviewView": {
+        "additionalProperties": false,
+        "description": "详情页可展示的结构化待确认建议。",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "generation_id": {
+            "format": "uuid",
+            "title": "Generation Id",
+            "type": "string"
+          },
+          "proposed_sections": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/KnowledgeSection"
+            },
+            "title": "Proposed Sections",
+            "type": "object"
+          },
+          "proposed_topic_title": {
+            "title": "Proposed Topic Title",
+            "type": "string"
+          },
+          "reason_code": {
+            "$ref": "#/components/schemas/ReviewReasonCode"
+          },
+          "review_id": {
+            "format": "uuid",
+            "title": "Review Id",
+            "type": "string"
+          },
+          "source_turn_id": {
+            "format": "uuid",
+            "title": "Source Turn Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "generation_id",
+          "reason_code",
+          "proposed_topic_title",
+          "proposed_sections",
+          "source_turn_id",
+          "created_at"
+        ],
+        "title": "PendingReviewView",
+        "type": "object"
+      },
       "PlanActivateRequest": {
         "additionalProperties": false,
         "description": "激活计划请求（§12.2：事务内 CAS + active 唯一约束复查）。",
@@ -3476,6 +4477,68 @@
           "updated_at"
         ],
         "title": "PlanOut",
+        "type": "object"
+      },
+      "PossibleDuplicateView": {
+        "additionalProperties": false,
+        "description": "详情页可展示的可能重复关系，标题表示当前卡的对端。",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "duplicate_id": {
+            "format": "uuid",
+            "title": "Duplicate Id",
+            "type": "string"
+          },
+          "match_score": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Match Score",
+            "type": "number"
+          },
+          "possible_target_summary_id": {
+            "format": "uuid",
+            "title": "Possible Target Summary Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "dismissed",
+              "merged",
+              "resolved"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "summary_id": {
+            "format": "uuid",
+            "title": "Summary Id",
+            "type": "string"
+          },
+          "topic_group_title": {
+            "title": "Topic Group Title",
+            "type": "string"
+          },
+          "topic_title": {
+            "title": "Topic Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "duplicate_id",
+          "summary_id",
+          "possible_target_summary_id",
+          "topic_group_title",
+          "topic_title",
+          "match_score",
+          "status",
+          "created_at"
+        ],
+        "title": "PossibleDuplicateView",
         "type": "object"
       },
       "PublicError": {
@@ -3828,6 +4891,16 @@
         ],
         "title": "ReviewDecisionRequest",
         "type": "object"
+      },
+      "ReviewReasonCode": {
+        "enum": [
+          "PROTECTED_SECTION_CONFLICT",
+          "CONTRADICTORY_CONTENT",
+          "AMBIGUOUS_EXACT_ALIAS",
+          "UNSAFE_REPLACE",
+          "STALE_TARGET"
+        ],
+        "type": "string"
       },
       "RevisionDecisionRequest": {
         "additionalProperties": false,
@@ -4252,6 +5325,13 @@
         ],
         "title": "SourceReadRequest",
         "type": "object"
+      },
+      "SourceRole": {
+        "enum": [
+          "user",
+          "assistant"
+        ],
+        "type": "string"
       },
       "TaskActionRequest": {
         "additionalProperties": false,
@@ -5297,6 +6377,124 @@
         ]
       }
     },
+    "/api/v1/conversations/{thread_id}/turns/{turn_id}/knowledge-summary-generation": {
+      "get": {
+        "description": "查询当前 Turn 应展示的最新非 cancelled Generation（§15.9）。",
+        "operationId": "get_current_turn_knowledge_summary_generation_api_v1_conversations__thread_id__turns__turn_id__knowledge_summary_generation_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "turn_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Turn Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CurrentTurnKnowledgeSummaryGenerationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Current Turn Knowledge Summary Generation",
+        "tags": [
+          "knowledge-summary-generations"
+        ]
+      }
+    },
+    "/api/v1/conversations/{thread_id}/turns/{turn_id}/knowledge-summary-generations": {
+      "post": {
+        "description": "手动触发/重试/刷新知识总结生成（§15.8）。",
+        "operationId": "create_knowledge_summary_generation_api_v1_conversations__thread_id__turns__turn_id__knowledge_summary_generations_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "turn_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Turn Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateKnowledgeSummaryGenerationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeSummaryGenerationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Knowledge Summary Generation",
+        "tags": [
+          "knowledge-summary-generations"
+        ]
+      }
+    },
     "/api/v1/internal/account-memory/purge": {
       "post": {
         "description": "创建 purge_account_memory operation + manifest + Outbox（同一事务）。",
@@ -5728,6 +6926,571 @@
         "summary": "Get Graph Recommendations",
         "tags": [
           "knowledge-graph"
+        ]
+      }
+    },
+    "/api/v1/knowledge-summaries": {
+      "get": {
+        "description": "列出当前用户知识总结，支持冻结的搜索、筛选和 keyset 分页。",
+        "operationId": "list_knowledge_summaries_api_v1_knowledge_summaries_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Query"
+            }
+          },
+          {
+            "in": "query",
+            "name": "topic_group",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 160,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Topic Group"
+            }
+          },
+          {
+            "in": "query",
+            "name": "section_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/components/schemas/AllKnowledgeSection"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Section Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "review_state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "clean",
+                    "possible_duplicate",
+                    "conflict"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Review State"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "relevance_desc",
+                    "updated_desc",
+                    "title_asc"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sort"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeSummaryListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Knowledge Summaries",
+        "tags": [
+          "knowledge-summaries"
+        ]
+      }
+    },
+    "/api/v1/knowledge-summaries/stats": {
+      "get": {
+        "description": "返回首页和个人中心使用的知识总结统计。",
+        "operationId": "get_knowledge_summary_stats_api_v1_knowledge_summaries_stats_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeSummaryStatsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Knowledge Summary Stats",
+        "tags": [
+          "knowledge-summaries"
+        ]
+      }
+    },
+    "/api/v1/knowledge-summaries/topic-groups": {
+      "get": {
+        "description": "列出当前用户可用于筛选的非空大主题。",
+        "operationId": "list_knowledge_summary_topic_groups_api_v1_knowledge_summaries_topic_groups_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Query"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeSummaryTopicGroupResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Knowledge Summary Topic Groups",
+        "tags": [
+          "knowledge-summaries"
+        ]
+      }
+    },
+    "/api/v1/knowledge-summaries/{summary_id}": {
+      "delete": {
+        "description": "按 §15.7 执行带 tombstone 的幂等软删除。",
+        "operationId": "delete_knowledge_summary_api_v1_knowledge_summaries__summary_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "summary_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Summary Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expected_version",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Expected Version",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Knowledge Summary",
+        "tags": [
+          "knowledge-summaries"
+        ]
+      },
+      "get": {
+        "description": "读取一张 active 总结及其结构化评审状态。",
+        "operationId": "get_knowledge_summary_api_v1_knowledge_summaries__summary_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "summary_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Summary Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeSummaryDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Knowledge Summary",
+        "tags": [
+          "knowledge-summaries"
+        ]
+      },
+      "patch": {
+        "description": "按 expected_version 原子提交用户编辑和章节保护状态。",
+        "operationId": "patch_knowledge_summary_api_v1_knowledge_summaries__summary_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "summary_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Summary Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KnowledgeSummaryPatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeSummaryDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Knowledge Summary",
+        "tags": [
+          "knowledge-summaries"
+        ]
+      }
+    },
+    "/api/v1/knowledge-summaries/{summary_id}/sources": {
+      "get": {
+        "description": "按 Turn 聚合来源卡，返回同序支撑消息而不公开内部 source_id。",
+        "operationId": "list_knowledge_summary_sources_api_v1_knowledge_summaries__summary_id__sources_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "summary_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Summary Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeSummarySourcePage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Knowledge Summary Sources",
+        "tags": [
+          "knowledge-summaries"
+        ]
+      }
+    },
+    "/api/v1/knowledge-summary-generations/{generation_id}": {
+      "get": {
+        "description": "读取单个 Generation Job 状态（§15.10）。",
+        "operationId": "get_knowledge_summary_generation_status_api_v1_knowledge_summary_generations__generation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "generation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Generation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeSummaryGenerationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Knowledge Summary Generation Status",
+        "tags": [
+          "knowledge-summary-generations"
+        ]
+      }
+    },
+    "/api/v1/knowledge-summary-generations/{generation_id}/dismiss-review": {
+      "post": {
+        "description": "忽略一条待确认建议并重新计算 summary review_state（§15.11）。",
+        "operationId": "dismiss_knowledge_summary_review_api_v1_knowledge_summary_generations__generation_id__dismiss_review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "generation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Generation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DismissReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dismiss Knowledge Summary Review",
+        "tags": [
+          "knowledge-summary-generations"
         ]
       }
     },

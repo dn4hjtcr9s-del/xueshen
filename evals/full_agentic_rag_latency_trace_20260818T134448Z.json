@@ -1,0 +1,172 @@
+{
+  "evaluator": "full_agentic_rag_latency",
+  "run_at": "2026-08-18T13:44:48.808160+00:00",
+  "account": {
+    "account": "2428938672",
+    "user_id": "66213a1c-45dc-4482-942b-fb18029be0ab"
+  },
+  "memory_snapshot_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+  "case_count": 1,
+  "cases": [
+    {
+      "case_id": "ret-001",
+      "trace_id": "97ca964fed0b4277a7cb7e8abdf65996",
+      "user_account": "2428938672",
+      "user_id": "66213a1c-45dc-4482-942b-fb18029be0ab",
+      "status": "succeeded",
+      "memory_snapshot_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+      "stages": {
+        "memory_read": {
+          "duration_ms": 25.072,
+          "status": "succeeded",
+          "mode": "frozen_snapshot_replay",
+          "query": "数学教材学习者长期记忆固定评测快照",
+          "memory_snapshot_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+          "live_memory_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+          "snapshot_match": true,
+          "learner_present": false,
+          "mastery_count": 0,
+          "graph_state_count": 0,
+          "recommendation_count": 5
+        },
+        "snapshot_context_pack": {
+          "duration_ms": 0.341,
+          "status": "succeeded",
+          "snapshot_hash": "a7a26f5e859f6c49fb1c8505cf6a1777151aa7f9a5aee9ae3132b709cecd1037",
+          "fixed_memory_hash": "fc8564267191e9e264b4b70d9d57a4f2244a34ce76ef41cd99bbc6eb3c3aecf4",
+          "context_counts": {
+            "current_message_tokens": 34,
+            "recent_message_tokens": 1,
+            "memory_tokens_estimated": 369
+          },
+          "recent_message_count": 0
+        },
+        "rewrite": {
+          "duration_ms": 2973.775,
+          "status": "succeeded",
+          "model": "deepseek-v4-flash",
+          "model_attempt_count": 1,
+          "model_retry_count": 0,
+          "model_failure_types": [],
+          "model_fallback": null,
+          "plan_revision": 1,
+          "need_retrieval": true,
+          "answer_mode": "rag",
+          "subquery_count": 1,
+          "subqueries_tokens_estimated": 248
+        },
+        "embedding": {
+          "duration_ms": 277.828,
+          "status": "succeeded",
+          "model": "text-embedding-v4",
+          "query_count": 1,
+          "dimensions": 1024
+        },
+        "retrieval": {
+          "duration_ms": 88.902,
+          "status": "succeeded",
+          "method": "hybrid_search",
+          "parallel": true,
+          "subquery_count": 1,
+          "candidate_count": 20,
+          "worker_statuses": [
+            "succeeded"
+          ],
+          "worker_latencies_ms": [
+            87.629
+          ],
+          "per_subquery": [
+            {
+              "subquery_id": "sq-0-0-064981487626",
+              "status": "succeeded",
+              "candidate_count": 20,
+              "latency_ms": 87.629
+            }
+          ]
+        },
+        "fusion": {
+          "duration_ms": 0.102,
+          "status": "succeeded",
+          "deduplicated_candidate_count": 20,
+          "matched_subquery_count": 0
+        },
+        "rerank": {
+          "duration_ms": 727.563,
+          "status": "succeeded",
+          "model": "qwen3-rerank",
+          "query_strategy": "raw-query/no-rewrite/v3",
+          "document_strategy": "raw-content-text/no-metadata-prefix/v3",
+          "candidate_count": 20,
+          "top_n": 20,
+          "selected_count": 20,
+          "document_tokens_estimated": 8337
+        },
+        "evidence_pack": {
+          "duration_ms": 3.692,
+          "status": "succeeded",
+          "evidence_item_count": 5,
+          "evidence_tokens": 3998,
+          "evidence_text_tokens_estimated": 3073
+        },
+        "evidence_assessment": {
+          "duration_ms": 1674.43,
+          "status": "succeeded",
+          "model": "deepseek-v4-flash",
+          "model_attempt_count": 1,
+          "model_retry_count": 0,
+          "model_failure_types": [],
+          "model_fallback": null,
+          "status_value": "sufficient",
+          "missing_aspect_count": 1,
+          "covered_aspect_count": 4,
+          "reason_codes": [
+            "evidence_directly_addresses_definition",
+            "multiple_sources_provide_equivalent_definition",
+            "budget_sufficient"
+          ]
+        },
+        "context_packing": {
+          "duration_ms": 0.01,
+          "status": "succeeded",
+          "evidence_item_count": 5,
+          "evidence_tokens": 3998,
+          "answer_context_tokens_estimated": 3424,
+          "answer_context_chars": 6099,
+          "snapshot_hash": "a7a26f5e859f6c49fb1c8505cf6a1777151aa7f9a5aee9ae3132b709cecd1037"
+        },
+        "answer": {
+          "duration_ms": 24383.128,
+          "status": "succeeded",
+          "model": "deepseek-v4-flash",
+          "model_attempt_count": 3,
+          "model_retry_count": 2,
+          "model_failure_types": [
+            "OpenAISchemaInvalidError",
+            "OpenAISchemaInvalidError",
+            "OpenAISchemaInvalidError"
+          ],
+          "model_fallback": "plain_text_answer",
+          "output_chars": 464,
+          "output_tokens_estimated": 266,
+          "citation_count": 5
+        },
+        "citation_validation": {
+          "duration_ms": 0.056,
+          "status": "succeeded",
+          "degraded_flags": [],
+          "valid_citation_count": 5
+        }
+      },
+      "total_duration_ms": 30166.094,
+      "accounted_stage_duration_ms": 30154.899,
+      "unattributed_duration_ms": 11.195,
+      "retrieval_iteration_count": 0,
+      "final_subquery_count": 1,
+      "final_candidate_count": 20,
+      "final_evidence_count": 5,
+      "context_tokens_estimated": 3424,
+      "degraded_flags": [],
+      "errors": []
+    }
+  ]
+}

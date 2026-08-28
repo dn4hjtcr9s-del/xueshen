@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from backend.settings import Settings
 
@@ -18,6 +18,144 @@ PLAN_MAX_OUTPUT_TOKENS = 4000
 
 CandidateDisposition = Literal["auto_save", "review", "discard"]
 TopicSimilarityDisposition = Literal["auto_merge", "conflict", "distinct"]
+
+
+def candidate_evidence_issues(
+    candidate: dict[str, Any], source_items: list[dict[str, Any]]
+) -> list[str]:
+    """执行记忆证据硬校验，避免把写入安全边界交给 Prompt。
+
+    返回值为空表示证据结构和来源角色满足门槛；返回值非空时，候选最多进入审核，
+    缺少可审计来源的候选直接丢弃。该校验只针对总结记忆候选，不影响用户显式命令。
+    """
+    evidence = list(candidate.get("evidence") or [])
+    source_roles_by_ref: dict[str, set[str]] = {}
+    for item in source_items:
+        source_roles_by_ref.setdefault(str(item.get("source_ref")), set()).add(
+            str(item.get("role") or "")
+        )
+    if not evidence:
+        return ["MEMORY_EVIDENCE_REQUIRED"]
+
+    issues: list[str] = []
+    memory_type = str(candidate.get("memory_type") or "")
+    category = str(candidate.get("category") or "")
+    if memory_type == "learner" and category not in {"preference", "goal", "plan"}:
+        issues.append("LEARNER_CATEGORY_MISMATCH")
+    if memory_type == "mastery" and category not in {
+        "understanding",
+        "difficulty",
+        "misconception",
+        "review_advice",
+    }:
+        issues.append("MASTERY_CATEGORY_MISMATCH")
+    if memory_type == "mastery" and not str(candidate.get("topic_title") or "").strip():
+        issues.append("MASTERY_TOPIC_REQUIRED")
+    valid_refs = 0
+    valid_learning_roles = 0
+    for item in evidence:
+        evidence_ref = str(item.get("evidence_ref") or "")
+        roles = source_roles_by_ref.get(evidence_ref)
+        if roles is None:
+            issues.append("MEMORY_EVIDENCE_REF_NOT_FOUND")
+            continue
+        if len(roles) != 1:
+            issues.append("MEMORY_EVIDENCE_REF_AMBIGUOUS")
+            continue
+        role = next(iter(roles))
+        valid_refs += 1
+        evidence_type = str(item.get("evidence_type") or "")
+        if role in {"assistant", "tool"}:
+            issues.append("ASSISTANT_TOOL_EVIDENCE_NOT_SUPPORTING_MEMORY")
+        if _evidence_type_requires_user(evidence_type) and role != "user":
+            issues.append("MEMORY_USER_EVIDENCE_REQUIRED")
+        elif role in {"user", "activity"}:
+            valid_learning_roles += 1
+
+    expected_type = {
+        "preference": "preference_statement",
+        "goal": "goal_statement",
+        "plan": "plan_statement",
+    }.get(category)
+    if expected_type and not any(
+        str(item.get("evidence_type") or "") in {expected_type, "explicit_user_statement"}
+        and _single_source_role(
+            source_roles_by_ref,
+            str(item.get("evidence_ref") or ""),
+        )
+        == "user"
+        for item in evidence
+    ):
+        issues.append("LEARNER_CATEGORY_REQUIRES_EXPLICIT_USER_STATEMENT")
+
+    if valid_refs == 0:
+        issues.append("MEMORY_EVIDENCE_NOT_AUDITABLE")
+
+    if memory_type == "learner" and valid_learning_roles == 0:
+        issues.append("LEARNER_MEMORY_REQUIRES_USER_EVIDENCE")
+    if memory_type == "mastery" and valid_learning_roles == 0:
+        issues.append("MASTERY_MEMORY_REQUIRES_LEARNING_EVIDENCE")
+    if memory_type == "mastery" and not any(
+        str(item.get("evidence_type") or "")
+        in {"user_solution", "exercise_result", "repeated_error", "learning_activity"}
+        and _single_source_role(
+            source_roles_by_ref,
+            str(item.get("evidence_ref") or ""),
+        )
+        in {"user", "activity"}
+        for item in evidence
+    ):
+        issues.append("MASTERY_SELF_REPORT_REQUIRES_REVIEW")
+    if category in {"understanding", "difficulty", "misconception", "review_advice"}:
+        if not any(
+            _single_source_role(source_roles_by_ref, str(item.get("evidence_ref") or ""))
+            in {"user", "activity"}
+            for item in evidence
+        ):
+            issues.append("MASTERY_MEMORY_REQUIRES_USER_OR_ACTIVITY")
+    return list(dict.fromkeys(issues))
+
+
+def _single_source_role(source_roles_by_ref: dict[str, set[str]], evidence_ref: str) -> str | None:
+    """返回唯一来源角色；同一 ref 对应多个角色时视为不可审计。"""
+    roles = source_roles_by_ref.get(evidence_ref)
+    if roles is None or len(roles) != 1:
+        return None
+    return next(iter(roles))
+
+
+def evidence_gate_disposition(
+    *,
+    candidate: dict[str, Any],
+    source_items: list[dict[str, Any]],
+    disposition: CandidateDisposition,
+) -> CandidateDisposition:
+    """把证据校验结果转换为写入分流结果。"""
+    issues = candidate_evidence_issues(candidate, source_items)
+    if not issues:
+        return disposition
+    if "MEMORY_EVIDENCE_NOT_AUDITABLE" in issues or "MEMORY_EVIDENCE_REQUIRED" in issues:
+        return "discard"
+    return "review" if disposition != "discard" else disposition
+
+
+def validate_commit_evidence_refs(*, evidence_refs: list[str], allowed_refs: set[str]) -> None:
+    """提交前再次确认计划只携带本次来源中的证据引用。"""
+    if not evidence_refs:
+        raise ValueError("记忆变更计划缺少证据引用")
+    unknown = sorted(set(evidence_refs) - allowed_refs)
+    if unknown:
+        raise ValueError(f"记忆变更计划包含未授权证据引用: {unknown[:3]}")
+
+
+def _evidence_type_requires_user(evidence_type: str) -> bool:
+    return evidence_type in {
+        "explicit_user_statement",
+        "user_solution",
+        "preference_statement",
+        "goal_statement",
+        "plan_statement",
+    }
 
 
 def classify_candidate(

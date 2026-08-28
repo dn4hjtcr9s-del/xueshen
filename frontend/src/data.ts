@@ -1,5 +1,5 @@
 // 生产前端样例的 Mock 数据与类型定义。
-// 说明：学习计划页与错题本页已不再渲染示例内容；此文件保留首页等仍使用的
+// 说明：学习计划页与知识总结页使用真实数据；此文件保留首页等仍使用的
 // Mock 字段与后续 API 对接所需的类型形态。
 
 export type PageKey =
@@ -7,7 +7,7 @@ export type PageKey =
   | "chat"
   | "plan"
   | "map"
-  | "notebook"
+  | "summaries"
   | "community"
   | "profile";
 
@@ -21,7 +21,7 @@ export interface User {
 export interface PlanTask {
   id: string;
   title: string;
-  kind: "学" | "练" | "复习";
+  kind: "学" | "练" | "回顾";
   topic: string;
   done: boolean;
   minutes: number;
@@ -67,17 +67,6 @@ export interface KnowledgeNode {
   linkTo: string[];
 }
 
-export interface NoteItem {
-  id: string;
-  question: string;
-  answerExcerpt: string;
-  tags: string[];
-  source: string;
-  addedAt: string;
-  nextReview: string;
-  reviewStage: number; // 间隔重复第几轮
-  mastery: "薄弱" | "巩固中" | "已掌握";
-}
 
 export interface StudyGroup {
   id: string;
@@ -88,13 +77,6 @@ export interface StudyGroup {
   joined?: boolean;
 }
 
-export interface Notification {
-  id: string;
-  kind: "plan" | "community" | "review";
-  text: string;
-  time: string;
-  read: boolean;
-}
 
 export interface MemoryItem {
   category: "掌握度" | "学习偏好" | "目标";
@@ -120,7 +102,7 @@ export const todayTasks: PlanTask[] = [
   { id: "t1", title: "理解特征值与特征向量的定义", kind: "学", topic: "特征值", done: true, minutes: 25 },
   { id: "t2", title: "推导特征多项式 |A − λI| = 0", kind: "学", topic: "特征多项式", done: true, minutes: 20 },
   { id: "t3", title: "向 AI 提问：对角化的几何意义", kind: "练", topic: "对角化", done: false, minutes: 15 },
-  { id: "t4", title: "复习：矩阵的秩（3 条错题到期）", kind: "复习", topic: "矩阵的秩", done: false, minutes: 10 },
+  { id: "t4", title: "整理：矩阵的秩（3 个关键要点）", kind: "回顾", topic: "矩阵的秩", done: false, minutes: 10 },
 ];
 
 export const conversations: Conversation[] = [
@@ -214,13 +196,6 @@ export const checkin = {
     { name: "秩不平", days: 9 },
   ],
 };
-
-export const notifications: Notification[] = [
-  { id: "nf1", kind: "review", text: "3 条「矩阵的秩」错题今天到期复习", time: "09:00", read: false },
-  { id: "nf2", kind: "community", text: "正方形骑士 回复了你的帖子「特征值的直觉」", time: "10:12", read: false },
-  { id: "nf3", kind: "plan", text: "今日任务还剩 2 项：对角化提问、错题复习", time: "12:30", read: false },
-  { id: "nf4", kind: "community", text: "「线代攻坚小队」今日已有 11 人打卡", time: "昨天", read: true },
-];
 
 export const memories: MemoryItem[] = [
   { category: "目标", text: "六周内建立线性代数的整体直觉，重点是特征值与对角化", updatedAt: "7 月 6 日" },
