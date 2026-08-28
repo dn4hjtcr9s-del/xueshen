@@ -839,6 +839,668 @@ nightly 批量后（§2.6 D6）：一个批量 operation 装该用户积压的 N
 
 ---
 
-## 后续章节规划（占位）
+# 第五章 具体实施计划
 
-- （暂无；后续议题由讨论产生后追加）
+> 本章把前四章已经定稿的设计拆成可以排期、分支实施、逐项验收的执行计划。
+> 本章不是新的架构决策；如果本章与前四章有冲突，以前四章和文末决议总表为准。
+> 本轮只更新本计划文档，不创建迁移、不修改业务代码、不启用任何新链路。
+
+## 5.0 实施边界、不变项与前置工作
+
+### 5.0.1 本轮与后续实施的边界
+
+本轮交付物只有本章实施计划。实际开发从用户确认计划后开始，并遵守以下工作流：
+
+1. 以当前已提交的基线为起点，先确认 `git status --short` 为空，并记录基线 commit。
+2. 不在 `main` 上直接开发。创建 `codex/` 前缀的实现分支，并从该分支创建独立 worktree。
+3. 所有代码、迁移和测试只在实现 worktree 中修改；本计划文档可以单独提交在计划分支，不能把实现阶段的半成品带回主工作树。
+4. 每个 Phase 完成后先做该 Phase 的单元/契约验证，再进入下一 Phase；跨 Phase 的集成验证在 Phase 2、Phase 6、Phase 7 各做一次。
+5. 未经用户明确批准，不把任何 feature flag 改成默认开启，不要求七牛云账号，不写入真实凭据，也不把对象存储降级行为当成生产可用性保证。
+
+### 5.0.2 必须保持的语义
+
+以下事项在实施过程中视为不变项，不得为了省工作量而重定义：
+
+- **thread 是逻辑聚合单位，turn 是执行单位，segment 是物理存储单位**。一个 thread 可以有多个 turn；一个 turn 默认产生一个不可变 segment；完整 thread rollout 是 manifest 按顺序拼装出的逻辑视图。
+- **JSONL 是短期记忆内容的事实源，PG 是索引和协调层**。迁移完成前允许 `conversation_messages.content` 作为兼容回退；迁移完成后正文不再由 PG 作为新写入的权威副本。
+- **`conversation_turn_events` 第一阶段继续作为 SSE journal**。Rollout recorder 不直接替代 SSE，也不改变 `Last-Event-ID`、事件序号和 `EVENT_REPLAY_EXPIRED` 语义。
+- **checkpoint 继续自包含**。不把 `snapshot.recent_messages` 改成只存 ID，不改变“恢复时禁止重读 DB”的语义，也不以 rollout 化为理由瘦身 checkpoint。
+- **长期记忆历史 `versions/` 文件永不原地迁移**。schema v2 采用双读；迁移任务通过正常的 `write_immutable_version` 追加新版本并更新 `current/`。
+- **批量 evidence 复用 `memory_operations`**。不新增独立 evidence 表；使用 `pending_batch`、`next_run_at` 和 `batch_operation_id` 完成沉淀门控与批次关联。
+- **知识图谱继续采用“共享本体只读 + 用户 overlay”**。长期记忆与 KG 双路更新最终一致，更新鲜者优先并显式标注冲突；不引入新的跨域事务或 reconciler。
+- **对象存储生产目标是七牛云 Kodo**。在没有账号前，开发和测试使用本地目录实现同一抽象接口；七牛适配器可以先实现配置、构造和协议测试，但不得依赖真实网络或真实凭据。
+
+### 5.0.3 当前基线核对清单
+
+在创建实现 worktree 前，执行并记录以下结果（本轮不把这些命令作为计划提交的阻塞条件）：
+
+```bash
+git status --short
+git log -1 --oneline --decorate
+git worktree list
+uv run alembic heads
+uv run python -m backend.memory.cli --help
+```
+
+核对结果至少包括：
+
+- memory 链、conversation 链当前 head；
+- 是否存在未登记的 worktree 或同名分支；
+- 当前运行配置中的 conversation/memory feature flag；
+- PostgreSQL 端口仍按仓库约定使用 `55432`，RAG 独立库使用 `55433`；
+- 现有 `.env`、`.local/`、`.playwright-cli/`、`output/` 和 eval 生成物不进入实现提交。
+
+## 5.1 总体依赖图与交付顺序
+
+```mermaid
+flowchart TD
+    P0["Phase 0：契约、配置、数据库迁移"]
+    P1["Phase 1：本地 Rollout Recorder"]
+    P2["Phase 2：Manifest、Reader、恢复与删除"]
+    P3["Phase 3：七牛 Kodo 适配与生命周期"]
+    P4["Phase 4：Markdown schema v2 双读与渐进迁移"]
+    P5["Phase 5：Memory Prime 与 memory.search/read"]
+    P6["Phase 6：pending_batch 与 nightly batch"]
+    P7["Phase 7：Consolidation、aliases、dangling links、KG 双路更新"]
+    Q["灰度、观测、回滚与最终切换"]
+
+    P0 --> P1
+    P1 --> P2
+    P2 --> P3
+    P0 --> P4
+    P4 --> P5
+    P4 --> P6
+    P5 --> P6
+    P6 --> P7
+    P3 --> Q
+    P7 --> Q
+```
+
+依赖规则：
+
+- Phase 0 先做兼容性迁移，确保旧版本服务仍能读写；任何后续 Phase 都不直接在旧表上打破约束。
+- Phase 1 可以在本地目录完成并独立验收；Phase 2 才把 PG manifest 和 reader 接入真实读路径。
+- Phase 3 不阻塞本地功能开发，但在云环境灰度前必须完成 Kodo 适配器和对象生命周期验证。
+- Phase 4 是 Phase 5、Phase 6 的长期记忆格式前置；Phase 5 可以先以 v1 读路径做兼容实现，但正式切换必须在双读能力稳定后进行。
+- Phase 6 先实现证据池状态机和批次执行，再实现 Phase 7 的全用户 consolidation；不能先做全局重写而没有可恢复的批次边界。
+
+## 5.2 Phase 0：契约、配置和数据库迁移
+
+### 目标
+
+建立所有后续代码依赖的稳定接口、字段和 feature flag，使新旧服务能够在同一数据库上滚动部署。此阶段不改变线上读路径，不上传七牛，不启用 batch 或 memory tools。
+
+### 交付内容
+
+#### A. 契约文件
+
+新增或扩展以下契约（名称可沿用仓库现有命名风格，实际实现前以当前分支的模块导出方式为准）：
+
+- `backend/conversation/contracts/rollout.py`
+  - `RolloutRecord`：`recorded_at`、`ordinal`、`type`、`turn_id`、`payload`；
+  - `ThreadMetaPayload`、`TurnStartedPayload`、`TurnCompletedPayload`；
+  - `RolloutPointer`：`segment_id`、`ordinal`、`byte_offset_start`、`byte_offset_end`；
+  - 版本常量与严格校验函数，拒绝缺字段、负 ordinal、非法时间格式和未知持久化记录类型。
+- `backend/conversation/contracts/object_store.py`
+  - `RolloutObjectStore` 协议；
+  - `ObjectRef`（key、etag/hash、size、content type）；
+  - 可重试错误、不可重试错误和对象不存在错误的域级分类。
+- `backend/memory/contracts/batch.py`
+  - evidence 批次的状态、批次上限、`batch_operation_id` 关联和批次游标结构；
+  - 与现有 operation contract 的枚举/序列化兼容规则。
+- 对现有 `conversation/contracts/events.py`、`conversation/contracts/domain.py`、`memory/contracts/evidence.py` 的扩展只增加可选字段或新事件，不删除旧字段。
+
+契约测试放在 `tests/contract/` 或对应域的 `tests/unit/`，其中 JSONL 行格式必须有固定样例和拒绝样例；如涉及 HTTP schema，使用现有 OpenAPI snapshot 流程更新并在 review 中确认。
+
+#### B. 配置项与默认值
+
+集中加入 `backend/settings.py` 和 `.env.example`，但所有新链路默认关闭。建议配置分组如下：
+
+| 配置 | 初始默认 | 用途 |
+|---|---:|---|
+| `conversation_rollout_enabled` | `false` | 是否在 graph 节点记录 rollout |
+| `conversation_rollout_read_enabled` | `false` | 是否允许 reader 优先读取 rollout 指针 |
+| `conversation_rollout_object_store` | `local` | `local` 或 `qiniu`，无账号时只能使用 `local` |
+| `conversation_rollout_root` | `.local/rollouts` | 本地热缓存/模拟对象存储根目录 |
+| `conversation_rollout_queue_size` | `256` | recorder 有界队列 |
+| `conversation_rollout_segment_max_bytes` | 有界正整数 | 每 turn 一段之外的防爆阈值，默认值须由现有 settings 风格给出并在压测后校准 |
+| `conversation_rollout_retention_days` | 沿用当前 retention | JSONL/manifest 保留周期 |
+| `conversation_rollout_qiniu_bucket` | 空 | Kodo bucket 占位，不得在默认配置下启动 |
+| `conversation_rollout_qiniu_region` | 空 | Kodo region 占位 |
+| `conversation_rollout_qiniu_domain` | 空 | 下载/公开域名占位，优先使用内部签名 URL |
+| `conversation_rollout_qiniu_access_key` | 空 | 凭据占位，只从 secret 注入 |
+| `conversation_rollout_qiniu_secret_key` | 空 | 凭据占位，只从 secret 注入 |
+| `memory_schema_v2_read_enabled` | `false` | 启用 v1/v2 双读路径 |
+| `memory_schema_v2_migration_enabled` | `false` | 启用后台逐用户追加版本迁移 |
+| `memory_prime_enabled` | `false` | 启用首轮 summary prime |
+| `memory_tools_enabled` | `false` | 启用 `memory.search` / `memory.read` |
+| `memory_batch_enabled` | `false` | 启用 `pending_batch` 扫描和批量 operation |
+| `memory_consolidation_enabled` | `false` | 启用 nightly consolidation 末段 |
+| `memory_kg_dual_write_enabled` | `false` | 启用长期记忆/KG 双路更新 |
+
+settings 校验分两层：本地 `local` 模式只要求根目录可写；`qiniu` 模式在启动时要求 bucket、region、access key、secret key 完整，但本轮不启用该模式，也不填真实值。secret 不写 `.env.example` 的具体内容。
+
+#### C. 数据库迁移
+
+迁移采用“先加可空字段/新表 → 部署兼容读写 → 回填 → 切换写入 → 最后再考虑收紧约束”的顺序。建议在当前 head 后建立以下迁移（实际 revision id 以执行 `alembic heads` 后生成，不能盲写旧 head）：
+
+1. `conversation_migrations/versions/<next>_conversation_rollout_manifest.py`
+   - 新增 rollout manifest/segment 表，至少包含：`segment_id`、`thread_id`、`turn_id`、`ordinal_start`、`ordinal_end`、`object_key`、`object_etag`、`sha256`、`byte_size`、`status`、`created_at`、`sealed_at`、`deleted_at`；
+   - 唯一约束：`(thread_id, ordinal_start)`；同时为 `turn_id` 建唯一约束或等价幂等约束，防止一个 turn 重复封存；
+   - 建 `thread_id + ordinal_start`、`object_key`、`turn_id` 索引；
+   - 为 `conversation_messages` 增加 nullable 的 `segment_id`、`rollout_ordinal`、`rollout_byte_offset_start`、`rollout_byte_offset_end`，保留 `content` 作为过渡回退；
+   - 所有新增 FK/索引都采用可回滚、可重复执行的迁移写法。
+2. `alembic/versions/<next>_memory_batch_operations.py`
+   - `memory_operations.status` 增加 `pending_batch`；
+   - 增加 nullable `batch_operation_id`；
+   - 建 `(status, next_run_at, user_id)` 索引；
+   - 如果 operation 状态由数据库 CHECK 约束维护，同步扩展约束并补 downgrade 路径；
+   - 不新增 evidence 表，不改变现有 operation lease/fencing/retry/dead-letter 语义。
+3. Markdown schema v2 本身不新增数据库版本；迁移状态放在现有 `maintenance_runs` 和 batch cursor 中，避免把文件系统逐用户迁移绑定在数据库事务里。
+
+### Phase 0 验收
+
+- 旧代码在新迁移后的数据库上可以启动、读写和通过原有单元/契约测试。
+- 新字段全为 nullable 或有安全默认值，旧 worker 不会因未知状态/列而崩溃。
+- 迁移可在空库和已有测试数据上分别执行 upgrade/downgrade；不得修改历史 migration 文件。
+- qiniu 配置为空时服务仍能以 `local` 模式启动；不发起外网请求。
+- 未显式设置 flag 时，rollout、prime、memory tools、batch、consolidation、KG 双写均不产生行为变化。
+
+## 5.3 Phase 1：Conversation Rollout 本地链路
+
+### 目标
+
+在不改变 SSE、checkpoint 和 evidence 提交流程的前提下，把 graph 节点的关键语义产出记录为可校验 JSONL。第一阶段只使用本地目录，重点验证 recorder 的顺序、flush、背压和故障降级。
+
+### 文件改动范围
+
+- 新增 `backend/conversation/rollout/recorder.py`：有界 `asyncio.Queue(256)`、后台 writer task、延迟建文件、逐行写入并 flush、flush ack、优雅关闭、重开重试。
+- 新增 `backend/conversation/rollout/policy.py`：持久化白名单、瞬态事件过滤和 payload 脱敏边界。
+- 新增 `backend/conversation/rollout/file_naming.py`：按 thread 创建时间生成路径，处理时区、非法 thread id、日期目录和回滚预留命名。
+- 新增 `backend/conversation/rollout/codec.py`：JSONL 编解码、行尾、UTF-8、canonical hash、schema version。
+- 扩展 `backend/conversation/graph/state.py` 的 `ConversationRuntimeContext`，增加可空 recorder；recorder 不进入 checkpoint。
+- 在 `backend/conversation/graph/nodes/snapshot.py`、`memory.py`、`rewrite.py`、`evidence.py`、`answer.py`、`finalize.py` 的关键成功/降级路径调用 recorder。调用只写模型输入语义相关记录，不写 SSE delta、取消令牌、lease 或 gateway 原始 HTTP 细节。
+- 扩展 `backend/conversation/worker/main.py` 和 `backend/conversation/worker/graph_worker.py` 的 composition root 与生命周期，确保 worker 停止前 drain/flush recorder。
+- 如需统计，统一落到现有 `backend/conversation/metrics.py`，不在节点内散落指标实现。
+
+### 写入顺序和故障语义
+
+每个 turn 的最小记录顺序为：
+
+1. `thread_meta`（第一次物化文件时写入）；
+2. `turn_started`；
+3. `turn_context_snapshot`；
+4. `rewrite_plan`、`evidence_set`、memory activity 等允许记录；
+5. `user_message`、`assistant_message`；
+6. `turn_completed`（必须带 status 和 degraded flags）；
+7. finalize 后等待 flush ack，再结束本轮 recorder 生命周期。
+
+写失败时保留内存队列并最多重开文件重试一次；再次失败记录 `rollout_write_failed`，不让第一阶段的 rollout 旁路故障拖垮 turn。由于 Phase 2 前 PG 指针还未切换，checkpoint 和 `conversation_messages` 仍是恢复/读取回退。
+
+大小阈值只作为防爆保护：默认每 turn 一个 segment；达到阈值时记录可观测的 `segment_size_guard_triggered`，不得在一个 turn 中静默丢行。若阈值处理需要拆段，必须显式增加 segment 边界记录并在 Phase 2 验收前补充重放测试。
+
+### Phase 1 验收
+
+- 空 turn 不创建空文件；首个持久化记录才物化文件。
+- 同一文件的 `ordinal` 严格递增；进程重启后不会复用已确认写入的 ordinal。
+- 每一行都能独立 JSON 解码，非法 payload 不能污染后续行。
+- flush ack 只在数据真正写入并 flush 后返回；writer task 异常会被调用方感知并计数。
+- kill/取消注入后，已 ack 的行全部存在；未 ack 的行只能位于明确的丢失窗口，不出现半行或伪成功。
+- `conversation_turn_events`、SSE replay、checkpoint、MemoryACK 行为与 flag 关闭时完全不变。
+
+## 5.4 Phase 2：Manifest、Reader、恢复与删除
+
+### 目标
+
+把“本地 JSONL 可写”提升为“PG manifest 可寻址、可恢复、可删除合规”的完整链路；完成后 reader 才具备 rollout 优先读取能力。
+
+### 文件改动范围
+
+- 新增 `backend/conversation/persistence/rollout_manifests.py`：创建、封存、查询、幂等写入 manifest；所有更新带 thread/turn fencing 校验。
+- 新增 `backend/conversation/rollout/reader.py`：按 `message_id` 或 `(segment_id, ordinal, byte range)` 读取并校验 hash；支持本地热缓存和对象存储接口，不把对象存储 SDK 直接带进 Reader。
+- 新增 `backend/conversation/rollout/reconcile.py`：扫描“已上传未登记”“已登记但对象缺失”“索引指针越界”“checksum 不一致”等状态，生成告警和可重试动作。
+- 扩展 `backend/conversation/persistence/messages.py`：写入消息时保留 pointer；增加 pointer 回填、读一致性和旧正文回退。
+- 改造 `backend/conversation/services/source_read_service.py`：顺序为 rollout pointer → 本地 segment → 对象存储 → 兼容 HTTP conversation reader；`DeletionAwareConversationReader` 继续在最外层生效。
+- 扩展 `backend/conversation/services/thread_deletion.py`：删除 thread 时先阻止新读写，再删/标记 manifest、对象和索引，记录可审计结果；删除失败不能返回“已完成”。
+- 扩展 `backend/conversation/graph/runner.py`：只增加“checkpoint 不可用时的 rollout 重建”入口，不改变有 checkpoint 时的恢复优先级。
+- 增加 `backend/conversation/cli/rollout.py` 或等价运维入口：reconcile、verify、export、delete/retry。
+
+### 封存事务顺序
+
+每个 turn 终态时严格执行：
+
+1. worker claim 当前 turn，并按 `thread_id + manifest` 找到热段；
+2. 完成追加、逐行 flush，计算 segment 的字节范围、ordinal 范围、sha256；
+3. 上传对象并确认对象存储返回成功的 object ref；
+4. 在同一 PG 事务内写 manifest 和 message pointer；
+5. 事务成功后将 segment 标为 sealed；如果 PG 事务失败，对象暂时作为孤儿，由 reconcile 处理，不能产生悬空 manifest。
+
+本地对象存储也必须遵守同一顺序，不能因为是本地目录就先写 manifest。若对象上传成功但数据库事务失败，重试使用幂等键 `(thread_id, ordinal_start)`；不得重复生成第二条逻辑 segment。
+
+### Reader 与重放
+
+- source read 优先使用索引指针；指针缺失/旧数据时回退到 `conversation_messages.content`，并记录 read-repair 计数。
+- checkpoint 存在时仍直接 resume；只有终态 checkpoint 被清理、checkpoint 反序列化失败并选择恢复、或显式 export/rebuild 时才从 rollout 重建。
+- 重放先反向找到最近有效 `turn_context_snapshot`，再按 ordinal 正向应用后续消息/计划/终态记录；不把 evidence chunk 正文塞回 rollout。
+- SSE 断线重放第一阶段仍读 `conversation_turn_events`，不把 rollout 当成 SSE journal。
+
+### Phase 2 验收
+
+- 写入、封存、查询、读回的 sha256、byte range、ordinal 和 message content_hash 全部一致。
+- 数据库事务失败、对象缺失、对象内容被篡改、进程在上传/提交之间崩溃，都能被 reconcile 识别；不产生“manifest 指向不存在对象”。
+- 新旧消息各一套 fixture 均能通过 source reader；删除后的 message 永不从 rollout 回读。
+- kill worker 后重启，已封存 segment 可重放；未封存热段只按规定的恢复/回退语义处理。
+- 多副本同时处理不同 thread/turn 时不共享文件句柄，不出现跨 thread ordinal 串写。
+
+## 5.5 Phase 3：七牛云 Kodo 对象存储与生命周期
+
+### 目标
+
+实现可替换的对象存储抽象，并在没有七牛账号的前提下完成本地模拟、协议测试和配置校验；获得账号后只需切换 adapter/config，不改 rollout 业务逻辑。
+
+### 抽象与适配器
+
+- `backend/conversation/rollout/object_store.py` 定义 `RolloutObjectStore`：`put_immutable`、`get`/`get_range`、`head`、`list_prefix`、`delete`、`presign_read`（如部署需要）和健康检查。
+- `LocalRolloutObjectStore` 使用 `conversation_rollout_root` 模拟 bucket/key，写临时文件后 fsync/rename，返回独立 sha256 和 size；不以本地文件名代替 object key。
+- `QiniuKodoRolloutObjectStore` 封装七牛 Kodo SDK/HTTP 客户端，所有 SDK 类型只出现在 adapter 内；支持 bucket、region、domain、access key、secret key、超时和重试配置。未配置凭据时构造失败或保持不可用状态，具体启动策略沿用 settings 的生产校验，不静默切回本地。
+- 业务层只依赖协议和 `ObjectRef`，测试使用 `FakeRolloutObjectStore`，不能把七牛 SDK 写进 graph node、persistence repository 或 Reader。
+
+### 对象 key 与安全
+
+对象 key 使用固定前缀和不可变 segment 标识，例如：
+
+```text
+rollouts/threads/YYYY/MM/DD/<thread_id>/<ordinal_start>-<segment_id>.jsonl
+```
+
+key 中不放用户可控原文，不把 access key/secret key、签名 URL、bucket 私有域名写入 JSONL、PG 日志或 metrics。读取默认走服务端 SDK/内部下载，不假设公开域名；`domain` 只作为部署方明确配置的可选读取入口。
+
+### 生命周期与运维
+
+- 热缓存、已封存对象、归档对象和删除 tombstone 分开定义生命周期；先在本地实现 retention/reconcile，再在 Kodo 侧配置等价生命周期规则。
+- retention 执行必须先写删除审计/状态，再删除对象；删除对象失败保留可重试状态，不删除 PG 审计记录。
+- 归档到 `archived_threads/` 只改变逻辑状态和 key 前缀，不重写已封存 segment 内容。
+- CLI 至少支持 `verify-manifest`、`reconcile-orphans`、`export-thread`、`delete-thread-rollouts` 和 `retention-scan`，每个命令支持 dry-run。
+
+### Phase 3 验收
+
+- 无七牛账号时，所有自动化测试只调用 Local/Fake adapter，不访问网络；`qiniu` 模式配置不完整时有明确错误。
+- 同一 object key 重复 put 是幂等的；不同内容使用同一 key 时拒绝覆盖或报告 hash 冲突。
+- range read 返回的字节范围与 PG pointer 一致；对象被删/损坏时 reader 可观测地回退或失败。
+- Kodo adapter 的签名、region、bucket 和超时配置均有隔离测试；获得账号后增加一组受控的真实环境 smoke，不把真实环境测试作为默认 CI。
+
+## 5.6 Phase 4：长期记忆 Markdown schema v2
+
+### 目标
+
+在不破坏现有 v1 文档和历史版本的前提下，引入 index 检索块、front matter v2（`name`/`description`/`aliases`）以及 `[[link]]` 解析，并通过维护任务逐用户追加新版本。
+
+### 实施步骤
+
+1. **先扩展解析器再改写入器**：
+   - `backend/memory/storage/markdown_schema.py` 增加 schema v2 类型、双读解析、front matter 必填/单行校验、aliases 规范化、`[[topic_key]]` 提取；
+   - v1 解析结果转换为内部统一模型，但保留原始 schema version，不能把 v1 历史文件序列化成 v2 后覆盖原文件；
+   - `backend/memory/storage/local_markdown.py` 的 `write_immutable_version` 支持显式 schema version 和 v2 canonical rendering；current 物化仍采用原子写。
+2. **再升级索引投影**：
+   - `backend/memory/persistence/index_entries.py` 增加 `name`、`description`、`aliases`、`related_topic_keys` 或等价检索字段的投影；
+   - `backend/memory/services/context_service.py` 将 index v2 作为路由候选来源，保持用户隔离、关键词检索和 token 裁剪；
+   - `backend/memory/graph/summary.py` 的 mutation validator 对 front matter、link 和 source refs 做兜底校验，失败走现有 quarantine/告警而不是静默写坏文档。
+3. **新增渐进迁移任务**：
+   - 在 `backend/memory/worker/scheduler.py` 增加 `migrate_markdown_schema_v2`；
+   - 复用 `maintenance_runs`、每用户 cursor、批量上限和续跑机制；
+   - 先扫描并报告不合规文档，再对可迁移用户按 learner → mastery → index 顺序读取 v1，生成 v2 当前内容，调用正常 immutable write，成功后更新 current；
+   - 对失败用户记录 reason、last key、attempt count，允许下次从 cursor 继续；
+   - `versions/` 历史文件保持原样，迁移前后 checksum 和 rollback 记录可追溯。
+4. **提示词绑定**：
+   - `backend/memory/graph/prompts/build_mutation_plan_v1.md` 升级为配套 v2 版本；
+   - `extract_candidates` 增加主体归属和 related topic hints；
+   - 新增 `summary_consolidate_v1`，生成 `memory_summary.md` 的固定 `v1` 格式；
+   - `prompt_loader` 启动校验 schema/prompt 绑定，避免 v2 文档使用 v1 planner。
+
+### 迁移验收
+
+- v1、v2、坏 front matter、非法 link、重复 alias 和 Unicode topic key fixture 都能被解析器明确分类。
+- 对同一用户执行两次迁移，第二次无新版本、无 checksum 抖动、无重复 side effect。
+- 历史 versions 文件字节级不变；current 只通过 immutable write 产生新 checksum。
+- 迁移过程中 kill scheduler 后可从 cursor 续跑；单用户失败不阻塞其他用户。
+- 旧 reader 在迁移后的 v2 current 上仍能得到兼容内部模型；新 reader 在未迁移的 v1 上仍能工作。
+- index 投影与 search 候选能识别 `name`、`description`、`aliases` 和 link 路由，不把其他用户主题混入结果。
+
+## 5.7 Phase 5：Memory Prime 与 `memory.search` / `memory.read`
+
+### 目标
+
+将长期记忆读路径从“每轮固定 query 注入全部候选”改成“首轮 prime 注入稳定摘要，模型按需调用有限工具读取细节”，同时保留现有 memory gateway 和关闭 flag 下的旧路径。
+
+### 图与服务改造
+
+- `backend/conversation/graph/nodes/memory.py`：把现有 `recall_memory` 拆为 prime 判定、summary 注入和工具调用结果合并；首轮读取 `memory_summary.md`，非首轮只沿用 checkpoint 中已确定的 snapshot，不重复 prime。
+- `backend/memory/services/context_service.py`：保留文档组装和 KG 双源协调能力，新增面向工具的候选搜索/单文档读取服务；工具读不直接暴露文件系统路径。
+- `backend/conversation/gateways/memory.py` 及相关 gateway protocol：增加 `search`、`read`、引用/版本信息和错误分类；实现层继续由 composition root 装配。
+- `backend/conversation/graph/state.py`：增加工具调用记录、调用计数、prime 状态、记忆引用和截断标记；这些是 checkpoint 可序列化的图状态，recorder 只记录必要的 activity 引用。
+- `backend/conversation/graph/builder.py` / `runner.py`：在现有 answer 生成路径上新增 memory tool-call loop 和路由；不能突破每轮独立 graph thread 的恢复边界。
+- `backend/conversation/graph/nodes/answer.py`：将当前“完整生成后应用层切 delta”的路径扩展为可重复的 tool-call/assistant continuation，保持现有 answer delta 事件契约。
+- `backend/conversation/graph/nodes/finalize.py`：把最终使用的 memory citations 写入 assistant message/turn event 的结构化字段（若当前 API 尚无字段则只新增可选字段），不把内部 prompt 原文泄露给用户。
+- `backend/conversation/rollout/policy.py`：允许记录 `memory_tool_call`、`memory_tool_result` 的摘要/引用，不记录完整大对象或 secret。
+
+### 工具契约
+
+`memory.search` 和 `memory.read` 都必须是有界、可审计、用户隔离的内部工具：
+
+- 每轮记忆工具总调用上限 **6 次**，与 RAG subquery 预算独立；超限返回可处理的 `MEMORY_TOOL_BUDGET_EXCEEDED`，不让 graph 进入无限循环。
+- `memory.search` 输入 query 和可选 topic/namespace/filter，输出候选的 `document_key`、`name`、`description`、匹配原因、版本/checksum、可用于 read 的稳定 ID；默认不返回大段正文。
+- `memory.read` 只允许读取已授权用户的文档/section/引用范围，输出受限正文、版本/checksum、行/段范围和 related links；越界、文档不存在、已 quarantine 分别映射稳定错误。
+- 工具返回都带 `trace_id`、`document_version` 和 citation key；相同输入在同一 turn 内要有幂等/缓存策略，避免重复消耗预算。
+- tool result 进入 graph state 前做 token/字符上限裁剪；超限必须返回 `truncated=true` 和下一步可用的 read hint。
+
+### Prime 输入输出
+
+prime 只注入 `memory_summary.md` 的有效内容和 schema/生成时间元信息；它不替代 learner/mastery/index 的按需 read，也不把整个用户文档目录塞进 prompt。summary 缺失、损坏、超限时按现有降级策略返回空 prime/旧摘要，并记录 `memory_prime_degraded`。
+
+### Phase 5 验收
+
+- 首轮启用 flag 时只发生一次 prime；同一 turn 重试不重复产生副作用。
+- 非首轮 checkpoint resume 不重新检索/重写 prime；checkpoint 缺失时按设计的 fallback 顺序工作。
+- tool call 永远不跨 user、不能读到 quarantine/deleted 文档；6 次上限严格生效。
+- 关闭 `memory_prime_enabled`/`memory_tools_enabled` 时，现有 `recall_memory` 路径和 answer/SSE 契约全部保持不变。
+- 记忆引用可从回答回查到具体 document version/checksum/section；citation 缺失时不阻塞回答，但产生可观测告警。
+
+## 5.8 Phase 6：`pending_batch` 与 nightly batch
+
+### 目标
+
+把符合批量条件的 evidence 从逐条写入改成按用户聚合、可续跑、可重试的 nightly batch；显式记忆仍按下一个 0 点门控，不与普通 evidence 混在同一批次。
+
+### 状态机和入队
+
+- `backend/memory/persistence/operations.py`：增加 `pending_batch` 的 claim/lease/fencing/retry/dead-letter 语义；普通 `pending`、`running`、`succeeded`、`failed` 不改变。
+- evidence submission 写入 operation 时：普通证据放入 `pending_batch`，`next_run_at` 设为最短沉淀时间；`explicit_remember` 的 `next_run_at` 设为下一个 0 点；已存在同一 evidence 幂等键时只更新必要的门控字段。
+- 增加 `batch_operation_id`，每条成员 evidence 只关联一个批次；批次 operation 记录 user_id、cursor、成员数、上限、创建时间和 consolidation 状态。
+- `backend/memory/worker/scheduler.py`：在 advisory lock 下扫描 `pending_batch AND next_run_at <= now()`，按 user_id 聚合，受 `memory_summary_batch_max_evidence=50` 上限约束，生成 `summarize_user_memory_batch`。
+- 批次构造按稳定排序（eligible time、created time、operation id），避免多副本/重试时批次成员漂移；扫描和 claim 使用数据库锁/lease，不能依赖应用内存集合。
+
+### 批量 Graph
+
+- 新增批量 graph state/checkpoint contract，至少保存 user_id、batch_operation_id、成员 evidence refs、cursor、已处理成员、失败成员、degraded flags 和 prompt version。
+- 新增 `summarize_user_memory_batch` graph，结构为：加载批次 → 逐 evidence source read → candidate extraction → per-document mutation planning → 文档 commit → loop/checkpoint → consolidation 入口。
+- 每个 evidence commit 必须幂等；重复运行时通过 operation/evidence/version 绑定避免重复写同一事实。
+- 循环段已 commit 的文档变更不因后续 evidence 失败而回滚；单成员失败记录 reason 并按现有 retry/dead-letter 语义处理，除非批次本身发生不可恢复契约错误。
+- 批量成功后将成员 evidence 置为 `succeeded`；批量失败保留可重试成员为 `pending_batch`；批量 dead letter 时成员一并转 `dead_letter`，并保留批次诊断信息。
+
+### Phase 6 验收
+
+- 同一用户同一批最多 50 条 evidence；跨用户不混批；批次排序稳定且可重放。
+- `next_run_at` 门控准确：门控前不被扫描，显式记忆只在下一个 0 点后可进入批次。
+- scheduler 多副本下同一 evidence 只被一个批次 claim；锁释放/进程崩溃后可续跑。
+- 成功、可重试失败、永久失败、批量 dead letter 四种状态均有完整测试，并验证成员状态与父批次状态一致。
+- 批次 checkpoint 清理/恢复不影响已经 commit 的 Markdown 版本；重新运行不会重复生成内容。
+- 关闭 `memory_batch_enabled` 时，现有逐 evidence 路径不改变。
+
+## 5.9 Phase 7：Consolidation、aliases、dangling links 与 KG 双路更新
+
+### 目标
+
+在批次循环完成后执行一次面向用户全局文档的 consolidation，生成 summary、治理主题关系和 KG overlay；保证全局一致性工作与局部 evidence commit 分离且可重试。
+
+### Consolidation 末段
+
+新增或扩展 `backend/memory/graph/summary.py`、`backend/memory/graph/builder.py`、`backend/memory/graph/runner.py`（如仓库实际没有 builder，则放入当前 graph composition root），在所有 evidence loop 完成后进入 consolidation 节点：
+
+1. 读取当前 learner、全部 mastery、index v2 和本批变更 diff；全量输入超过预算时只重写“主题路由”段，保留旧的用户画像/稳定偏好。
+2. 通过 `summary_consolidate_v1` 生成 `memory_summary.md`，使用正常 immutable write，旧 summary 可回滚。
+3. 计算 aliases 归并候选；自动合并必须生成版本记录、旧 alias 到 canonical topic 的映射和人工纠错入口，不能静默删除用户原有命名。
+4. 扫描 `[[link]]` 悬空目标：第一次出现只加入 index 的候选主题区；累计至少两个批次出现才创建正式 mastery 文档；候选和正式主题都保留来源 evidence/批次。
+5. 处理批内冲突：以更新鲜者优先，并在 index/summary 或 context 中显式标注并列冲突；不得悄悄覆盖较旧但更强的证据。
+6. 按用户范围更新 memory index、learner/mastery 投影和用户 KG overlay；任何一路失败都记录最终一致告警，允许各自幂等重试，不引入跨域事务。
+
+### KG 双路更新
+
+- 长期记忆侧提交和 KG overlay 提交分别使用可重试幂等键，记录 source document version/checksum、batch_operation_id 和更新时间。
+- `backend/memory/services/context_service.py` 在 build 阶段读取两路状态，按更新时间选择主值，同时返回显式冲突标记；不让 graph state 静默吞掉差异。
+- `backend/memory/graph/summary.py` 或专用 persistence repository 记录 `kg_projection_update_failed`、`memory_projection_update_failed`，告警由现有 metrics/maintenance 机制承接。
+- 每日 verify 任务只负责发现/告警，不自动进行未经批准的 reconciler 修复；修复由幂等重试或人工纠错入口完成。
+
+### Phase 7 验收
+
+- consolidation 只在该用户批次 loop 全部达到终态后执行；末段重试不重复写同一 summary 版本。
+- summary、index、aliases、dangling link、KG overlay 的变更均可从 batch_operation_id 回溯；失败告警不阻塞下一用户/下一批次。
+- alias 自动合并、一次悬空 link、连续两批悬空 link、批内冲突、LLM 超限降级分别有 fixture 和断言。
+- 任一路 KG 更新失败时，读路径能返回最终一致状态和告警，不丢失长期记忆提交；重试成功后状态可收敛。
+- 用户隔离、删除合规和版本回滚在全量 consolidation 后仍成立。
+
+## 5.10 Feature flag、灰度和上线顺序
+
+### 默认值与依赖
+
+所有 flag 默认关闭，开启顺序不能跳过依赖：
+
+```text
+local rollout write
+  → local manifest/read-repair
+  → rollout read path (small cohort)
+  → qiniu adapter in staging
+  → qiniu object write (small cohort)
+  → markdown v2 dual-read
+  → memory prime
+  → memory tools
+  → pending_batch
+  → consolidation
+  → KG dual-write
+```
+
+建议将写入和读取拆成独立 flag，避免“读路径已切换但没有可回退数据”。每一次 flag 变更记录操作者、时间、作用域和回滚值；不在代码中把灰度逻辑写死成用户 ID 名单。
+
+### 灰度阶段
+
+1. **Shadow write**：rollout 只写本地/Fake object，旧 messages/events/checkpoint 继续权威；比较行数、hash、延迟和失败率。
+2. **Shadow read**：reader 同时读取旧正文和 rollout，结果只用于比对，不影响回答；采样记录 mismatch 原因，禁止记录正文到普通日志。
+3. **受控读切换**：按环境/租户/明确 user cohort 开启 rollout read；保留 HTTP/DB fallback，观察一个完整 retention 窗口内的错误率。
+4. **对象存储切换**：先 staging，再小规模生产；没有七牛账号前只完成 adapter 验证，不进入此阶段。
+5. **长期记忆切换**：先 schema v2 双读，再 prime，再 tools；确认引用与 token 预算稳定后才启用 batch/consolidation。
+
+### 关闭与回滚
+
+- 任一 rollout 读错误率、hash mismatch、manifest orphan、source read latency 或 deletion lag 超阈值，立即关闭 read flag，回退到旧 messages/HTTP reader；不要删除 rollout 数据，先保留诊断。
+- batch/consolidation 异常只关闭对应 flag，已提交的 immutable versions 不回滚；通过 operation retry/dead-letter 和人工 rollback 处理。
+- KG 一路失败不关闭长期记忆写入，先关闭 KG dual-write 并保留告警；读路径使用最后成功投影和冲突标记。
+- 回滚数据库 schema 只允许在确认没有新写入依赖时执行；通常优先应用层回退而不是 downgrade 已经承载数据的 migration。
+
+## 5.11 测试矩阵与验收门槛
+
+| 层级 | 必测内容 | 主要位置/命令 |
+|---|---|---|
+| JSONL/对象存储单元 | codec、policy、文件命名、flush ack、队列背压、hash、range read、幂等 put | `tests/unit/test_rollout_*.py`、`tests/unit/test_object_store_*.py` |
+| Conversation 单元 | recorder 注入点、节点失败降级、manifest repository、reader fallback、删除保护 | `tests/conversation/test_rollout_*.py`、现有 conversation tests |
+| Memory 单元 | v1/v2 双读、frontmatter/link validator、migration cursor、prime、tools budget、batch state、consolidation fallback | `tests/unit/test_markdown_schema*.py`、`tests/unit/test_memory_*.py` |
+| 契约 | rollout JSONL schema、内部 memory tool contract、可选 API/OpenAPI 字段 | `uv run pytest tests/contract` |
+| 集成 | 本地对象写入→manifest→source read→memory evidence；batch 多副本 claim；KG 双路最终一致 | `tests/integration/`、`tests/conversation/` |
+| 故障恢复 | kill -9、上传成功/PG 失败、PG 成功/对象缺失、checkpoint 清除、scheduler 中断、重复 retry | `tests/failure_recovery/` 与新增 fixture |
+| 前端回归 | 若 API schema 变化，验证 conversation/引用展示和错误信封；无 UI 变化时不扩大前端改动 | `cd frontend && npm run lint && npm run test && npm run build` |
+| 静态门禁 | Ruff、format、mypy | `scripts/ci-local.sh backend-lint` |
+| 全量门禁 | 后端单元/集成、前端、契约、容器构建 | `scripts/ci-local.sh [stage ...]` |
+
+### 验收门槛
+
+- 后端 lint、format、mypy 全绿；现有单元测试全绿；涉及数据库的集成测试只使用 `*_test` 独立库。
+- 新增或修改路由/schema 后，更新 OpenAPI snapshot，并在 review 中确认差异；无路由变化则不生成无关 snapshot diff。
+- rollout 的端到端 fixture 必须同时验证“事实源可读”和“旧回退可读”，不能只测 happy path。
+- 每个恢复/删除/重试测试都要断言数据库状态、文件/对象状态和可观测指标，不只断言 HTTP 200。
+- 七牛没有账号时，CI 必须完全通过本地/Fake adapter；真正 Kodo smoke 只在凭据注入的受控环境运行。
+
+## 5.12 数据兼容、迁移、回滚与故障处理
+
+### 兼容窗口
+
+采用至少三个发布阶段：
+
+1. **扩展版**：新表/列/契约加入，旧代码仍可运行；新代码默认只旁路写入。
+2. **双读版**：rollout/Markdown v2 具备 shadow read 和旧回退；memory tool/batch 仍关闭。
+3. **切换版**：按灰度打开读写；保留一个完整 retention 窗口后才评估清理旧正文/旧索引字段。
+
+`conversation_messages.content` 在没有完成全量 pointer 回填、read-repair 观察和删除演练前不能设为不可空/直接清空。历史 conversation event 和 checkpoint retention 不因 rollout 引入而提前删除。
+
+### 迁移失败处理
+
+- DB migration 失败：停止发布，保留旧应用；先修复 migration 或回滚未承载数据的扩展迁移，不手工改 production schema。
+- Markdown migration 失败：按 user/cursor 重试；坏文档进入 quarantine/告警，不覆盖历史版本，不阻塞其他用户。
+- Rollout manifest mismatch：关闭 rollout read，保留对象和索引供 CLI verify/reconcile；不得用脚本批量删除未知对象。
+- Kodo 认证/region/限流失败：分类记录、退避重试；local 只作为本地/开发适配器，不把 production credentials 失败静默降级成 local。
+- batch LLM 超限：按决议只降级 summary 的主题路由段；批次成员状态仍按 operation 语义落定，不能假成功。
+- KG 更新失败：接受最终一致并告警；重试使用 document version/checksum + batch_operation_id 幂等键。
+
+### 操作 Runbook 与指标
+
+新增或补充 `docs/ops/`：
+
+- `rollout-reconcile-runbook.md`：孤儿对象、悬空 manifest、pointer 越界、hash mismatch；
+- `rollout-retention-runbook.md`：热缓存/对象/归档/tombstone 清理；
+- `memory-batch-runbook.md`：scheduler、批次 cursor、成员状态、dead letter、重跑；
+- `memory-schema-v2-migration-runbook.md`：dry-run、暂停、续跑、回滚 current；
+- `memory-kg-consistency-runbook.md`：双路失败、冲突标注、幂等重试和告警确认。
+
+至少记录以下指标/日志字段：
+
+- rollout：`rollout_records_total`、`rollout_write_failed_total`、`rollout_flush_latency`、`rollout_queue_depth`、`rollout_segment_bytes`、`manifest_orphan_total`、`manifest_hash_mismatch_total`、`rollout_read_repair_total`；
+- reader：来源类型（local/object/db/http）、fallback 次数、range read latency、删除拦截数；
+- memory prime/tools：prime 命中/降级、tool calls per turn、budget exceeded、citation missing、token/truncation；
+- batch：eligible backlog、batch size、oldest `next_run_at` lag、成员状态、retry/dead-letter、consolidation latency；
+- KG：双路版本差异、`kg_projection_update_failed`、冲突数、最终一致收敛时间。
+
+日志统一带 `trace_id`、`user_id`（按隐私要求脱敏或哈希）、`thread_id`、`turn_id`、`batch_operation_id`、`segment_id`；禁止把 message 正文、Kodo 凭据和签名 URL 写入普通日志。
+
+## 5.13 逐文件改动清单
+
+以下清单用于实现时建立任务卡。这里只列预期改动面，不代表本轮已经修改这些文件。
+
+### Conversation
+
+```text
+backend/conversation/contracts/rollout.py                 新增 JSONL/manifest 契约
+backend/conversation/contracts/object_store.py            新增对象存储协议
+backend/conversation/rollout/__init__.py                 新增 rollout 包
+backend/conversation/rollout/codec.py                    新增 JSONL 编解码
+backend/conversation/rollout/file_naming.py              新增路径/命名
+backend/conversation/rollout/policy.py                   新增持久化白名单
+backend/conversation/rollout/recorder.py                 新增 recorder/writer
+backend/conversation/rollout/object_store.py             新增 local/fake 抽象实现
+backend/conversation/rollout/qiniu_kodo.py               预留七牛适配器
+backend/conversation/rollout/reader.py                   新增 pointer reader
+backend/conversation/rollout/reconcile.py                新增 reconcile
+backend/conversation/persistence/rollout_manifests.py    新增 manifest repository
+backend/conversation/persistence/messages.py             增加 pointer/回退
+backend/conversation/services/source_read_service.py     rollout 优先读取
+backend/conversation/services/thread_deletion.py         segment/object 删除合规
+backend/conversation/graph/state.py                      注入 recorder/工具状态
+backend/conversation/graph/builder.py                    graph 装配与 tool loop
+backend/conversation/graph/runner.py                     rollout 恢复入口
+backend/conversation/graph/nodes/snapshot.py             rollout 记录
+backend/conversation/graph/nodes/memory.py               prime/tool 读路径
+backend/conversation/graph/nodes/rewrite.py              rewrite 记录
+backend/conversation/graph/nodes/evidence.py             evidence 引用记录
+backend/conversation/graph/nodes/answer.py               answer/tool continuation
+backend/conversation/graph/nodes/finalize.py             flush/citation/封存触发
+backend/conversation/worker/main.py                      composition root/生命周期
+backend/conversation/worker/graph_worker.py              flush/reconcile/maintenance
+backend/conversation/worker/scheduler.py                 retention/reconcile 调度（如存在）
+backend/settings.py                                       flags、Kodo 配置、预算
+conversation_migrations/versions/<next>_conversation_rollout_manifest.py
+```
+
+### Memory
+
+```text
+backend/memory/contracts/batch.py                        新增批次契约
+backend/memory/storage/markdown_schema.py                 v1/v2 双读与 validator
+backend/memory/storage/local_markdown.py                 v2 immutable render/write
+backend/memory/persistence/index_entries.py              index v2 projection/search
+backend/memory/persistence/operations.py                 pending_batch/幂等/状态
+backend/memory/services/context_service.py               prime/tool/双源协调
+backend/memory/services/memory_service.py                batch/引用/提交适配
+backend/memory/graph/prompts/build_mutation_plan_v2.md   v2 planner
+backend/memory/graph/prompts/extract_candidates_v3.md    候选路由字段
+backend/memory/graph/prompts/summary_consolidate_v1.md   summary 生成契约
+backend/memory/graph/summary.py                           文档 mutation/consolidation
+backend/memory/graph/builder.py                           批量 graph（若需新增）
+backend/memory/graph/runner.py                            batch checkpoint/recovery
+backend/memory/worker/scheduler.py                        migration/batch 调度
+backend/memory/worker/worker.py                           batch worker/lease
+backend/memory/worker/maintenance.py                      verify/retention（如现有入口）
+alembic/versions/<next>_memory_batch_operations.py
+```
+
+### Tests / docs / config
+
+```text
+tests/unit/test_rollout_*.py
+tests/conversation/test_rollout_*.py
+tests/failure_recovery/test_rollout_*.py
+tests/unit/test_markdown_schema_v2.py
+tests/unit/test_memory_tools.py
+tests/unit/test_memory_batch.py
+tests/integration/test_rollout_source_read.py
+tests/integration/test_memory_batch.py
+tests/contract/...
+docs/ops/rollout-reconcile-runbook.md
+docs/ops/rollout-retention-runbook.md
+docs/ops/memory-batch-runbook.md
+docs/ops/memory-schema-v2-migration-runbook.md
+docs/ops/memory-kg-consistency-runbook.md
+.env.example
+```
+
+若实现前发现某个路径在当前分支不存在，不新造平行入口；先沿用现有 composition root、worker 或 persistence 模块，并在任务卡中更新清单。
+
+## 5.14 迁移命令、发布检查与交付物
+
+### 数据库迁移顺序
+
+在测试环境和生产环境都按以下顺序执行：
+
+```text
+1. postgres ready
+2. `uv run alembic -c conversation_alembic.ini upgrade head`
+3. `uv run alembic upgrade head`
+4. 其他域迁移按 AGENTS.md 既定顺序执行（auth/community/study/rag）
+5. 部署兼容版应用（所有新 flag 关闭）
+6. 运行 rollout manifest/index dry-run 与 Markdown v2 migration dry-run
+7. 先打开 shadow write，再打开 shadow read
+8. 完成一轮恢复、删除、retention 和 batch 演练后才进入小流量灰度
+```
+
+数据库集成测试必须先启动仓库规定的 PostgreSQL，并使用 `memory_test`、`conversation_test` 等独立测试库；绝不对开发/生产库运行测试或迁移演练。
+
+### 每个 Phase 的交付物
+
+| Phase | 必须交付 | 不能带入下一阶段的问题 |
+|---|---|---|
+| 0 | 契约、配置、兼容迁移、测试夹具 | 旧代码不能启动、flag 关闭仍改变行为 |
+| 1 | Local recorder、JSONL fixture、flush/崩溃测试 | 行顺序不确定、半行、writer 失败吞掉、误替代 SSE |
+| 2 | manifest、pointer reader、reconcile、删除/重放测试 | 悬空 manifest、读到已删除正文、恢复依赖 DB 重建 |
+| 3 | Local/Fake/Kodo adapter、生命周期 runbook | 业务层耦合 SDK、无账号仍访问网络、凭据落日志 |
+| 4 | v1/v2 parser、immutable migration scheduler、prompt binding | 原地改历史、checksum 破坏、v1 无法读取 |
+| 5 | prime、memory.search/read、6 次预算、引用 | 无限 tool loop、跨用户读取、关闭 flag 破坏旧图 |
+| 6 | pending_batch、nightly graph、状态/续跑/死信 | evidence 丢失、跨用户混批、批次不可恢复 |
+| 7 | consolidation、summary/link/alias/KG 协同 | 全局重写不可回滚、冲突静默覆盖、KG 失败阻塞长期记忆 |
+
+### 最终交付定义
+
+只有以下条件全部满足，才可把本次重构标记为“实现完成”：
+
+- 所有 Phase 的代码、迁移、测试、runbook 和配置说明进入独立实现分支/worktree，且 review 通过；
+- 生产默认仍可通过关闭 flag 使用旧链路，且回滚演练成功；
+- 本地/Fake object store 全量测试通过；七牛账号准备好后，受控 staging smoke 通过；
+- rollout source read、Markdown v2 双读/迁移、memory tools、pending_batch、consolidation、KG 最终一致均有可重复验收记录；
+- `scripts/ci-local.sh` 所需阶段全绿，OpenAPI snapshot（如有）已确认，且没有把生成物、密钥或参考项目改动带入提交。
+
+---
+
+## 实施阶段未决事项登记
+
+前四章已确认的四类问题（批量 evidence、schema v2 迁移、rollout 多副本写入、Kodo 预设）不再重复提问。实际编码前只需在任务卡中补齐以下部署参数，不影响本轮计划成立：
+
+- 七牛 Kodo 的 bucket、region、私有域名/下载域名、生命周期规则和凭据注入方式；账号准备前保持空值和 `local` 默认。
+- 生产对象存储是否要求强制私有读、签名 URL 有效期和跨区域容灾；未确认前 adapter 只实现协议，不写死部署策略。
+- rollout retention 与现有 conversation event/checkpoint retention 的最终保留窗口；未确认前沿用当前 retention 并分别计量。
+- 灰度 cohort 的运维配置入口；未确认前只支持环境级/显式配置，不把用户名单写死。
+
+这些事项属于部署与运行参数，不影响数据模型、reader 协议和本地测试；在需要据此写生产配置或上线 runbook 时再由用户确认。
