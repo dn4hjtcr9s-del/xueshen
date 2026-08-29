@@ -110,11 +110,11 @@ class TestReschedule:
         _plan_id, task = await _plan_with_task(client)
         r = await client.post(
             f"/api/v1/study/tasks/{task['task_id']}/reschedule",
-            json={"scheduled_date": "2026-08-21", "expected_version": 1},  # 周五
+            json={"scheduled_date": "2026-08-31", "expected_version": 1},  # 周一
             headers={**auth(USER_A), "Idempotency-Key": "rs1"},
         )
         assert r.status_code == 200, r.text
-        assert r.json()["scheduled_date"] == "2026-08-21"
+        assert r.json()["scheduled_date"] == "2026-08-31"
         assert r.json()["version"] == 2
 
 
