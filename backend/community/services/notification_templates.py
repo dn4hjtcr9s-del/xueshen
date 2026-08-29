@@ -34,3 +34,13 @@ def reply_marked_solved_title() -> str:
 def reply_marked_solved_body(post_title: str) -> str:
     """帖子标题截断至 100 个 Unicode 字符，超出加 …（§6.6）。"""
     return _truncate(post_title)
+
+
+def application_approved_body(name: str) -> str:
+    """§7.8：你申请的板块「{name}」已通过审核。"""
+    return f"你申请的板块「{name}」已通过审核"
+
+
+def application_rejected_body(name: str, reason: str) -> str:
+    """§7.8：你申请的板块「{name}」未通过审核：{reason}。"""
+    return f"你申请的板块「{name}」未通过审核：{reason}"

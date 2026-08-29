@@ -566,6 +566,10 @@ def create_app(
 
     @app.on_event("startup")
     async def _startup() -> None:
+        # §7.10：同步 Pillow 像素上限作为显式拒绝后的双保险
+        from backend.community.storage.validation import configure_image_security
+
+        configure_image_security(settings)
         if app.state.runtime is None:
             app.state.runtime = await _build_runtime(settings, app)
         if app.state.auth_runtime is None:
@@ -689,6 +693,7 @@ def create_app(
                     session_factory=community_runtime.database.session_factory,
                     interval_seconds=settings.community_maintenance_interval_seconds,
                     settings=settings,
+                    storage=community_runtime.storage,
                 )
                 app.state.community_maintenance_task = asyncio.create_task(
                     maintenance.run_forever()

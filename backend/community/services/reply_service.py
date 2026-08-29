@@ -5,6 +5,8 @@
   Outbox（forum_reply，topic_hints=帖子板块 slug）与 post_replied 通知；
 - 删除回复：仅该回复 soft delete + source deletion Outbox（§11.1）；
   若为 solved_reply_id 同时清除（不递增 generation、不通知，D34）。
+
+按 community-rebuild-plan.md v3.9 增补 board_slug 与条件删除。
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from backend.community.persistence import replies as replies_repo
 from backend.community.services import notification_templates
 from backend.community.services.content_safety import reply_content_hash, validate_reply
 from backend.community.services.public_user_profile_reader import PublicUserProfileReader
+from backend.settings import Settings
 from backend.shared.cursor import canonical_json
 
 _DELETION_IDEMPOTENCY_KEY_PREFIX = "community:community.source_deleted:"
@@ -48,9 +51,11 @@ class ReplyService:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         profile_reader_factory: Callable[[], PublicUserProfileReader],
+        settings: Settings,
     ) -> None:
         self._session_factory = session_factory
         self._profile_reader_factory = profile_reader_factory
+        self._settings = settings
 
     # ------------------------------------------------------------------
     # 回复（§8.4）
@@ -63,16 +68,12 @@ class ReplyService:
         post_id: UUID,
         body: str,
         idempotency_key: str,
-        max_chars: int,
-        idempotency_retention_days: int,
     ) -> dict[str, Any]:
         profile = await self._profile_reader_factory().get_active_profile(user_id)
-        body = validate_reply(body, max_chars=max_chars)
+        body = validate_reply(body, max_chars=self._settings.community_reply_max_length)
         payload_hash = _idempotency_payload_hash({"post_id": str(post_id), "body": body})
         async with self._session_factory() as session:
             async with session.begin():
-                # Critical 1：先抢占幂等键（唯一约束为并发最终裁决），赢家才写业务；
-                # 败者重读幂等行并返回原回复，绝不重复创建。
                 reply_id = uuid4()
                 inserted = await idem_repo.insert_request(
                     session,
@@ -82,7 +83,7 @@ class ReplyService:
                     payload_hash=payload_hash,
                     resource_type="reply",
                     resource_id=reply_id,
-                    retention_days=idempotency_retention_days,
+                    retention_days=self._settings.community_idempotency_retention_days,
                 )
                 if not inserted:
                     existing = await idem_repo.get_request(
@@ -91,7 +92,7 @@ class ReplyService:
                         operation="create_reply",
                         idempotency_key=idempotency_key,
                     )
-                    if existing is None:  # 并发冲突事务已提交，幂等行必然可见
+                    if existing is None:
                         raise CommunityIdempotencyConflictError("幂等键并发冲突且无法读取原资源")
                     if existing["payload_hash"] != payload_hash:
                         raise CommunityIdempotencyConflictError(
@@ -104,7 +105,6 @@ class ReplyService:
                 if str(post["status"]) == "hidden":
                     raise CommunityNotFoundError("帖子不存在或无权访问")
                 if str(post["status"]) == "deleted" or str(post["discussion_status"]) != "open":
-                    # D31：deleted 帖子的回复统一 POST_CLOSED（closed 同错误码）
                     raise CommunityPostClosedError("帖子已关闭，不能回复")
                 await replies_repo.insert_reply(
                     session,
@@ -131,7 +131,7 @@ class ReplyService:
             return await self._reply_view_for_user(reply_id)
 
     # ------------------------------------------------------------------
-    # 删除回复（§11.1）
+    # 删除回复（§11.1 / §7.14）
     # ------------------------------------------------------------------
 
     async def delete_reply(self, *, actor_user_id: UUID, reply_id: UUID) -> None:
@@ -144,13 +144,14 @@ class ReplyService:
                 if UUID(str(reply["user_id"])) != actor_user_id:
                     raise CommunityNotFoundError("回复不存在或无权访问")
                 if str(reply["status"]) == "deleted":
-                    return  # 幂等成功（不重复生成 deletion event，§8.5）
+                    return
                 post_id = UUID(str(reply["post_id"]))
-                await replies_repo.mark_reply_deleted(session, reply_id)
+                deleted_rows = await replies_repo.mark_reply_deleted(session, reply_id)
+                if deleted_rows == 0:
+                    return
                 await posts_repo.decrement_reply_count(session, post_id)
                 post = await posts_repo.get_post_any_status(session, post_id)
                 if post is not None and str(post.get("solved_reply_id")) == str(reply_id):
-                    # D34：清除解决标记，不递增 generation、不产生通知
                     await posts_repo.set_solution(
                         session,
                         post_id,
@@ -176,11 +177,7 @@ class ReplyService:
         post: dict[str, Any],
         content_hash: str,
     ) -> None:
-        """§7.5 冻结 payload schema（community.reply_created）：topic_hints 取帖子板块。
-
-        source_version=content_hash（§7.2 冻结）；window_* 可空字段与
-        ActivityEvidence 对齐（§7.5），MVP 不设窗口。
-        """
+        """§7.5/§7.7 冻结 payload schema（community.reply_created）。"""
         event_type = "community.reply_created"
         await outbox_repo.insert_event(
             session,
@@ -214,7 +211,7 @@ class ReplyService:
         actor_user_id: UUID,
         body: str,
     ) -> None:
-        """§7.7：帖子作者回复自己的帖子不产生 post_replied 通知。"""
+        """§7.7/§7.8：帖子作者回复自己的帖子不产生 post_replied 通知。"""
         recipient = UUID(str(post["user_id"]))
         if recipient == actor_user_id:
             return
@@ -229,6 +226,7 @@ class ReplyService:
             event_type="post_replied",
             post_id=post["post_id"],
             reply_id=reply_id,
+            board_slug=post.get("slug"),
             title=notification_templates.post_replied_title(actor),
             body=notification_templates.post_replied_body(body),
             dedupe=dedupe,
@@ -237,7 +235,7 @@ class ReplyService:
     async def _enqueue_reply_source_deleted(
         self, session: AsyncSession, *, user_id: UUID, reply_id: UUID
     ) -> None:
-        """§11.2 冻结：稳定 event_id（UUIDv5）+ 幂等键，重放不重复产生删除事实。"""
+        """§11.2 冻结：稳定 event_id（UUIDv5）+ 幂等键。"""
         source_ref = f"community:reply:{reply_id}"
         event_id = source_deletion_id_for(user_id, source_ref)
         await outbox_repo.insert_event(

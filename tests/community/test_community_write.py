@@ -65,17 +65,20 @@ async def _make_app(community_session_factory, *, purge_token: str | None = None
     )()
     profile_reader = FakeProfileReader()
     reply_service = ReplyService(
-        session_factory=community_session_factory, profile_reader_factory=lambda: profile_reader
+        session_factory=community_session_factory,
+        profile_reader_factory=lambda: profile_reader,
+        settings=settings,
     )
     post_command = PostCommandService(
         session_factory=community_session_factory,
         profile_reader_factory=lambda: profile_reader,
         reply_service=reply_service,
+        settings=settings,
     )
     runtime = CommunityRuntime(
         settings=settings,
         database=db,
-        post_service=PostReadService(community_session_factory),
+        post_service=PostReadService(community_session_factory, settings=settings),
         post_command_service=post_command,
         reply_service=reply_service,
         profile_reader_factory=lambda: profile_reader,
@@ -141,6 +144,13 @@ async def _seed_reply(session_factory, post_id: str, *, author=USER_B) -> str:
                     "VALUES (:rid, :pid, :uid, 'bob', '回复', :hash, 'active', now(), now())"
                 ),
                 {"rid": reply_id, "pid": post_id, "uid": author, "hash": "0" * 64},
+            )
+            await session.execute(
+                text(
+                    "UPDATE community_posts SET reply_count = reply_count + 1, "
+                    "updated_at = now() WHERE post_id = :pid"
+                ),
+                {"pid": post_id},
             )
     return reply_id
 

@@ -99,6 +99,22 @@ async def get_request(
     return dict(row) if row is not None else None
 
 
+async def delete_request_by_resource(
+    session: AsyncSession,
+    *,
+    resource_type: str,
+    resource_id: UUID,
+) -> None:
+    """orphan 物理删除附件时同事务删除其幂等记录（§7.11）。"""
+    await session.execute(
+        text(
+            "DELETE FROM community_idempotency_requests "
+            "WHERE resource_type = :resource_type AND resource_id = :resource_id"
+        ),
+        {"resource_type": resource_type, "resource_id": resource_id},
+    )
+
+
 async def delete_expired(session: AsyncSession, *, batch_size: int) -> int:
     """清理过期记录（§12.4：保留 7 天，按 batch 分批删除）。"""
     now = datetime.now(UTC)

@@ -84,3 +84,48 @@ def _validate_source_item(content: str) -> None:
         raise _reject("内容超过允许长度")
     if len(content.encode("utf-8")) > _SOURCE_BUNDLE_MAX_UTF8_BYTES:
         raise _reject("内容体积超过允许范围")
+
+
+def validate_board_name(name: str, *, max_chars: int) -> str:
+    """吧名校验：trim + NFC；非空；长度。"""
+    import unicodedata
+
+    name = name.strip()
+    name = unicodedata.normalize("NFC", name)
+    if not name:
+        raise CommunityContentInvalidError("吧名不能为空", field="name")
+    if len(name) > max_chars:
+        raise CommunityContentInvalidError(f"吧名不能超过 {max_chars} 个字符", field="name")
+    _validate_no_forbidden_control(name)
+    return name
+
+
+def validate_board_description(description: str, *, max_chars: int) -> str:
+    """简介校验：trim；允许空；长度；控制字符。"""
+    description = description.strip()
+    if len(description) > max_chars:
+        raise CommunityContentInvalidError(f"简介不能超过 {max_chars} 个字符", field="description")
+    _validate_no_forbidden_control(description)
+    return description
+
+
+def validate_application_reason(reason: str, *, max_chars: int) -> str:
+    """申请理由校验：trim 后非空；长度；控制字符。"""
+    reason = reason.strip()
+    if not reason:
+        raise CommunityContentInvalidError("申请理由不能为空", field="reason")
+    if len(reason) > max_chars:
+        raise CommunityContentInvalidError(f"申请理由不能超过 {max_chars} 个字符", field="reason")
+    _validate_no_forbidden_control(reason)
+    return reason
+
+
+def validate_reject_reason(reason: str, *, max_chars: int) -> str:
+    """拒绝理由校验：trim 后非空；长度；控制字符。"""
+    reason = reason.strip()
+    if not reason:
+        raise CommunityContentInvalidError("拒绝理由不能为空", field="reason")
+    if len(reason) > max_chars:
+        raise CommunityContentInvalidError(f"拒绝理由不能超过 {max_chars} 个字符", field="reason")
+    _validate_no_forbidden_control(reason)
+    return reason

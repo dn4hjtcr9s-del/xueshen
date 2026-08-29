@@ -22,6 +22,9 @@ dependencies = [
     "bcrypt>=4.2,<6.0",
     # 附录 A.7（v1.4）：TokenCounter 全链路统一 tiktoken o200k_base，主依赖必需
     "tiktoken>=0.11,<1",
+    "qiniu>=7,<8",
+    "pillow>=11,<13",
+    "python-multipart>=0.0.20",
 ]
 
 [project.optional-dependencies]
@@ -68,7 +71,7 @@ strict = true
 mypy_path = "."
 
 [[tool.mypy.overrides]]
-module = ["langgraph.*", "langgraph_checkpoint.*", "testcontainers.*"]
+module = ["langgraph.*", "langgraph_checkpoint.*", "testcontainers.*", "qiniu.*"]
 ignore_missing_imports = true
 
 # LangGraph StateGraph 泛型与 Send 动态节点类型无法在 strict 模式精确表达，

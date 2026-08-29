@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -427,7 +428,70 @@ class Settings(BaseSettings):
     community_notification_retention_days: int = Field(
         default=90, alias="COMMUNITY_NOTIFICATION_RETENTION_DAYS"
     )
-    community_cleanup_batch_size: int = Field(default=500, alias="COMMUNITY_CLEANUP_BATCH_SIZE")
+    community_cleanup_batch_size: int = Field(
+        default=500, ge=1, le=5000, alias="COMMUNITY_CLEANUP_BATCH_SIZE"
+    )
+
+    # Community V2 重建（community-rebuild-plan.md v3.9）
+    community_v2_enabled: bool = Field(default=False, alias="COMMUNITY_V2_ENABLED")
+    community_storage_backend: Literal["local", "kodo"] = Field(
+        default="local", alias="COMMUNITY_STORAGE_BACKEND"
+    )
+    community_local_upload_dir: str = Field(
+        default=".local/uploads", alias="COMMUNITY_LOCAL_UPLOAD_DIR"
+    )
+    kodo_access_key: str | None = Field(default=None, alias="KODO_ACCESS_KEY")
+    kodo_secret_key: str | None = Field(default=None, alias="KODO_SECRET_KEY")
+    kodo_bucket: str | None = Field(default=None, alias="KODO_BUCKET")
+    kodo_region: str = Field(default="z0", alias="KODO_REGION")
+    kodo_cdn_domain: str | None = Field(default=None, alias="KODO_CDN_DOMAIN")
+    kodo_connect_timeout_seconds: int = Field(
+        default=10, ge=1, le=120, alias="KODO_CONNECT_TIMEOUT_SECONDS"
+    )
+    kodo_read_timeout_seconds: int = Field(
+        default=30, ge=1, le=300, alias="KODO_READ_TIMEOUT_SECONDS"
+    )
+    community_attachment_max_per_post: int = Field(
+        default=3, ge=1, le=3, alias="COMMUNITY_ATTACHMENT_MAX_PER_POST"
+    )
+    community_image_max_bytes: int = Field(
+        default=5_242_880, ge=1024, le=5_242_880, alias="COMMUNITY_IMAGE_MAX_BYTES"
+    )
+    community_image_max_pixels: int = Field(
+        default=40_000_000, ge=1_000_000, le=40_000_000, alias="COMMUNITY_IMAGE_MAX_PIXELS"
+    )
+    community_orphan_ttl_hours: int = Field(
+        default=24, ge=1, le=168, alias="COMMUNITY_ORPHAN_TTL_HOURS"
+    )
+    community_attachment_deleted_retention_days: int = Field(
+        default=30, ge=1, le=365, alias="COMMUNITY_ATTACHMENT_DELETED_RETENTION_DAYS"
+    )
+    community_board_name_max_chars: int = Field(
+        default=20, ge=1, le=20, alias="COMMUNITY_BOARD_NAME_MAX_CHARS"
+    )
+    community_board_slug_max_chars: int = Field(
+        default=30, ge=2, le=30, alias="COMMUNITY_BOARD_SLUG_MAX_CHARS"
+    )
+    community_board_description_max_chars: int = Field(
+        default=100, ge=1, le=100, alias="COMMUNITY_BOARD_DESCRIPTION_MAX_CHARS"
+    )
+    community_application_reason_max_chars: int = Field(
+        default=500, ge=1, le=500, alias="COMMUNITY_APPLICATION_REASON_MAX_CHARS"
+    )
+    community_reject_reason_max_chars: int = Field(
+        default=200, ge=1, le=200, alias="COMMUNITY_REJECT_REASON_MAX_CHARS"
+    )
+    community_rate_limit_upload_per_hour: int = Field(
+        default=20, ge=1, le=10000, alias="COMMUNITY_RATE_LIMIT_UPLOAD_PER_HOUR"
+    )
+    community_rate_limit_application_per_day: int = Field(
+        default=5, ge=1, le=100, alias="COMMUNITY_RATE_LIMIT_APPLICATION_PER_DAY"
+    )
+    community_rate_limit_admin_review_per_hour: int = Field(
+        default=60, ge=1, le=10000, alias="COMMUNITY_RATE_LIMIT_ADMIN_REVIEW_PER_HOUR"
+    )
+    community_admin_user_ids: str = Field(default="", alias="COMMUNITY_ADMIN_USER_IDS")
+
     # 内容限制（§6.2）
     community_post_body_max_length: int = Field(
         default=19_500, alias="COMMUNITY_POST_BODY_MAX_LENGTH"
@@ -604,6 +668,65 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("kodo_cdn_domain", mode="before")
+    @classmethod
+    def validate_kodo_cdn_domain(cls, value: object) -> object:
+        """§7.9：裸域名 RFC 校验；空/None 保留；大写自动转小写。"""
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        if not isinstance(value, str):
+            return value
+        domain = value.strip().lower()
+        if not domain:
+            return None
+        labels = domain.split(".")
+        if len(labels) < 2:
+            raise ValueError("KODO_CDN_DOMAIN 必须至少包含两个 label")
+        label_re = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+        for label in labels:
+            if not label or len(label) > 63 or not __import__("re").match(label_re, label):
+                raise ValueError(f"KODO_CDN_DOMAIN label 非法: {label}")
+            if label.startswith("xn--"):
+                raise ValueError("KODO_CDN_DOMAIN 不支持 punycode/国际化域名")
+        if len(domain) > 253:
+            raise ValueError("KODO_CDN_DOMAIN 总长度不得超过 253")
+        return domain
+
+    @field_validator("kodo_region")
+    @classmethod
+    def validate_kodo_region(cls, value: str) -> str:
+        """§7.9：Region 合法列表冻结。"""
+        allowed = {"z0", "z1", "z2", "na0", "as0", "cn-east-2"}
+        if value not in allowed:
+            raise ValueError(f"KODO_REGION 必须是 {allowed} 之一")
+        return value
+
+    @field_validator("community_admin_user_ids", mode="before")
+    @classmethod
+    def validate_community_admin_user_ids(cls, value: object) -> object:
+        """空字符串归一为 ''，后续由 model_validator 强校验。"""
+        if value is None:
+            return ""
+        if isinstance(value, str) and not value.strip():
+            return ""
+        return value
+
+    @property
+    def community_admin_user_ids_set(self) -> frozenset[UUID]:
+        """解析逗号分隔的社区管理员 UUID 列表（去重）。"""
+        result: set[UUID] = set()
+        for raw in self.community_admin_user_ids.split(","):
+            token = raw.strip()
+            if not token:
+                continue
+            try:
+                result.add(UUID(token))
+            except ValueError as exc:
+                raise ValueError(f"COMMUNITY_ADMIN_USER_IDS 包含非法 UUID: {token}") from exc
+        return frozenset(result)
+
     @property
     def study_flags(self) -> dict[str, bool]:
         """Study Feature Flag 快照（§19：进程启动时读入，运行中不热切换）。"""
@@ -732,6 +855,25 @@ class Settings(BaseSettings):
                         raise ValueError(
                             "生产环境启用 Community 删除链路必须配置 MEMORY_API_BASE_URL"
                         )
+                # community-rebuild-plan.md v3.9 §7.9/§7.15：生产必须 kodo 且配置齐备
+                if self.community_storage_backend != "kodo":
+                    raise ValueError(
+                        "生产环境启用 Community 必须设置 COMMUNITY_STORAGE_BACKEND=kodo"
+                    )
+                for field in (
+                    "kodo_access_key",
+                    "kodo_secret_key",
+                    "kodo_bucket",
+                    "kodo_cdn_domain",
+                ):
+                    if not getattr(self, field):
+                        raise ValueError(
+                            f"生产环境启用 Community 必须配置 {self.model_fields[field].alias}"
+                        )
+                if not self.community_admin_user_ids_set:
+                    raise ValueError(
+                        "生产环境启用 Community 必须配置至少一个 COMMUNITY_ADMIN_USER_IDS"
+                    )
             # Study（方案 §19/§21：启用 Study 域必须显式配置数据库 URL 与模型角色，
             # 禁止开发默认凭证进入生产）
             if self.study_domain_enabled:

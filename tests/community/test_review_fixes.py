@@ -74,17 +74,20 @@ async def _make_app(community_session_factory, **settings_overrides):
     )()
     profile_reader = FakeProfileReader()
     reply_service = ReplyService(
-        session_factory=community_session_factory, profile_reader_factory=lambda: profile_reader
+        session_factory=community_session_factory,
+        profile_reader_factory=lambda: profile_reader,
+        settings=settings,
     )
     post_command = PostCommandService(
         session_factory=community_session_factory,
         profile_reader_factory=lambda: profile_reader,
         reply_service=reply_service,
+        settings=settings,
     )
     runtime = CommunityRuntime(
         settings=settings,
         database=db,
-        post_service=PostReadService(community_session_factory),
+        post_service=PostReadService(community_session_factory, settings=settings),
         post_command_service=post_command,
         reply_service=reply_service,
         profile_reader_factory=lambda: profile_reader,
@@ -211,9 +214,9 @@ async def test_hidden_reply_not_exposed_in_detail(
                 text(
                     "INSERT INTO community_posts "
                     "(post_id, user_id, author_display_name, board_id, title, body, "
-                    " content_hash, status, discussion_status, created_at, updated_at, "
-                    " last_activity_at) "
-                    "VALUES (:pid, :uid, 'alice', :bid, 't', 'b', :h, 'active', 'open', "
+                    " content_hash, status, discussion_status, reply_count, "
+                    " created_at, updated_at, last_activity_at) "
+                    "VALUES (:pid, :uid, 'alice', :bid, 't', 'b', :h, 'active', 'open', 1, "
                     " now(), now(), now())"
                 ),
                 {"pid": post_id, "uid": USER_A, "bid": BOARD[0], "h": "0" * 64},
@@ -292,9 +295,9 @@ async def test_purge_positive_path(community_session_factory) -> None:
                 text(
                     "INSERT INTO community_posts "
                     "(post_id, user_id, author_display_name, board_id, title, body, "
-                    " content_hash, status, discussion_status, created_at, updated_at, "
-                    " last_activity_at) "
-                    "VALUES (:pid, :uid, 'alice', :bid, 't', 'b', :h, 'active', 'open', "
+                    " content_hash, status, discussion_status, reply_count, "
+                    " created_at, updated_at, last_activity_at) "
+                    "VALUES (:pid, :uid, 'alice', :bid, 't', 'b', :h, 'active', 'open', 1, "
                     " now(), now(), now())"
                 ),
                 {"pid": post_id, "uid": USER_A, "bid": BOARD[0], "h": "0" * 64},
@@ -398,9 +401,9 @@ async def test_reply_outbox_payload_contract(community_session_factory) -> None:
                 text(
                     "INSERT INTO community_posts "
                     "(post_id, user_id, author_display_name, board_id, title, body, "
-                    " content_hash, status, discussion_status, created_at, updated_at, "
-                    " last_activity_at) "
-                    "VALUES (:pid, :uid, 'alice', :bid, 't', 'b', :h, 'active', 'open', "
+                    " content_hash, status, discussion_status, reply_count, "
+                    " created_at, updated_at, last_activity_at) "
+                    "VALUES (:pid, :uid, 'alice', :bid, 't', 'b', :h, 'active', 'open', 1, "
                     " now(), now(), now())"
                 ),
                 {"pid": post_id, "uid": USER_A, "bid": BOARD[0], "h": "0" * 64},
@@ -446,9 +449,9 @@ async def test_deletion_outbox_key_d32(community_session_factory) -> None:
                 text(
                     "INSERT INTO community_posts "
                     "(post_id, user_id, author_display_name, board_id, title, body, "
-                    " content_hash, status, discussion_status, created_at, updated_at, "
-                    " last_activity_at) "
-                    "VALUES (:pid, :uid, 'alice', :bid, 't', 'b', :h, 'active', 'open', "
+                    " content_hash, status, discussion_status, reply_count, "
+                    " created_at, updated_at, last_activity_at) "
+                    "VALUES (:pid, :uid, 'alice', :bid, 't', 'b', :h, 'active', 'open', 1, "
                     " now(), now(), now())"
                 ),
                 {"pid": post_id, "uid": USER_A, "bid": BOARD[0], "h": "0" * 64},

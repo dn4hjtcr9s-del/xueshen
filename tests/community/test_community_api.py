@@ -60,7 +60,9 @@ async def _make_app(community_session_factory):
         },
     )()
     runtime = CommunityRuntime(
-        settings=settings, database=db, post_service=PostReadService(community_session_factory)
+        settings=settings,
+        database=db,
+        post_service=PostReadService(community_session_factory, settings=settings),
     )
     app.state.community_db = db
     app.state.community_runtime = runtime

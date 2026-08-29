@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -19,15 +18,23 @@ from backend.memory.persistence.database import exec_rowcount
 
 
 def dedupe_key(
-    event_type: str, *, post_id: UUID, reply_id: UUID | None, solution_generation: int | None = None
+    event_type: str,
+    *,
+    post_id: UUID | None = None,
+    reply_id: UUID | None = None,
+    solution_generation: int | None = None,
+    application_id: UUID | None = None,
 ) -> str:
-    """§7.7 去重公式（冻结）。"""
+    """§7.7/§7.8 去重公式（冻结）。"""
     if event_type == "post_replied":
-        assert reply_id is not None
+        assert reply_id is not None and post_id is not None
         return f"post_replied:{post_id}:{reply_id}"
     if event_type == "reply_marked_solved":
-        assert reply_id is not None and solution_generation is not None
+        assert reply_id is not None and post_id is not None and solution_generation is not None
         return f"reply_marked_solved:{post_id}:{reply_id}:{solution_generation}"
+    if event_type in ("application_approved", "application_rejected"):
+        assert application_id is not None
+        return f"{event_type}:{application_id}"
     raise ValueError(f"未知通知事件类型: {event_type}")
 
 
@@ -38,8 +45,9 @@ async def insert_notification(
     recipient_user_id: UUID,
     actor_user_id: UUID,
     event_type: str,
-    post_id: UUID,
-    reply_id: UUID,
+    post_id: UUID | None,
+    reply_id: UUID | None,
+    board_slug: str | None,
     title: str,
     body: str,
     dedupe: str,
@@ -50,9 +58,9 @@ async def insert_notification(
         text(
             "INSERT INTO community_notifications "
             "(notification_id, recipient_user_id, actor_user_id, event_type, "
-            " post_id, reply_id, title, body, dedupe_key) "
+            " post_id, reply_id, board_slug, title, body, dedupe_key) "
             "VALUES (:nid, :recipient, :actor, :event_type, :post_id, :reply_id, "
-            " :title, :body, :dedupe) "
+            " :board_slug, :title, :body, :dedupe) "
             "ON CONFLICT (dedupe_key) DO NOTHING"
         ),
         {
@@ -62,6 +70,7 @@ async def insert_notification(
             "event_type": event_type,
             "post_id": post_id,
             "reply_id": reply_id,
+            "board_slug": board_slug,
             "title": title,
             "body": body,
             "dedupe": dedupe,
@@ -89,7 +98,7 @@ async def list_notifications(
     result = await session.execute(
         text(
             "SELECT notification_id, recipient_user_id, actor_user_id, event_type, "
-            "post_id, reply_id, title, body, read_at, created_at "
+            "post_id, reply_id, board_slug, title, body, read_at, created_at "
             "FROM community_notifications "
             + where
             + " ORDER BY created_at DESC, notification_id DESC LIMIT :limit"
@@ -112,16 +121,15 @@ async def unread_count(session: AsyncSession, *, user_id: UUID) -> int:
 
 async def mark_read(session: AsyncSession, *, user_id: UUID, notification_id: UUID) -> bool:
     """标记单条已读（幂等；仅限收件人本人，§8.6）。"""
-    now = datetime.now(UTC)
     return (
         await exec_rowcount(
             session,
             text(
-                "UPDATE community_notifications SET read_at = :now "
+                "UPDATE community_notifications SET read_at = now() "
                 "WHERE notification_id = :nid AND recipient_user_id = :user_id "
                 "  AND read_at IS NULL"
             ),
-            {"now": now, "nid": notification_id, "user_id": user_id},
+            {"nid": notification_id, "user_id": user_id},
         )
         == 1
     )
@@ -129,12 +137,11 @@ async def mark_read(session: AsyncSession, *, user_id: UUID, notification_id: UU
 
 async def mark_all_read(session: AsyncSession, *, user_id: UUID) -> int:
     """全部已读（§8.6/D14：只更新当前认证用户的未读记录）。"""
-    now = datetime.now(UTC)
     return await exec_rowcount(
         session,
         text(
-            "UPDATE community_notifications SET read_at = :now "
+            "UPDATE community_notifications SET read_at = now() "
             "WHERE recipient_user_id = :user_id AND read_at IS NULL"
         ),
-        {"now": now, "user_id": user_id},
+        {"user_id": user_id},
     )

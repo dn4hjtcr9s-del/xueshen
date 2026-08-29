@@ -298,7 +298,7 @@ class ActivityPublisher:
         async with self._session_factory() as session:
             if source_ref.startswith("community:post:"):
                 post_id = UUID(source_ref.rsplit(":", 1)[-1])
-                row = await posts_repo.get_post_any_status(session, post_id)
+                row = await posts_repo.get_post_for_publisher(session, post_id)
                 if row is None or str(row["status"]) != "active" or not row["eligible_for_memory"]:
                     return None
                 return row

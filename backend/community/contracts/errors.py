@@ -17,6 +17,19 @@ COMMUNITY_ERROR_CODES: frozenset[str] = frozenset(
         "COMMUNITY_IDEMPOTENCY_CONFLICT",
         "COMMUNITY_CURSOR_INVALID",
         "COMMUNITY_RATE_LIMITED",
+        "UPLOAD_TOO_LARGE",
+        "UPLOAD_INVALID_TYPE",
+        "UPLOAD_BOMB_REJECTED",
+        "COMMUNITY_UPLOAD_FAILED",
+        "ATTACHMENT_LIMIT_EXCEEDED",
+        "ATTACHMENT_FORBIDDEN",
+        "ATTACHMENT_CONFLICT",
+        "APPLICATION_DUPLICATE_PENDING",
+        "APPLICATION_ALREADY_REVIEWED",
+        "BOARD_NAME_CONFLICT",
+        "BOARD_SLUG_RESERVED",
+        "REJECT_REASON_INVALID",
+        "ADMIN_REQUIRED",
     }
 )
 
@@ -86,3 +99,104 @@ class CommunityRateLimitedError(CommunityError):
     code = "COMMUNITY_RATE_LIMITED"
     http_status = 429
     retryable = True
+
+
+class UploadTooLargeError(CommunityError):
+    """单图超过尺寸上限（§7.10：422）。"""
+
+    code = "UPLOAD_TOO_LARGE"
+    http_status = 422
+
+
+class UploadInvalidTypeError(CommunityError):
+    """图片类型不合法或无法解码（§7.10：422）。"""
+
+    code = "UPLOAD_INVALID_TYPE"
+    http_status = 422
+
+
+class UploadBombRejectedError(CommunityError):
+    """图片像素超过阈值（§7.10：422）。"""
+
+    code = "UPLOAD_BOMB_REJECTED"
+    http_status = 422
+
+
+class CommunityUploadFailedError(CommunityError):
+    """对象存储上传/删除失败（§7.9/§8：502，实例级 retryable）。"""
+
+    code = "COMMUNITY_UPLOAD_FAILED"
+    http_status = 502
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        field: str | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message, field=field)
+        self.retryable = retryable
+
+
+class AttachmentLimitExceededError(CommunityError):
+    """每帖附件数量超过上限（§8：422）。"""
+
+    code = "ATTACHMENT_LIMIT_EXCEEDED"
+    http_status = 422
+
+
+class AttachmentForbiddenError(CommunityError):
+    """附件不属于当前用户（§7.14：403）。"""
+
+    code = "ATTACHMENT_FORBIDDEN"
+    http_status = 403
+
+
+class AttachmentConflictError(CommunityError):
+    """附件已绑定/不存在/已被清理（§7.14：409）。"""
+
+    code = "ATTACHMENT_CONFLICT"
+    http_status = 409
+
+
+class ApplicationDuplicatePendingError(CommunityError):
+    """用户已有 pending 建吧申请（§7.4：409）。"""
+
+    code = "APPLICATION_DUPLICATE_PENDING"
+    http_status = 409
+
+
+class ApplicationAlreadyReviewedError(CommunityError):
+    """申请已被审核过（§7.4：409）。"""
+
+    code = "APPLICATION_ALREADY_REVIEWED"
+    http_status = 409
+
+
+class BoardNameConflictError(CommunityError):
+    """吧名/slug 已被占用（§7.4：409）。"""
+
+    code = "BOARD_NAME_CONFLICT"
+    http_status = 409
+
+
+class BoardSlugReservedError(CommunityError):
+    """slug 为保留字（§7.4：422）。"""
+
+    code = "BOARD_SLUG_RESERVED"
+    http_status = 422
+
+
+class RejectReasonInvalidError(CommunityError):
+    """拒绝理由不合法（§7.4：422）。"""
+
+    code = "REJECT_REASON_INVALID"
+    http_status = 422
+
+
+class AdminRequiredError(CommunityError):
+    """非管理员访问管理接口（§8：403）。"""
+
+    code = "ADMIN_REQUIRED"
+    http_status = 403

@@ -57,6 +57,7 @@ class CommunityPostSummary(BaseModel):
     reply_count: int
     like_count: int
     viewer_liked: bool
+    attachments: list[CommunityAttachment]
     created_at: datetime
     last_activity_at: datetime
 
@@ -105,13 +106,19 @@ class CommunityNotification(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     notification_id: UUID
-    event_type: Literal["post_replied", "reply_marked_solved"]
+    event_type: Literal[
+        "post_replied",
+        "reply_marked_solved",
+        "application_approved",
+        "application_rejected",
+    ]
     title: str
     body: str
     read_at: datetime | None
     created_at: datetime
     post_id: UUID | None
     reply_id: UUID | None
+    board_slug: str | None
 
 
 class CommunityNotificationPage(BaseModel):
@@ -130,6 +137,32 @@ class CommunityNotificationPage(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class CommunityAttachment(BaseModel):
+    """附件视图（§八）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    attachment_id: UUID
+    url: str
+    width: int
+    height: int
+    mime: str
+    position: int
+
+
+class CommunityAttachmentSummary(BaseModel):
+    """上传成功后返回的附件元信息。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    attachment_id: UUID
+    url: str
+    mime: str
+    width: int
+    height: int
+    size_bytes: int
+
+
 class CreatePostRequest(BaseModel):
     """创建帖子请求（§8.3）：不含 user_id（§9.1 服务端取认证上下文）。"""
 
@@ -138,6 +171,7 @@ class CreatePostRequest(BaseModel):
     board_id: UUID
     title: str
     body: str
+    attachment_ids: list[UUID] | None = None
 
 
 class CreateReplyRequest(BaseModel):
@@ -154,3 +188,69 @@ class ResolveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reply_id: UUID | None
+
+
+class BoardApplicationRequest(BaseModel):
+    """申请建吧请求（§八）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    slug: str
+    description: str
+    reason: str
+
+
+class BoardApplicationView(BaseModel):
+    """建吧申请视图（§八 D44：不含 reviewer_id）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: UUID
+    name: str
+    slug: str
+    description: str
+    reason: str
+    status: Literal["pending", "approved", "rejected"]
+    board_id: UUID | None
+    reviewed_at: datetime | None
+    reject_reason: str | None
+    created_at: datetime
+
+
+class RejectApplicationRequest(BaseModel):
+    """拒绝建吧申请请求。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str
+
+
+class PermissionsResponse(BaseModel):
+    """权限信息（§八）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    is_community_admin: bool
+
+
+class BoardDetailResponse(BaseModel):
+    """板块详情响应（§八 #2）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    board_id: UUID
+    slug: str
+    name: str
+    description: str
+    post_count: int
+    created_at: datetime
+    viewer_is_owner: bool
+
+
+class BoardListResponse(BaseModel):
+    """板块列表响应（§八 #1）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[BoardDetailResponse]

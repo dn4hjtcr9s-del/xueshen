@@ -1,6 +1,6 @@
 """Community 公共 REST API（方案 §8，PR-B 只读 + PR-C 写纵切）。
 
-前缀 /api/v1/community；全部端点要求登录用户（§8）。
+前缀 /api/v1/community；读接口支持可选认证（D46），写接口必须登录。
 游标规则（§8.2/D13）：公共列表/回复分页不绑定 principal；回复游标绑定
 具体 post_id（D39）；通知游标绑定当前用户（私有游标）。
 限流（§9.3/D41）：community.read 覆盖列表/详情/回复分页/通知读取；
@@ -16,16 +16,21 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import BaseModel, ConfigDict
 
 from backend.auth.context import AuthContext
+from backend.community.api.cursor import (
+    issue_private_cursor,
+    issue_public_cursor,
+    resolve_private_cursor,
+    resolve_public_cursor,
+)
 from backend.community.api.dependencies import (
     get_post_command_service,
     get_post_service,
     get_reply_service,
     rate_limit,
-    resolve_private_cursor,
-    resolve_public_cursor,
 )
 from backend.community.contracts.api import (
-    CommunityBoard,
+    BoardDetailResponse,
+    BoardListResponse,
     CommunityNotification,
     CommunityNotificationPage,
     CommunityPostDetail,
@@ -34,6 +39,7 @@ from backend.community.contracts.api import (
     CommunityReplyView,
     CreatePostRequest,
     CreateReplyRequest,
+    PermissionsResponse,
     ResolveRequest,
 )
 from backend.community.contracts.errors import (
@@ -41,8 +47,8 @@ from backend.community.contracts.errors import (
     CommunityCursorInvalidError,
 )
 from backend.community.services.post_service import PostReadService
-from backend.shared.auth_context import get_auth_context
-from backend.shared.cursor import issue_cursor
+from backend.settings import get_settings
+from backend.shared.auth_context import get_auth_context, get_optional_auth_context
 
 router = APIRouter(prefix="/api/v1/community", tags=["community"])
 
@@ -57,24 +63,26 @@ class PostListResponse(BaseModel):
     has_more: bool
 
 
-class BoardListResponse(BaseModel):
-    """板块列表响应（§8.1/D45：无分页仅 {items}）。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    items: list[CommunityBoard]
-
-
 #: 帖子列表游标 route 标识（§8.2 绑定项；与通知/回复路由互斥）
 _POSTS_ROUTE = "community.posts"
 #: 详情回复分页游标 route：绑定具体 post_id 防跨帖子复用（D39）
 _REPLIES_ROUTE = "community.posts.detail.replies"
 
 
+@router.get("/permissions", response_model=PermissionsResponse)
+async def get_permissions(
+    auth: AuthContext | None = Depends(get_optional_auth_context),
+) -> PermissionsResponse:
+    """当前用户是否社区管理员（§八 #21）。"""
+    settings = get_settings()
+    is_admin = auth is not None and auth.user_id in settings.community_admin_user_ids_set
+    return PermissionsResponse(is_community_admin=is_admin)
+
+
 @router.get("/boards", response_model=BoardListResponse)
 async def list_boards(
     request: Request,
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext | None = Depends(get_optional_auth_context),
     _rate: None = Depends(rate_limit("community.read")),
 ) -> BoardListResponse:
     """板块列表（§8.1）：只返回 status=active 板块。"""
@@ -83,21 +91,29 @@ async def list_boards(
     return BoardListResponse(items=items)
 
 
+@router.get("/boards/{slug}", response_model=BoardDetailResponse)
+async def get_board_detail(
+    request: Request,
+    slug: str,
+    auth: AuthContext | None = Depends(get_optional_auth_context),
+    _rate: None = Depends(rate_limit("community.read")),
+) -> BoardDetailResponse:
+    """板块详情（§八 #2）。"""
+    service = get_post_service(request)
+    return await service.get_board_detail_by_slug(slug, auth.user_id if auth else None)
+
+
 @router.get("/posts", response_model=PostListResponse)
 async def list_posts(
     request: Request,
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext | None = Depends(get_optional_auth_context),
     board_id: UUID | None = Query(default=None),
     sort: str = Query(default="latest", pattern="^(latest|unanswered)$"),
     cursor: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=50),
     _rate: None = Depends(rate_limit("community.read")),
 ) -> PostListResponse:
-    """帖子列表（§8.2）：latest/unanswered + 板块筛选 + keyset 游标。
-
-    游标绑定 route/sort/board filter/最后一条排序 key/expiry（§8.2）；
-    公共游标不绑定 principal（D13）。
-    """
+    """帖子列表（§8.2）：latest/unanswered + 板块筛选 + keyset 游标。"""
     filters: dict[str, Any] = {"sort": sort}
     if board_id is not None:
         filters["board_id"] = str(board_id)
@@ -110,22 +126,18 @@ async def list_posts(
         after_key = (bool(sort_key[0]), sort_key[1], UUID(str(sort_key[2])))
     service: PostReadService = get_post_service(request)
     items, next_key, has_more = await service.list_posts(
-        viewer_user_id=auth.user_id,
+        viewer_user_id=auth.user_id if auth else None,
         board_id=board_id,
         sort=sort,
         after_key=after_key,
         limit=limit,
     )
-    next_cursor: str | None = None
-    if has_more and next_key is not None:
-        next_cursor = issue_cursor(
-            request.app.state.settings,
-            route=_POSTS_ROUTE,
-            user_id=auth.user_id,
-            filters=filters,
-            sort_key=list(next_key),
-            bind_principal=False,
-        )
+    next_cursor = issue_public_cursor(
+        request,
+        route=_POSTS_ROUTE,
+        filters=filters,
+        next_after=next_key,
+    )
     return PostListResponse(items=items, next_cursor=next_cursor, has_more=has_more)
 
 
@@ -133,16 +145,12 @@ async def list_posts(
 async def get_post_detail(
     request: Request,
     post_id: UUID,
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext | None = Depends(get_optional_auth_context),
     reply_cursor: str | None = Query(default=None),
     reply_limit: int = Query(default=20, ge=1, le=50),
     _rate: None = Depends(rate_limit("community.read")),
 ) -> CommunityPostDetailResponse:
-    """帖子详情 + 一页回复（§8.4）。
-
-    hidden → COMMUNITY_NOT_FOUND（含作者）；deleted → 墓碑契约（§6.6）。
-    回复游标绑定具体 post_id（D39），防跨帖子复用。
-    """
+    """帖子详情 + 一页回复（§8.4）。"""
     route = f"{_REPLIES_ROUTE}:{post_id}"
     filters: dict[str, Any] = {}
     payload = resolve_public_cursor(request, route, reply_cursor, filters=filters)
@@ -154,19 +162,17 @@ async def get_post_detail(
         reply_after = (sort_key[0], UUID(str(sort_key[1])))
     service: PostReadService = get_post_service(request)
     response, next_key = await service.get_post_detail(
-        viewer_user_id=auth.user_id,
+        viewer_user_id=auth.user_id if auth else None,
         post_id=post_id,
         reply_after_key=reply_after,
         reply_limit=reply_limit,
     )
     if next_key is not None:
-        response.replies.next_cursor = issue_cursor(
-            request.app.state.settings,
+        response.replies.next_cursor = issue_public_cursor(
+            request,
             route=route,
-            user_id=auth.user_id,
             filters=filters,
-            sort_key=list(next_key),
-            bind_principal=False,
+            next_after=next_key,
         )
     return response
 
@@ -176,6 +182,9 @@ async def get_post_detail(
 # ---------------------------------------------------------------------------
 
 
+_IDEMPOTENCY_KEY_RE = r"^[\x21-\x7e]{1,200}$"
+
+
 def _require_idempotency_key(idempotency_key: str | None) -> str:
     """§8.3：幂等键缺失/格式非法统一 422（§8.7 无专码，映射 CONTENT_INVALID）。"""
     if not idempotency_key:
@@ -183,9 +192,6 @@ def _require_idempotency_key(idempotency_key: str | None) -> str:
             "缺少或非法的 Idempotency-Key（ASCII 可见字符，1–200）", field="Idempotency-Key"
         )
     return idempotency_key
-
-
-_IDEMPOTENCY_KEY_RE = r"^[\x21-\x7e]{1,200}$"
 
 
 @router.post("/posts", response_model=CommunityPostDetail, status_code=201)
@@ -198,18 +204,16 @@ async def create_post(
     ),
     _rate: None = Depends(rate_limit("community.post.create")),
 ) -> CommunityPostDetail:
-    """发帖（§8.3）：user_id 来自认证上下文；幂等重放/冲突语义在 service。"""
+    """发帖（§8.3）：user_id 来自认证上下文；支持最多 3 张配图。"""
     _require_idempotency_key(idempotency_key)
-    settings = request.app.state.settings
     service = get_post_command_service(request)
     return await service.create_post(
         user_id=auth.user_id,
         board_id=payload.board_id,
         title=payload.title,
         body=payload.body,
+        attachment_ids=payload.attachment_ids or [],
         idempotency_key=idempotency_key or "",
-        max_body_chars=settings.community_post_body_max_length,
-        idempotency_retention_days=settings.community_idempotency_retention_days,
     )
 
 
@@ -227,17 +231,13 @@ async def create_reply(
 ) -> CommunityReplyView:
     """回复（§8.4）：分钟 + 小时双窗口限流（§9.3）。"""
     _require_idempotency_key(idempotency_key)
-    settings = request.app.state.settings
     service = get_reply_service(request)
     row = await service.create_reply(
         user_id=auth.user_id,
         post_id=post_id,
         body=payload.body,
         idempotency_key=idempotency_key or "",
-        max_chars=settings.community_reply_max_length,
-        idempotency_retention_days=settings.community_idempotency_retention_days,
     )
-    # 刚创建的回复必为 active；不可能是当前解决答案（同一时刻不可能已标记）
     return PostReadService._to_reply(row, auth.user_id, solved=False)
 
 
@@ -348,7 +348,6 @@ async def list_notifications(
         if not isinstance(sort_key, list) or len(sort_key) != 2:
             raise CommunityCursorInvalidError("游标缺少完整排序键")
         after = (sort_key[0], UUID(str(sort_key[1])))
-    settings = request.app.state.settings
     session_factory = get_community_runtime(request).database.session_factory
     async with session_factory() as session:
         rows = await notifications_repo.list_notifications(
@@ -370,19 +369,19 @@ async def list_notifications(
             created_at=r["created_at"],
             post_id=r["post_id"],
             reply_id=r["reply_id"],
+            board_slug=r["board_slug"],
         )
         for r in rows[:limit]
     ]
     next_cursor: str | None = None
     if has_more and rows:
         last = rows[limit - 1]
-        next_cursor = issue_cursor(
-            settings,
+        next_cursor = issue_private_cursor(
+            request,
             route=_NOTIFICATIONS_ROUTE,
             user_id=auth.user_id,
             filters=filters,
-            sort_key=[last["created_at"].isoformat(), str(last["notification_id"])],
-            bind_principal=True,
+            next_after=(last["created_at"].isoformat(), str(last["notification_id"])),
         )
     return CommunityNotificationPage(
         items=items,

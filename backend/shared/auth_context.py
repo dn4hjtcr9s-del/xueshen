@@ -139,6 +139,49 @@ async def get_auth_context(request: Request) -> AuthContext:
         return await _apply_break_glass(request, settings, session, auth, raw_grant)
 
 
+async def get_optional_auth_context(request: Request) -> AuthContext | None:
+    """可选认证依赖（D46）：无凭证 → 匿名 None；凭证无效/过期 → 401。
+
+    空白 Authorization 头按 strip 后空串处理 → 匿名（写接口行为不变仍 401）。
+    """
+    settings = _settings(request)
+    session_factory = _runtime_session_factory(request)
+    headers = {k.lower(): v for k, v in request.headers.items()}
+    client_host = request.client.host if request.client else None
+
+    authz = headers.get("authorization")
+    if authz is not None and authz.strip() == "":
+        # 显式空白 Authorization：视为无凭证；是否还有 X-Dev-User-Id 由 verifier 决定
+        headers.pop("authorization", None)
+        authz = None
+
+    # 无 Authorization 头且非 development：直接匿名
+    if authz is None and not settings.is_development:
+        return None
+
+    async with session_factory() as session:
+        resolver_factory: Callable[[AsyncSession], IdentityMappingResolver] | None = getattr(
+            request.app.state, "identity_resolver_factory", None
+        )
+        resolver = resolver_factory(session) if resolver_factory is not None else None
+        verifier = CompositeAuthVerifier(
+            settings=settings,
+            dev_adapter=DevelopmentAuthAdapter(settings),
+            prod_adapter=ProductionJwtAuthAdapter(
+                settings=settings,
+                identity_resolver=resolver,  # type: ignore[arg-type]
+            ),
+        )
+        try:
+            auth = await verifier.authenticate(headers, client_host=client_host)
+        except AuthError:
+            raise
+        raw_grant = headers.get(BREAK_GLASS_HEADER)
+        if raw_grant is None:
+            return auth
+        return await _apply_break_glass(request, settings, session, auth, raw_grant)
+
+
 async def _apply_break_glass(
     request: Request,
     settings: Settings,

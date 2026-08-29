@@ -12,6 +12,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 #: 列表查询返回的字段集（不含 body：列表只含 active 帖子，正文不进列表载荷）
@@ -45,6 +46,7 @@ async def list_posts(
     if after is not None:
         where.append("(p.pinned, p.last_activity_at, p.post_id) < (:a_pinned, :a_la, :a_id)")
         params.update({"a_pinned": after[0], "a_la": after[1], "a_id": after[2]})
+    where.append("b.status = 'active'")
     sql = (
         "SELECT "
         + _POST_LIST_COLUMNS
@@ -72,17 +74,33 @@ async def liked_post_ids(session: AsyncSession, post_ids: list[UUID], user_id: U
 
 
 async def get_post_any_status(session: AsyncSession, post_id: UUID) -> dict[str, Any] | None:
-    """详情行（含 hidden/deleted）：可见性判断由 service 层完成（§8.4）。"""
+    """详情行（含 deleted；hidden 板块及其帖子视为不存在）。"""
     result = await session.execute(
         text(
             "SELECT p.post_id, p.user_id, p.author_display_name, p.board_id, b.slug, "
-            "b.name, b.description, p.title, p.body, p.content_hash, p.pinned, "
+            "b.name, b.description, b.post_count, p.title, p.body, p.content_hash, p.pinned, "
             "p.discussion_status, "
             "p.solved_reply_id, p.solution_generation, p.reply_count, p.like_count, "
             "p.status, p.eligible_for_memory, p.created_at, p.updated_at, "
             "p.last_activity_at, p.deleted_at "
             "FROM community_posts p JOIN community_boards b ON b.board_id = p.board_id "
-            "WHERE p.post_id = :post_id"
+            "WHERE p.post_id = :post_id AND b.status = 'active'"
+        ),
+        {"post_id": post_id},
+    )
+    row = result.mappings().first()
+    return dict(row) if row is not None else None
+
+
+async def get_post_for_publisher(session: AsyncSession, post_id: UUID) -> dict[str, Any] | None:
+    """Publisher 内部使用：不过滤板块状态，用于 §11.3 删除竞态校验。"""
+    result = await session.execute(
+        text(
+            "SELECT post_id, user_id, author_display_name, board_id, title, body, content_hash, "
+            "pinned, discussion_status, solved_reply_id, solution_generation, reply_count, "
+            "like_count, status, eligible_for_memory, created_at, updated_at, "
+            "last_activity_at, deleted_at "
+            "FROM community_posts WHERE post_id = :post_id"
         ),
         {"post_id": post_id},
     )
@@ -107,17 +125,13 @@ async def insert_post(
     content_hash: str,
 ) -> None:
     """插入帖子（§7.2：pinned 默认 false，MVP 仅预留管理员写入）。"""
-    from datetime import UTC, datetime
-
-    now = datetime.now(UTC)
     await session.execute(
         text(
             "INSERT INTO community_posts "
             "(post_id, user_id, author_display_name, board_id, title, body, "
-            " content_hash, status, discussion_status, eligible_for_memory, pinned, "
-            " created_at, updated_at, last_activity_at) "
+            " content_hash, status, discussion_status, eligible_for_memory, pinned) "
             "VALUES (:post_id, :user_id, :name, :board_id, :title, :body, :hash, "
-            " 'active', 'open', true, false, :now, :now, :now)"
+            " 'active', 'open', true, false)"
         ),
         {
             "post_id": post_id,
@@ -127,54 +141,45 @@ async def insert_post(
             "title": title,
             "body": body,
             "hash": content_hash,
-            "now": now,
         },
     )
 
 
 async def bump_reply_activity(session: AsyncSession, post_id: UUID) -> None:
-    """新回复：reply_count + 1、last_activity_at 更新（D30：仅回复创建更新活动）。"""
-    from datetime import UTC, datetime
-
-    now = datetime.now(UTC)
+    """新回复：reply_count + 1、last_activity_at 更新（§7.17 #1）。"""
     await session.execute(
         text(
             "UPDATE community_posts SET reply_count = reply_count + 1, "
-            "    last_activity_at = :now, updated_at = :now "
+            "    last_activity_at = now(), updated_at = now() "
             "WHERE post_id = :post_id"
         ),
-        {"post_id": post_id, "now": now},
+        {"post_id": post_id},
     )
 
 
 async def decrement_reply_count(session: AsyncSession, post_id: UUID) -> None:
-    """删除回复：reply_count - 1（D26：恒为当前 active 回复数）。"""
-    from datetime import UTC, datetime
-
-    now = datetime.now(UTC)
+    """删除回复：reply_count - 1（§7.17 #2：不用 GREATEST 兜底）。"""
     await session.execute(
         text(
-            "UPDATE community_posts SET reply_count = GREATEST(reply_count - 1, 0), "
-            "    updated_at = :now "
+            "UPDATE community_posts SET reply_count = reply_count - 1, "
+            "    updated_at = now() "
             "WHERE post_id = :post_id"
         ),
-        {"post_id": post_id, "now": now},
+        {"post_id": post_id},
     )
 
 
-async def mark_post_deleted(session: AsyncSession, post_id: UUID) -> None:
-    """软删除帖子（§11.1：closed + eligible=false + deleted_at；不物理清除正文）。"""
-    from datetime import UTC, datetime
-
-    now = datetime.now(UTC)
-    await session.execute(
+async def mark_post_deleted(session: AsyncSession, post_id: UUID) -> int:
+    """软删除帖子；返回影响行数（§7.17 #5 条件 UPDATE）。"""
+    result = await session.execute(
         text(
             "UPDATE community_posts SET status = 'deleted', discussion_status = 'closed', "
-            "    eligible_for_memory = false, deleted_at = :now, updated_at = :now "
-            "WHERE post_id = :post_id"
+            "    eligible_for_memory = false, deleted_at = now(), updated_at = now() "
+            "WHERE post_id = :post_id AND status = 'active'"
         ),
-        {"post_id": post_id, "now": now},
+        {"post_id": post_id},
     )
+    return int(result.rowcount or 0) if isinstance(result, CursorResult) else 0
 
 
 async def set_solution(
@@ -184,15 +189,12 @@ async def set_solution(
     reply_id: UUID | None,
     generation: int,
 ) -> None:
-    """设置/切换/取消解决（§8.5：generation 由 service 决定是否递增）。"""
-    from datetime import UTC, datetime
-
-    now = datetime.now(UTC)
+    """设置/切换/取消解决（§8.5/§7.17 #4）。"""
     await session.execute(
         text(
             "UPDATE community_posts SET solved_reply_id = :reply_id, "
-            "    solution_generation = :generation, updated_at = :now "
+            "    solution_generation = :generation, updated_at = now() "
             "WHERE post_id = :post_id"
         ),
-        {"post_id": post_id, "reply_id": reply_id, "generation": generation, "now": now},
+        {"post_id": post_id, "reply_id": reply_id, "generation": generation},
     )

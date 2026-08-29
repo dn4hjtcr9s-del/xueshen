@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -75,16 +76,13 @@ async def insert_reply(
     body: str,
     content_hash: str,
 ) -> None:
-    from datetime import UTC, datetime
-
-    now = datetime.now(UTC)
     await session.execute(
         text(
             "INSERT INTO community_replies "
             "(reply_id, post_id, user_id, author_display_name, body, content_hash, "
-            " status, eligible_for_memory, created_at, updated_at) "
+            " status, eligible_for_memory) "
             "VALUES (:reply_id, :post_id, :user_id, :name, :body, :hash, "
-            " 'active', true, :now, :now)"
+            " 'active', true)"
         ),
         {
             "reply_id": reply_id,
@@ -93,21 +91,18 @@ async def insert_reply(
             "name": author_display_name,
             "body": body,
             "hash": content_hash,
-            "now": now,
         },
     )
 
 
-async def mark_reply_deleted(session: AsyncSession, reply_id: UUID) -> None:
-    """软删除回复（§11.1：eligible=false + deleted_at；正文保留为墓碑）。"""
-    from datetime import UTC, datetime
-
-    now = datetime.now(UTC)
-    await session.execute(
+async def mark_reply_deleted(session: AsyncSession, reply_id: UUID) -> int:
+    """软删除回复；返回影响行数（§7.17 #2 条件 UPDATE）。"""
+    result = await session.execute(
         text(
             "UPDATE community_replies SET status = 'deleted', "
-            "    eligible_for_memory = false, deleted_at = :now, updated_at = :now "
-            "WHERE reply_id = :reply_id"
+            "    eligible_for_memory = false, deleted_at = now(), updated_at = now() "
+            "WHERE reply_id = :reply_id AND status = 'active'"
         ),
-        {"reply_id": reply_id, "now": now},
+        {"reply_id": reply_id},
     )
+    return int(result.rowcount or 0) if isinstance(result, CursorResult) else 0

@@ -82,3 +82,13 @@ community_api_requests_total = Counter(
     "Community API 请求数",
     ["route", "status"],
 )
+
+#: 附件删除失败次数与终态计数
+community_attachment_delete_failures_total = Counter(
+    "community_attachment_delete_failures_total",
+    "Community 附件存储删除失败次数",
+)
+community_attachment_delete_exhausted_total = Counter(
+    "community_attachment_delete_exhausted_total",
+    "Community 附件删除重试耗尽次数",
+)
