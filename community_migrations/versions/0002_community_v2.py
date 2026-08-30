@@ -165,11 +165,15 @@ def upgrade() -> None:
     op.execute(f"ALTER TABLE community_idempotency_requests DROP CONSTRAINT {idem_res_check}")
     op.execute(
         "ALTER TABLE community_idempotency_requests ADD CONSTRAINT ck_community_idempotency_operation "
-        "CHECK (operation IN ('create_post','create_reply','upload_attachment','create_application'))"
+        "CHECK (operation IN ('create_post','create_reply','upload_attachment','create_application','approve_application','reject_application'))"
     )
     op.execute(
         "ALTER TABLE community_idempotency_requests ADD CONSTRAINT ck_community_idempotency_resource_type "
         "CHECK (resource_type IN ('post','reply','attachment','application'))"
+    )
+    op.execute(
+        "CREATE INDEX ix_community_idempotency_requests_resource "
+        "ON community_idempotency_requests (resource_type, resource_id)"
     )
 
     # ------------------------------------------------------------------
@@ -294,8 +298,11 @@ def downgrade() -> None:
         "ck_community_idempotency_resource_type"
     )
     op.execute(
+        "DROP INDEX IF EXISTS ix_community_idempotency_requests_resource"
+    )
+    op.execute(
         "DELETE FROM community_idempotency_requests WHERE operation IN "
-        "('upload_attachment','create_application')"
+        "('upload_attachment','create_application','approve_application','reject_application')"
     )
     op.execute(
         "ALTER TABLE community_idempotency_requests ADD CONSTRAINT ck_community_idempotency_operation "

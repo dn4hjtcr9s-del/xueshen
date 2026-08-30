@@ -31,7 +31,7 @@ def build_community_routers(app: FastAPI) -> APIRouter | None:
     自定义 Settings（测试/运维），装配必须与注入配置一致。
     """
     settings = app.state.settings
-    if not settings.community_database_url:
+    if not settings.community_database_url or not settings.community_v2_enabled:
         return None
 
     from backend.community.services.post_command_service import PostCommandService
@@ -62,6 +62,7 @@ def build_community_routers(app: FastAPI) -> APIRouter | None:
         profile_reader_factory=_profile_reader,
         reply_service=reply_service,
         settings=settings,
+        storage=storage,
     )
     attachment_upload_service = AttachmentUploadService(
         settings=settings, storage=storage, session_factory=db.session_factory

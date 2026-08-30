@@ -55,6 +55,7 @@ run_backend_integration() {
   CONVERSATION_DATABASE_URL="postgresql+psycopg://conversation:conversation@127.0.0.1:55432/conversation_test" \
     uv run alembic -c conversation_alembic.ini upgrade head
   COMMUNITY_DATABASE_URL="postgresql+psycopg://community:community@127.0.0.1:55432/community_test" \
+  COMMUNITY_V2_ENABLED=true \
     uv run alembic -c community_alembic.ini upgrade head
   STUDY_DATABASE_URL="postgresql+psycopg://study:study@127.0.0.1:55432/study_test" \
     uv run alembic -c study_alembic.ini upgrade head
@@ -81,6 +82,7 @@ run_backend_integration() {
   AUTH_DATABASE_URL="postgresql+psycopg://auth:auth@127.0.0.1:55432/auth_test" \
   CONVERSATION_DATABASE_URL="postgresql+psycopg://conversation:conversation@127.0.0.1:55432/conversation_test" \
   COMMUNITY_DATABASE_URL="postgresql+psycopg://community:community@127.0.0.1:55432/community_test" \
+  COMMUNITY_V2_ENABLED=true \
   STUDY_DATABASE_URL="postgresql+psycopg://study:study@127.0.0.1:55432/study_test" \
     uv run pytest tests/integration ${FAILURE_TESTS[@]+"${FAILURE_TESTS[@]}"} ${CONVERSION_TESTS[@]+"${CONVERSION_TESTS[@]}"} ${COMMUNITY_TESTS[@]+"${COMMUNITY_TESTS[@]}"} ${STUDY_TESTS[@]+"${STUDY_TESTS[@]}"}
 }

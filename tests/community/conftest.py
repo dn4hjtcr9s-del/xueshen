@@ -58,6 +58,8 @@ COMMUNITY_TABLES = (
     "community_post_likes",
     "community_replies",
     "community_posts",
+    "community_board_applications",
+    "community_attachments",
 )
 
 
@@ -76,7 +78,7 @@ def _migrate_community() -> None:
 
 @pytest.fixture()
 def community_settings(tmp_path: Path) -> Settings:
-    settings = Settings(app_env="test")
+    settings = Settings(app_env="test", community_v2_enabled=True)
     require_community_test_database(settings.community_database_url)
     return settings
 
@@ -95,6 +97,7 @@ async def community_session_factory(
             # 会连坐 community_boards，因此清空后按 §7.1 常量幂等重放 seed
             # （测试夹具复用迁移同一常量定义）。
             await session.execute(text(f"TRUNCATE {', '.join(COMMUNITY_TABLES)} CASCADE"))
+            seed_board_ids = [bid for bid, *_ in BOARDS_SEED]
             for board_id, slug, name, description, sort_order in BOARDS_SEED:
                 await session.execute(
                     text(
@@ -115,6 +118,11 @@ async def community_session_factory(
                         "sort": sort_order,
                     },
                 )
+            # 清除非 seed 板块（如审核通过测试创建的板块），避免污染后续测试
+            await session.execute(
+                text("DELETE FROM community_boards WHERE board_id != ALL(:ids)"),
+                {"ids": seed_board_ids},
+            )
     yield factory
     await engine.dispose()
 

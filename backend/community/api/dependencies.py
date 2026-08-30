@@ -10,14 +10,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
 from fastapi import Depends, Request
 
 from backend.auth.context import AuthContext
 from backend.community.contracts.errors import (
     AdminRequiredError,
-    CommunityCursorInvalidError,
     CommunityRateLimitedError,
 )
 from backend.community.persistence.database import CommunityDatabase
@@ -25,8 +23,6 @@ from backend.community.services.post_service import PostReadService
 from backend.settings import Settings
 from backend.shared.auth_context import get_auth_context, get_optional_auth_context
 from backend.shared.client_ip import client_ip as resolve_client_ip
-from backend.shared.cursor import CursorError
-from backend.shared.cursor import resolve_cursor as shared_resolve_cursor
 from backend.shared.ratelimit import FixedWindowRateLimiter, retry_after_seconds
 
 if TYPE_CHECKING:
@@ -112,14 +108,15 @@ def get_storage(request: Request) -> StorageBackend:
     return storage
 
 
-def require_community_admin(auth: AuthContext = Depends(get_auth_context)) -> AuthContext:
+def require_community_admin(
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+) -> AuthContext:
     """社区域管理员校验：非管理员 → 403 ADMIN_REQUIRED。
 
     区别于 shared require 的 AUTH_FORBIDDEN。
     """
-    from backend.settings import get_settings
-
-    settings = get_settings()
+    settings = request.app.state.settings
     if auth.user_id not in settings.community_admin_user_ids_set:
         raise AdminRequiredError("需要社区管理员权限")
     return auth
@@ -128,60 +125,6 @@ def require_community_admin(auth: AuthContext = Depends(get_auth_context)) -> Au
 # ---------------------------------------------------------------------------
 # 游标依赖（§8.2/D13/D39）
 # ---------------------------------------------------------------------------
-
-
-def _community_cursor_error(exc: CursorError) -> CommunityCursorInvalidError:
-    # 游标过期/非法统一返回 COMMUNITY_CURSOR_INVALID（§8.7：不区分原因）
-    return CommunityCursorInvalidError(str(exc))
-
-
-def resolve_public_cursor(
-    request: Request,
-    route: str,
-    token: str | None,
-    *,
-    filters: dict[str, Any],
-) -> dict[str, Any] | None:
-    """公共游标（D13：bind_principal=False）：帖子列表与详情回复分页。"""
-    if token is None:
-        return None
-    settings = request.app.state.settings
-    try:
-        return shared_resolve_cursor(
-            settings,
-            token,
-            route=route,
-            user_id=UUID(int=0),  # 不绑定 principal，user_id 仅占位
-            filters=filters,
-            bind_principal=False,
-        )
-    except CursorError as exc:
-        raise _community_cursor_error(exc) from exc
-
-
-def resolve_private_cursor(
-    request: Request,
-    route: str,
-    token: str | None,
-    *,
-    user_id: UUID,
-    filters: dict[str, Any],
-) -> dict[str, Any] | None:
-    """私有游标（绑定 principal）：通知列表（§8.6/D13）。"""
-    if token is None:
-        return None
-    settings = request.app.state.settings
-    try:
-        return shared_resolve_cursor(
-            settings,
-            token,
-            route=route,
-            user_id=user_id,
-            filters=filters,
-            bind_principal=True,
-        )
-    except CursorError as exc:
-        raise _community_cursor_error(exc) from exc
 
 
 # ---------------------------------------------------------------------------

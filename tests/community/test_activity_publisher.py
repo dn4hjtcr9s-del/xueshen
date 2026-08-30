@@ -55,6 +55,7 @@ def _settings(**overrides) -> Settings:
     base = dict(
         _env_file=None,
         APP_ENV="test",
+        COMMUNITY_V2_ENABLED=True,
         COMMUNITY_PUBLISHER_ENABLED=True,
         COMMUNITY_MEMORY_SUBMIT_ENABLED=True,
         COMMUNITY_SOURCE_DELETION_ENABLED=True,

@@ -263,20 +263,31 @@ async def purge_deleted_attachments(
     retention_days: int,
     batch_size: int,
 ) -> int:
-    """删除 storage_deleted_at 超过保留期的 deleted 记录。"""
-    result = await session.execute(
+    """删除 storage_deleted_at 超过保留期的 deleted 记录及其幂等记录。"""
+    rows = await session.execute(
         text(
             """
-            DELETE FROM community_attachments
-            WHERE attachment_id IN (
-                SELECT attachment_id FROM community_attachments
-                WHERE status = 'deleted'
-                  AND storage_deleted_at IS NOT NULL
-                  AND storage_deleted_at < now() - make_interval(days => :retention)
-                LIMIT :batch
-            )
+            SELECT attachment_id FROM community_attachments
+            WHERE status = 'deleted'
+              AND storage_deleted_at IS NOT NULL
+              AND storage_deleted_at < now() - make_interval(days => :retention)
+            LIMIT :batch
             """
         ),
         {"retention": retention_days, "batch": batch_size},
+    )
+    ids = [r["attachment_id"] for r in rows.mappings()]
+    if not ids:
+        return 0
+    await session.execute(
+        text(
+            "DELETE FROM community_idempotency_requests "
+            "WHERE resource_type = 'attachment' AND resource_id = ANY(:ids)"
+        ),
+        {"ids": ids},
+    )
+    result = await session.execute(
+        text("DELETE FROM community_attachments WHERE attachment_id = ANY(:ids)"),
+        {"ids": ids},
     )
     return int(result.rowcount or 0) if isinstance(result, CursorResult) else 0

@@ -41,9 +41,10 @@ async def _make_app(community_session_factory):
     from backend.community.api.dependencies import CommunityRuntime
     from backend.community.persistence.database import create_community_engine
     from backend.community.services.post_service import PostReadService
+    from backend.community.storage.factory import get_storage_backend
     from backend.settings import Settings
 
-    settings = Settings(app_env="development")
+    settings = Settings(app_env="development", community_v2_enabled=True)
     app = create_app(settings=settings)
     # dev auth 的 get_auth_context 需要 app.state.runtime.session_factory
     # （IdentityMappingRepository 仅生产路径使用；dev adapter 不查询身份映射）；
@@ -59,10 +60,11 @@ async def _make_app(community_session_factory):
             "session_factory": community_session_factory,
         },
     )()
+    storage = get_storage_backend(settings)
     runtime = CommunityRuntime(
         settings=settings,
         database=db,
-        post_service=PostReadService(community_session_factory, settings=settings),
+        post_service=PostReadService(community_session_factory, settings=settings, storage=storage),
     )
     app.state.community_db = db
     app.state.community_runtime = runtime

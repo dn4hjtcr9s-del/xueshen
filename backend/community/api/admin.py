@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 
 from backend.auth.context import AuthContext
 from backend.community.contracts.api import (
@@ -63,6 +63,7 @@ async def list_applications_for_review(
 )
 async def approve_application(
     application_id: UUID,
+    idempotency_key: str = Header(..., min_length=1, pattern=r"^[A-Za-z0-9_-]{16,128}$"),
     auth: AuthContext = Depends(get_auth_context),
     _: AuthContext = Depends(require_community_admin),
     service: BoardApplicationService = Depends(get_application_service),
@@ -70,6 +71,7 @@ async def approve_application(
     return await service.approve(
         application_id=application_id,
         reviewer_id=auth.user_id,
+        idempotency_key=idempotency_key,
     )
 
 
@@ -81,6 +83,7 @@ async def approve_application(
 async def reject_application(
     application_id: UUID,
     payload: RejectApplicationRequest,
+    idempotency_key: str = Header(..., min_length=1, pattern=r"^[A-Za-z0-9_-]{16,128}$"),
     auth: AuthContext = Depends(get_auth_context),
     _: AuthContext = Depends(require_community_admin),
     service: BoardApplicationService = Depends(get_application_service),
@@ -89,4 +92,5 @@ async def reject_application(
         application_id=application_id,
         reviewer_id=auth.user_id,
         reason=payload.reason,
+        idempotency_key=idempotency_key,
     )

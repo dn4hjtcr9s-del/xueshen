@@ -45,6 +45,7 @@ from backend.community.services import notification_templates
 from backend.community.services.content_safety import post_content_hash, validate_post
 from backend.community.services.public_user_profile_reader import PublicUserProfileReader
 from backend.community.services.reply_service import ReplyService
+from backend.community.storage.base import StorageBackend
 from backend.settings import Settings
 from backend.shared.cursor import canonical_json
 
@@ -71,11 +72,13 @@ class PostCommandService:
         profile_reader_factory: Callable[[], PublicUserProfileReader],
         reply_service: ReplyService,
         settings: Settings,
+        storage: StorageBackend,
     ) -> None:
         self._session_factory = session_factory
         self._profile_reader_factory = profile_reader_factory
         self._reply_service = reply_service
         self._settings = settings
+        self._storage = storage
 
     # ------------------------------------------------------------------
     # 发帖（§8.3/§5.2）
@@ -315,8 +318,12 @@ class PostCommandService:
             raise CommunityNotFoundError("原帖子不存在")
         from backend.community.services.post_service import PostReadService
 
-        return PostReadService(self._session_factory, self._settings)._detail_view(
-            post, viewer_user_id=UUID(str(post["user_id"]))
+        read_service = PostReadService(self._session_factory, self._settings, self._storage)
+        attachments = await read_service._attachments_for_post(session, resource_id)
+        return read_service._detail_view(
+            post,
+            viewer_user_id=UUID(str(post["user_id"])),
+            attachments=attachments,
         )
 
     async def _active_board(self, session: AsyncSession, board_id: UUID) -> dict[str, Any]:
@@ -396,7 +403,9 @@ class PostCommandService:
     ) -> CommunityPostDetail:
         from backend.community.services.post_service import PostReadService
 
-        response, _ = await PostReadService(session_factory, self._settings).get_post_detail(
+        response, _ = await PostReadService(
+            session_factory, self._settings, self._storage
+        ).get_post_detail(
             viewer_user_id=viewer_user_id,
             post_id=post_id,
             reply_after_key=None,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from datetime import UTC, datetime
@@ -12,8 +13,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.community.contracts.api import CommunityAttachmentSummary
-from backend.community.contracts.errors import CommunityUploadFailedError
+from backend.community.contracts.errors import (
+    CommunityIdempotencyConflictError,
+    CommunityUploadFailedError,
+)
 from backend.community.persistence import attachments as attachments_repo
+from backend.community.persistence import idempotency as idem_repo
 from backend.community.persistence.idempotency import delete_request_by_resource
 from backend.community.storage.base import StorageBackend
 from backend.community.storage.validation import validate_and_measure_image
@@ -69,23 +74,86 @@ class AttachmentUploadService:
             source, content_type, self.settings
         )
 
-        # 幂等键抢占在调用方（post_command_service 同模式），
-        # 上传服务内部只负责执行存储与落库。
+        # 2) 计算文件内容 hash 作为幂等 payload
+        spool.seek(0)
+        file_sha256 = hashlib.sha256(spool.read()).hexdigest()
+        spool.seek(0)
+        payload_hash = file_sha256
+
+        # 3) 幂等抢占与执行：同键同文件 → 重放原附件；同键不同文件 → 冲突
         storage_key = _generate_storage_key(ext)
-
-        # 3) 事务保持打开，执行 Kodo/local 上传
-        result = await self.storage.upload(storage_key, spool, mime, size_bytes)
-        spool.close()
-        if not result.success:
-            raise CommunityUploadFailedError(
-                result.error_message or "上传失败",
-                retryable=_is_retryable_upload_error(result.error_message or ""),
-            )
-
-        # 4) INSERT attachments
         attachment_id = uuid4()
         async with self._session_factory() as session:
             async with session.begin():
+                existing = await idem_repo.get_request(
+                    session,
+                    user_id=uploader_id,
+                    operation="upload_attachment",
+                    idempotency_key=idempotency_key,
+                )
+                if existing is not None:
+                    if existing["payload_hash"] != payload_hash:
+                        raise CommunityIdempotencyConflictError("同 Idempotency-Key 已用于不同文件")
+                    row = await attachments_repo.get_attachment_by_id(
+                        session, existing["resource_id"]
+                    )
+                    if row is None:
+                        raise CommunityIdempotencyConflictError("幂等记录指向的附件不存在")
+                    return CommunityAttachmentSummary(
+                        attachment_id=row["attachment_id"],
+                        url=self.storage.public_url(row["storage_key"]),
+                        mime=row["mime"],
+                        width=row["width"],
+                        height=row["height"],
+                        size_bytes=row["size_bytes"],
+                    )
+
+                won = await idem_repo.insert_request(
+                    session,
+                    user_id=uploader_id,
+                    operation="upload_attachment",
+                    idempotency_key=idempotency_key,
+                    payload_hash=payload_hash,
+                    resource_type="attachment",
+                    resource_id=attachment_id,
+                    retention_days=self.settings.community_idempotency_retention_days,
+                )
+                if not won:
+                    # 并发竞争失败：重读幂等记录
+                    existing = await idem_repo.get_request(
+                        session,
+                        user_id=uploader_id,
+                        operation="upload_attachment",
+                        idempotency_key=idempotency_key,
+                    )
+                    if existing is None:
+                        raise CommunityIdempotencyConflictError("幂等键竞争失败")
+                    if existing["payload_hash"] != payload_hash:
+                        raise CommunityIdempotencyConflictError("同 Idempotency-Key 已用于不同文件")
+                    row = await attachments_repo.get_attachment_by_id(
+                        session, existing["resource_id"]
+                    )
+                    if row is None:
+                        raise CommunityIdempotencyConflictError("幂等记录指向的附件不存在")
+                    return CommunityAttachmentSummary(
+                        attachment_id=row["attachment_id"],
+                        url=self.storage.public_url(row["storage_key"]),
+                        mime=row["mime"],
+                        width=row["width"],
+                        height=row["height"],
+                        size_bytes=row["size_bytes"],
+                    )
+
+                # 4) 事务保持打开，执行 Kodo/local 上传
+                result = await self.storage.upload(storage_key, spool, mime, size_bytes)
+                spool.close()
+                if not result.success:
+                    raise CommunityUploadFailedError(
+                        result.error_message or "上传失败",
+                        retryable=_is_retryable_upload_error(result.error_message or ""),
+                    )
+
+                # 5) INSERT attachments
                 await attachments_repo.insert_attachment(
                     session,
                     attachment_id=attachment_id,
@@ -110,19 +178,29 @@ class AttachmentUploadService:
     async def delete_attachment(
         self,
         attachment_id: UUID,
+        requester_id: UUID,
+        is_admin: bool = False,
     ) -> None:
-        """管理/补偿路径：直接删除存储并物理删除行。"""
+        """管理/补偿路径：校验所有权后删除存储并物理删除行。"""
+        async with self._session_factory() as session:
+            row = await attachments_repo.get_attachment_by_id(session, attachment_id)
+            if row is None:
+                return
+            if not is_admin and row["uploader_id"] != requester_id:
+                from backend.community.contracts.errors import AdminRequiredError
+
+                raise AdminRequiredError("无权删除该附件")
+
+        # 存储删除在事务外执行：避免长事务持有网络 IO
+        result = await self.storage.delete(row["storage_key"])
+        if not result.success:
+            raise CommunityUploadFailedError(
+                result.error_message or "删除失败",
+                retryable=True,
+            )
+
         async with self._session_factory() as session:
             async with session.begin():
-                row = await attachments_repo.get_attachment_by_id(session, attachment_id)
-                if row is None:
-                    return
-                result = await self.storage.delete(row["storage_key"])
-                if not result.success:
-                    raise CommunityUploadFailedError(
-                        result.error_message or "删除失败",
-                        retryable=True,
-                    )
                 await delete_request_by_resource(
                     session, resource_type="attachment", resource_id=attachment_id
                 )

@@ -20,7 +20,10 @@ async def serve_local_upload(
 ) -> FileResponse:
     if not isinstance(storage, LocalStorage):
         raise HTTPException(status_code=404, detail="仅本地存储模式支持此端点")
-    file_path = storage.resolve_file(key)
+    try:
+        file_path = storage.resolve_file(key)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="文件不存在") from None
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="文件不存在")
     return FileResponse(file_path)

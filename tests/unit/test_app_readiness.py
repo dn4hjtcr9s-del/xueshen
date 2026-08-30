@@ -38,6 +38,7 @@ def test_readiness_fail_closed_when_community_db_unreachable(monkeypatch) -> Non
         COMMUNITY_DATABASE_URL=(
             "postgresql+psycopg://community:community@127.0.0.1:59999/community_test"
         ),
+        COMMUNITY_V2_ENABLED=True,
     )
     app, _store, _runner, _service = build_test_app(settings, monkeypatch=monkeypatch)
     client = TestClient(app)

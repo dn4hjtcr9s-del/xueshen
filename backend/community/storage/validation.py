@@ -86,6 +86,9 @@ async def validate_and_measure_image(
     try:
         with Image.open(spool) as img:
             img.verify()
+    except Image.DecompressionBombError as exc:
+        spool.close()
+        raise UploadBombRejectedError(f"图片解压炸弹: {exc}") from exc
     except Exception as exc:
         spool.close()
         raise UploadInvalidTypeError(f"无法解码图片: {exc}") from exc
@@ -96,6 +99,9 @@ async def validate_and_measure_image(
         with Image.open(spool) as img:
             fmt = img.format
             width, height = img.size
+    except Image.DecompressionBombError as exc:
+        spool.close()
+        raise UploadBombRejectedError(f"图片解压炸弹: {exc}") from exc
     except Exception as exc:
         spool.close()
         raise UploadInvalidTypeError(f"无法读取图片信息: {exc}") from exc

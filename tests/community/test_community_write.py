@@ -19,6 +19,7 @@ from backend.community.services.public_user_profile_reader import (
     PublicUserProfile,
     PublicUserProfileReader,
 )
+from backend.community.storage.factory import get_storage_backend
 
 pytestmark = pytest.mark.asyncio
 
@@ -50,7 +51,7 @@ async def _make_app(community_session_factory, *, purge_token: str | None = None
     from backend.community.services.reply_service import ReplyService
     from backend.settings import Settings
 
-    settings = Settings(app_env="development")
+    settings = Settings(app_env="development", community_v2_enabled=True)
     app = create_app(settings=settings)
     app.state.runtime = SimpleNamespace(
         session_factory=community_session_factory, maintenance_gate=None
@@ -64,6 +65,7 @@ async def _make_app(community_session_factory, *, purge_token: str | None = None
         },
     )()
     profile_reader = FakeProfileReader()
+    storage = get_storage_backend(settings)
     reply_service = ReplyService(
         session_factory=community_session_factory,
         profile_reader_factory=lambda: profile_reader,
@@ -74,11 +76,12 @@ async def _make_app(community_session_factory, *, purge_token: str | None = None
         profile_reader_factory=lambda: profile_reader,
         reply_service=reply_service,
         settings=settings,
+        storage=storage,
     )
     runtime = CommunityRuntime(
         settings=settings,
         database=db,
-        post_service=PostReadService(community_session_factory, settings=settings),
+        post_service=PostReadService(community_session_factory, settings=settings, storage=storage),
         post_command_service=post_command,
         reply_service=reply_service,
         profile_reader_factory=lambda: profile_reader,

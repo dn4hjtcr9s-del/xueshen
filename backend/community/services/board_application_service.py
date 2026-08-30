@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.community.contracts.api import BoardApplicationView
@@ -22,12 +23,14 @@ from backend.community.contracts.errors import (
 )
 from backend.community.persistence import board_applications as applications_repo
 from backend.community.persistence import boards as boards_repo
+from backend.community.persistence import idempotency as idem_repo
 from backend.community.persistence import notifications as notifications_repo
 from backend.community.services.notification_templates import (
     application_approved_body,
     application_rejected_body,
 )
 from backend.settings import Settings
+from backend.shared.cursor import canonical_json
 
 _RESERVED_SLUGS: frozenset[str] = frozenset(
     {
@@ -44,6 +47,15 @@ _RESERVED_SLUGS: frozenset[str] = frozenset(
 )
 
 _SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,28}[a-z0-9]$")
+
+
+def _idempotency_payload_hash(values: dict[str, Any]) -> str:
+    import hashlib
+
+    return hashlib.sha256(canonical_json(values).encode("utf-8")).hexdigest()
+
+
+_IDEM_CONFLICT_MSG = "同一 Idempotency-Key 已用于不同请求"
 
 
 def _normalize_slug(raw: str) -> str:
@@ -175,15 +187,26 @@ class BoardApplicationService:
                     raise ApplicationDuplicatePendingError("你已有一个待审核的建吧申请")
 
                 application_id = uuid4()
-                await applications_repo.insert_application(
-                    session,
-                    application_id=application_id,
-                    applicant_id=applicant_id,
-                    name=name,
-                    slug=slug,
-                    description=description,
-                    reason=reason,
-                )
+                try:
+                    await applications_repo.insert_application(
+                        session,
+                        application_id=application_id,
+                        applicant_id=applicant_id,
+                        name=name,
+                        slug=slug,
+                        description=description,
+                        reason=reason,
+                    )
+                except IntegrityError as exc:
+                    # 并发/重试触发 pending 唯一索引或 boards 冲突
+                    msg = str(exc).lower()
+                    if "uq_community_board_applications_pending" in msg:
+                        raise ApplicationDuplicatePendingError(
+                            "你已有一个待审核的建吧申请"
+                        ) from exc
+                    if "uq_community_boards_slug" in msg or "uq_community_boards_name" in msg:
+                        raise BoardNameConflictError("吧名或标识已被现有板块占用") from exc
+                    raise
                 row = await applications_repo.get_application_by_id(session, application_id)
                 return _to_view(row)
 
@@ -192,9 +215,55 @@ class BoardApplicationService:
         *,
         application_id: UUID,
         reviewer_id: UUID,
+        idempotency_key: str,
     ) -> BoardApplicationView:
+        payload_hash = _idempotency_payload_hash(
+            {"application_id": str(application_id), "reviewer_id": str(reviewer_id)}
+        )
         async with self._session_factory() as session:
             async with session.begin():
+                existing = await idem_repo.get_request(
+                    session,
+                    user_id=reviewer_id,
+                    operation="approve_application",
+                    idempotency_key=idempotency_key,
+                )
+                if existing is not None:
+                    if existing["payload_hash"] != payload_hash:
+                        from backend.community.contracts.errors import (
+                            CommunityIdempotencyConflictError,
+                        )
+
+                        raise CommunityIdempotencyConflictError(_IDEM_CONFLICT_MSG)
+                    row = await applications_repo.get_application_by_id(session, application_id)
+                    return _to_view(row)
+
+                won = await idem_repo.insert_request(
+                    session,
+                    user_id=reviewer_id,
+                    operation="approve_application",
+                    idempotency_key=idempotency_key,
+                    payload_hash=payload_hash,
+                    resource_type="application",
+                    resource_id=application_id,
+                    retention_days=self.settings.community_idempotency_retention_days,
+                )
+                if not won:
+                    existing = await idem_repo.get_request(
+                        session,
+                        user_id=reviewer_id,
+                        operation="approve_application",
+                        idempotency_key=idempotency_key,
+                    )
+                    if existing is None or existing["payload_hash"] != payload_hash:
+                        from backend.community.contracts.errors import (
+                            CommunityIdempotencyConflictError,
+                        )
+
+                        raise CommunityIdempotencyConflictError(_IDEM_CONFLICT_MSG)
+                    row = await applications_repo.get_application_by_id(session, application_id)
+                    return _to_view(row)
+
                 application = await applications_repo.get_application_by_id(
                     session, application_id, for_update=True
                 )
@@ -204,14 +273,21 @@ class BoardApplicationService:
                     raise ApplicationAlreadyReviewedError("该申请已被审核")
 
                 board_id = uuid4()
-                await boards_repo.insert_board(
-                    session,
-                    board_id=board_id,
-                    slug=application["slug"],
-                    name=application["name"],
-                    description=application["description"],
-                    created_by=application["applicant_id"],
-                )
+                try:
+                    await boards_repo.insert_board(
+                        session,
+                        board_id=board_id,
+                        slug=application["slug"],
+                        name=application["name"],
+                        description=application["description"],
+                        created_by=application["applicant_id"],
+                    )
+                except IntegrityError as exc:
+                    if "uq_community_boards_slug" in str(exc).lower():
+                        raise BoardNameConflictError("该 slug 已被现有板块占用") from exc
+                    if "uq_community_boards_name" in str(exc).lower():
+                        raise BoardNameConflictError("该吧名已被现有板块占用") from exc
+                    raise
 
                 await applications_repo.approve_application(
                     session,
@@ -245,6 +321,7 @@ class BoardApplicationService:
         application_id: UUID,
         reviewer_id: UUID,
         reason: str,
+        idempotency_key: str,
     ) -> BoardApplicationView:
         reason = reason.strip()
         if not reason or len(reason) > self.settings.community_reject_reason_max_chars:
@@ -252,8 +329,56 @@ class BoardApplicationService:
                 f"拒绝理由长度须在 1–{self.settings.community_reject_reason_max_chars} 字符之间"
             )
 
+        payload = {
+            "application_id": str(application_id),
+            "reviewer_id": str(reviewer_id),
+            "reason": reason,
+        }
+        payload_hash = _idempotency_payload_hash(payload)
         async with self._session_factory() as session:
             async with session.begin():
+                existing = await idem_repo.get_request(
+                    session,
+                    user_id=reviewer_id,
+                    operation="reject_application",
+                    idempotency_key=idempotency_key,
+                )
+                if existing is not None:
+                    if existing["payload_hash"] != payload_hash:
+                        from backend.community.contracts.errors import (
+                            CommunityIdempotencyConflictError,
+                        )
+
+                        raise CommunityIdempotencyConflictError(_IDEM_CONFLICT_MSG)
+                    row = await applications_repo.get_application_by_id(session, application_id)
+                    return _to_view(row)
+
+                won = await idem_repo.insert_request(
+                    session,
+                    user_id=reviewer_id,
+                    operation="reject_application",
+                    idempotency_key=idempotency_key,
+                    payload_hash=payload_hash,
+                    resource_type="application",
+                    resource_id=application_id,
+                    retention_days=self.settings.community_idempotency_retention_days,
+                )
+                if not won:
+                    existing = await idem_repo.get_request(
+                        session,
+                        user_id=reviewer_id,
+                        operation="reject_application",
+                        idempotency_key=idempotency_key,
+                    )
+                    if existing is None or existing["payload_hash"] != payload_hash:
+                        from backend.community.contracts.errors import (
+                            CommunityIdempotencyConflictError,
+                        )
+
+                        raise CommunityIdempotencyConflictError(_IDEM_CONFLICT_MSG)
+                    row = await applications_repo.get_application_by_id(session, application_id)
+                    return _to_view(row)
+
                 application = await applications_repo.get_application_by_id(
                     session, application_id, for_update=True
                 )

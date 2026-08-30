@@ -1,4 +1,4 @@
-"""Review 修复补测（评审项 1/3/4/9/10/11/12/13，PR 全量修复验证）。
+"""Review 修复补测（评审项 1/3/4/9/10/11/12/13 + Critical 1-10，PR 全量修复验证）。
 
 覆盖：
 - Critical 1：并发同键幂等（asyncio.gather）只创建一个资源 + 一条 outbox；
@@ -9,13 +9,16 @@
   （dev scope override 模拟 system principal）；
 - 项 11：板块不存在 → 404 NOT_FOUND；
 - 项 12：reply_created payload source_version=content_hash + window 字段；
-- 项 13：删除 outbox 幂等键 = D32 公式。
+- 项 13：删除 outbox 幂等键 = D32 公式；
+- Critical 修复：附件上传幂等、本地存储路径穿越、已删帖附件不泄露、
+  管理员审核幂等、建吧申请唯一冲突。
 """
 
 from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -24,10 +27,12 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
 from backend.community.contracts.domain import BOARDS_SEED
+from backend.community.storage.factory import get_storage_backend
 
 pytestmark = pytest.mark.asyncio
 
 USER_A = "11111111-1111-4111-8111-111111111111"
+USER_B = "22222222-2222-4222-8222-222222222222"
 BOARD = BOARDS_SEED[0]
 
 
@@ -37,6 +42,8 @@ async def _make_app(community_session_factory, **settings_overrides):
     from backend.community.api.community import router as community_router
     from backend.community.api.dependencies import CommunityRuntime
     from backend.community.persistence.database import create_community_engine
+    from backend.community.services.attachment_service import AttachmentUploadService
+    from backend.community.services.board_application_service import BoardApplicationService
     from backend.community.services.post_command_service import PostCommandService
     from backend.community.services.post_service import PostReadService
     from backend.community.services.public_user_profile_reader import (
@@ -57,6 +64,7 @@ async def _make_app(community_session_factory, **settings_overrides):
         _env_file=None,
         APP_ENV="development",
         DEV_AUTH_ALLOW_SCOPE_OVERRIDE=True,
+        COMMUNITY_V2_ENABLED=True,
     )
     base.update(settings_overrides)
     settings = Settings(**base)
@@ -73,6 +81,7 @@ async def _make_app(community_session_factory, **settings_overrides):
         },
     )()
     profile_reader = FakeProfileReader()
+    storage = get_storage_backend(settings)
     reply_service = ReplyService(
         session_factory=community_session_factory,
         profile_reader_factory=lambda: profile_reader,
@@ -83,14 +92,22 @@ async def _make_app(community_session_factory, **settings_overrides):
         profile_reader_factory=lambda: profile_reader,
         reply_service=reply_service,
         settings=settings,
+        storage=storage,
     )
     runtime = CommunityRuntime(
         settings=settings,
         database=db,
-        post_service=PostReadService(community_session_factory, settings=settings),
+        post_service=PostReadService(community_session_factory, settings=settings, storage=storage),
         post_command_service=post_command,
         reply_service=reply_service,
         profile_reader_factory=lambda: profile_reader,
+        attachment_upload_service=AttachmentUploadService(
+            settings=settings, storage=storage, session_factory=community_session_factory
+        ),
+        board_application_service=BoardApplicationService(
+            settings=settings, session_factory=community_session_factory
+        ),
+        storage=storage,
     )
     app.state.community_db = db
     app.state.community_runtime = runtime
@@ -109,6 +126,20 @@ def _system_auth() -> dict[str, str]:
         "X-Dev-Actor-Type": "system",
         "X-Dev-Scopes": "community:account_purge",
     }
+
+
+def _admin_auth() -> dict[str, str]:
+    return {"X-Dev-User-Id": USER_A}
+
+
+def _small_png(color: tuple[int, int, int, int] = (0, 0, 0, 0)) -> BytesIO:
+    """1x1 PNG，用于上传测试。"""
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGBA", (1, 1), color).save(buf, format="PNG")
+    buf.seek(0)
+    return buf
 
 
 async def _outbox_count(session_factory, event_type: str) -> int:
@@ -472,3 +503,157 @@ async def test_deletion_outbox_key_d32(community_session_factory) -> None:
             .one()
         )
     assert row["idempotency_key"] == f"community:community.source_deleted:{post_id}"
+
+
+# ---------------------------------------------------------------------------
+# Critical 修复回归测试
+# ---------------------------------------------------------------------------
+
+
+async def test_upload_attachment_idempotency_same_file_replays(
+    community_session_factory,
+) -> None:
+    """同 Idempotency-Key + 同文件 → 返回同一 attachment_id。"""
+    app = await _make_app(community_session_factory)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r1 = await client.post(
+            "/api/v1/community/uploads",
+            headers={**_auth(), "Idempotency-Key": "upload-same"},
+            files={"file": ("a.png", _small_png(), "image/png")},
+        )
+        assert r1.status_code == 201, r1.text
+        r2 = await client.post(
+            "/api/v1/community/uploads",
+            headers={**_auth(), "Idempotency-Key": "upload-same"},
+            files={"file": ("a.png", _small_png(), "image/png")},
+        )
+        assert r2.status_code == 201, r2.text
+    assert r1.json()["attachment_id"] == r2.json()["attachment_id"]
+
+
+async def test_upload_attachment_idempotency_different_file_conflicts(
+    community_session_factory,
+) -> None:
+    """同 Idempotency-Key + 不同文件 → 409 冲突。"""
+    app = await _make_app(community_session_factory)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r1 = await client.post(
+            "/api/v1/community/uploads",
+            headers={**_auth(), "Idempotency-Key": "upload-diff"},
+            files={"file": ("a.png", _small_png(), "image/png")},
+        )
+        assert r1.status_code == 201, r1.text
+        r2 = await client.post(
+            "/api/v1/community/uploads",
+            headers={**_auth(), "Idempotency-Key": "upload-diff"},
+            files={"file": ("b.png", _small_png((255, 0, 0, 255)), "image/png")},
+        )
+    assert r2.status_code == 422
+    assert r2.json()["error"]["code"] == "COMMUNITY_IDEMPOTENCY_CONFLICT"
+
+
+async def test_local_upload_path_traversal_returns_404(
+    community_session_factory,
+) -> None:
+    """本地存储 key 含 ../ 时返回 404，不泄露 base_path 外文件。"""
+    app = await _make_app(community_session_factory)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/api/v1/community/local-uploads/../etc/passwd")
+    assert r.status_code == 404
+
+
+async def test_deleted_post_detail_has_no_attachments(
+    community_session_factory,
+) -> None:
+    """已删除帖子详情不返回附件 URL（墓碑契约）。"""
+    app = await _make_app(community_session_factory)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        up = await client.post(
+            "/api/v1/community/uploads",
+            headers={**_auth(), "Idempotency-Key": "deleted-post-attach"},
+            files={"file": ("a.png", _small_png(), "image/png")},
+        )
+        assert up.status_code == 201, up.text
+        aid = up.json()["attachment_id"]
+        r = await client.post(
+            "/api/v1/community/posts",
+            headers={**_auth(), "Idempotency-Key": "deleted-post"},
+            json={
+                "board_id": str(BOARD[0]),
+                "title": "将删除",
+                "body": "正文",
+                "attachment_ids": [aid],
+            },
+        )
+        assert r.status_code == 201, r.text
+        post_id = r.json()["post_id"]
+        await client.delete(
+            f"/api/v1/community/posts/{post_id}",
+            headers={**_auth(), "Idempotency-Key": "deleted-post-del"},
+        )
+        detail = await client.get(f"/api/v1/community/posts/{post_id}", headers=_auth())
+    assert detail.status_code == 200
+    post = detail.json()["post"]
+    assert post["deleted"] is True
+    assert post["title"] is None
+    assert post["attachments"] == []
+
+
+async def test_admin_approve_application_idempotency(
+    community_session_factory,
+) -> None:
+    """管理员通过同 Idempotency-Key 重复 approve → 返回同一 board_id。"""
+    app = await _make_app(
+        community_session_factory,
+        COMMUNITY_ADMIN_USER_IDS=USER_A,
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        app_resp = await client.post(
+            "/api/v1/community/applications",
+            headers={**_auth(USER_B), "Idempotency-Key": "admin-app-001"},
+            json={
+                "name": "幂等审核吧",
+                "slug": "idem-review",
+                "description": "d",
+                "reason": "r",
+            },
+        )
+        assert app_resp.status_code == 201, app_resp.text
+        application_id = app_resp.json()["application_id"]
+        a1 = await client.post(
+            f"/api/v1/community/admin/applications/{application_id}/approve",
+            headers={**_admin_auth(), "Idempotency-Key": "admin-approve-001"},
+        )
+        assert a1.status_code == 200, a1.text
+        a2 = await client.post(
+            f"/api/v1/community/admin/applications/{application_id}/approve",
+            headers={**_admin_auth(), "Idempotency-Key": "admin-approve-001"},
+        )
+        assert a2.status_code == 200, a2.text
+    assert a1.json()["board_id"] == a2.json()["board_id"]
+
+
+async def test_create_application_conflict_with_existing_board(
+    community_session_factory,
+) -> None:
+    """申请 slug 与已有板块冲突 → 409 BoardNameConflict。"""
+    app = await _make_app(community_session_factory)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/api/v1/community/applications",
+            headers={**_auth(USER_B), "Idempotency-Key": "conflict-app"},
+            json={
+                "name": BOARDS_SEED[0][2],
+                "slug": BOARDS_SEED[0][1],
+                "description": "d",
+                "reason": "r",
+            },
+        )
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "BOARD_NAME_CONFLICT"

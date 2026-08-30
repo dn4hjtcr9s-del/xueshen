@@ -170,10 +170,20 @@ class PostReadService:
     # ------------------------------------------------------------------
 
     def _detail_view(
-        self, row: dict[str, Any], *, viewer_user_id: UUID | None
+        self,
+        row: dict[str, Any],
+        *,
+        viewer_user_id: UUID | None,
+        liked: set[UUID] | None = None,
+        attachments: list[CommunityAttachment] | None = None,
     ) -> CommunityPostDetail:
         """单行帖子 → 详情 DTO（供幂等重放等无需 DB 渲染的路径复用）。"""
-        return self._to_detail(row, viewer_user_id, liked=set(), attachments=[])
+        return self._to_detail(
+            row,
+            viewer_user_id,
+            liked=liked or set(),
+            attachments=attachments or [],
+        )
 
     @staticmethod
     def _board_view(row: dict[str, Any]) -> CommunityBoard:
@@ -236,6 +246,9 @@ class PostReadService:
         attachments: list[CommunityAttachment],
     ) -> CommunityPostDetail:
         deleted = str(row["status"]) == "deleted"
+        # 已删除帖子遵循墓碑契约：不泄露标题/正文/附件 URL
+        if deleted:
+            attachments = []
         solved_reply_id = row.get("solved_reply_id")
         data = self._to_summary(row, viewer_user_id, liked, attachments).model_dump()
         if deleted:

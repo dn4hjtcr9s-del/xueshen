@@ -195,7 +195,7 @@ async def test_reader_endpoint_rejects_regular_user(
     from backend.community.services.source_read_service import CommunitySourceReadService
     from backend.settings import Settings
 
-    app = create_app(Settings(app_env="development"))
+    app = create_app(Settings(app_env="development", community_v2_enabled=True))
     app.state.runtime = SimpleNamespace(
         session_factory=community_session_factory, maintenance_gate=None
     )

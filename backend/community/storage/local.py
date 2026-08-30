@@ -51,9 +51,10 @@ class LocalStorage(StorageBackend):
     def _resolve(self, key: str) -> Path:
         """解析并防路径穿越。"""
         # key 格式如 community/2026-08/uuid.jpg
-        target = (self.base_path / key).resolve()
-        # 确保最终路径仍在 base_path 下
-        if not str(target).startswith(str(self.base_path.resolve())):
+        base = self.base_path.resolve()
+        target = (base / key).resolve()
+        # 确保最终路径仍在 base_path 下（is_relative_to 可防止同级目录穿越）
+        if not target.is_relative_to(base):
             raise ValueError(f"非法 storage_key: {key}")
         return target
 

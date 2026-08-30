@@ -134,7 +134,7 @@ async def approve_application(
             UPDATE community_board_applications
             SET status = 'approved', reviewer_id = :reviewer_id,
                 reviewed_at = now(), board_id = :board_id, updated_at = now()
-            WHERE application_id = :application_id
+            WHERE application_id = :application_id AND status = 'pending'
             """
         ),
         {

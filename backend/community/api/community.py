@@ -47,7 +47,6 @@ from backend.community.contracts.errors import (
     CommunityCursorInvalidError,
 )
 from backend.community.services.post_service import PostReadService
-from backend.settings import get_settings
 from backend.shared.auth_context import get_auth_context, get_optional_auth_context
 
 router = APIRouter(prefix="/api/v1/community", tags=["community"])
@@ -71,10 +70,11 @@ _REPLIES_ROUTE = "community.posts.detail.replies"
 
 @router.get("/permissions", response_model=PermissionsResponse)
 async def get_permissions(
+    request: Request,
     auth: AuthContext | None = Depends(get_optional_auth_context),
 ) -> PermissionsResponse:
     """当前用户是否社区管理员（§八 #21）。"""
-    settings = get_settings()
+    settings = request.app.state.settings
     is_admin = auth is not None and auth.user_id in settings.community_admin_user_ids_set
     return PermissionsResponse(is_community_admin=is_admin)
 
