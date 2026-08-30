@@ -1,5 +1,5 @@
 # MemoryManagerGraph 后端镜像（本地与云端同构，§2.1 / §14.5）
-FROM python:3.13-slim AS base
+FROM python:3.13.15-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
