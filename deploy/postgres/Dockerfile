@@ -8,6 +8,9 @@ FROM ${POSTGRES_IMAGE}
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 
-RUN apt-get update \
+# pgvector 已在 Debian 官方源（trixie/main），临时移除镜像自带的 pgdg 源：
+# apt.postgresql.org 国内访问近乎不可用（P5 实测 6.7KB 索引卡死 7 分钟+）。
+RUN rm -f /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
     && apt-get install -y --no-install-recommends postgresql-17-pgvector \
     && rm -rf /var/lib/apt/lists/*
