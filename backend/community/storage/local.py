@@ -9,11 +9,15 @@ from backend.community.storage.base import StorageBackend, StorageResult
 
 
 class LocalStorage(StorageBackend):
-    """本地文件存储：文件直接写入 upload_dir/community/... 目录。"""
+    """本地文件存储：文件直接写入 upload_dir/community/... 目录。
+
+    key 本身以 `community/` 开头，因此 base_path 不再额外追加 community，
+    避免写成 upload_dir/community/community/... 的重复目录。
+    """
 
     def __init__(self, upload_dir: Path) -> None:
         self.upload_dir = upload_dir
-        self.base_path = upload_dir / "community"
+        self.base_path = upload_dir
         self.base_path.mkdir(parents=True, mode=0o755, exist_ok=True)
 
     async def upload(
