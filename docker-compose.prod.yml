@@ -59,6 +59,8 @@ services:
     volumes:
       - ./knowledge_graph:/app/knowledge_graph:ro
       - ./scripts/migrate-all.sh:/app/scripts/migrate-all.sh:ro
+      # 生产 Settings 强校验要求 RSA 密钥文件（签发/验签），迁移进程同样实例化 Settings
+      - ./secrets:/secrets:ro
     # §7.16：逐链 upgrade head，任一失败非零退出 → 应用不启动
     command: ["sh", "/app/scripts/migrate-all.sh"]
 
@@ -123,6 +125,7 @@ services:
       BACKUP_ROOT: /backups
       COMMUNITY_READER_BASE_URL: http://memory-api:8000
     volumes:
+      - ./secrets:/secrets:ro
       - memory-data:/data/memory
       - ./knowledge_graph:/app/knowledge_graph:ro
       - backups:/backups
@@ -142,6 +145,7 @@ services:
       BACKUP_ROOT: /backups
       MEMORY_SCHEDULER_TIMEZONE: Asia/Shanghai
     volumes:
+      - ./secrets:/secrets:ro
       - memory-data:/data/memory
       - ./knowledge_graph:/app/knowledge_graph:ro
       - backups:/backups
@@ -160,6 +164,7 @@ services:
       MEMORY_STORAGE_ROOT: /data/memory
       BACKUP_ROOT: /backups
     volumes:
+      - ./secrets:/secrets:ro
       - memory-data:/data/memory
       - ./knowledge_graph:/app/knowledge_graph:ro
       - backups:/backups
@@ -178,6 +183,7 @@ services:
       MEMORY_STORAGE_ROOT: /data/memory
       MEMORY_API_BASE_URL: http://memory-api:8000
     volumes:
+      - ./secrets:/secrets:ro
       - memory-data:/data/memory
       - ./knowledge_graph:/app/knowledge_graph:ro
     command: uv run --no-sync python -m backend.conversation.worker.main
