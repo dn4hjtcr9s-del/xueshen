@@ -48,4 +48,9 @@ setup_db conversation  "$PG_CONVERSATION_OWNER_PASSWORD"  "$PG_CONVERSATION_APP_
 setup_db community     "$PG_COMMUNITY_OWNER_PASSWORD"     "$PG_COMMUNITY_APP_PASSWORD"
 setup_db rag           "$PG_RAG_OWNER_PASSWORD"           "$PG_RAG_APP_PASSWORD"
 
+# rag 链迁移含 CREATE EXTENSION vector（pgvector），owner 非超级用户无权创建，
+# 由 initdb 超级用户预建（迁移 SQL 带 IF NOT EXISTS，幂等兼容；P5 实测踩坑）
+psql -v ON_ERROR_STOP=1 -U postgres -d rag -c "CREATE EXTENSION IF NOT EXISTS vector;"
+echo "[initdb] rag: vector 扩展已预建"
+
 echo "[initdb] 五库初始化完成"
