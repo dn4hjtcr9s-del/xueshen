@@ -27,10 +27,13 @@ CREATE DATABASE ${db} OWNER ${owner};
 REVOKE CONNECT ON DATABASE ${db} FROM PUBLIC;
 GRANT CONNECT ON DATABASE ${db} TO ${owner};
 GRANT CONNECT ON DATABASE ${db} TO ${app};
--- owner 迁移新建对象自动授权 app（表 DML + 序列自增）
-ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} IN SCHEMA public
+-- owner 迁移新建对象自动授权 app（表 DML + 序列自增）。
+-- 不加 IN SCHEMA 限定 = 全局默认权限：迁移会创建非 public schema
+-- （memory.ops / conversation.conversation / rag.rag 等），限定 public 会导致
+-- app 角色读不到新 schema 的表（P5 实测踩坑：维护闸门读 ops.system_maintenance 失败）。
+ALTER DEFAULT PRIVILEGES FOR ROLE ${owner}
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${app};
-ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} IN SCHEMA public
+ALTER DEFAULT PRIVILEGES FOR ROLE ${owner}
     GRANT USAGE, SELECT ON SEQUENCES TO ${app};
 SQL
 

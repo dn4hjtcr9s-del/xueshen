@@ -1,2 +1,0 @@
-# 每日 03:17 备份（避开整点/半点拥堵；容器时区 UTC，对应北京时间 11:17）
-17 3 * * * /usr/local/bin/backup.sh >> /var/log/backup.log 2>&1

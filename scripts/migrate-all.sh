@@ -52,6 +52,54 @@ fi
 
 run_chain rag rag_alembic.ini RAG_DATABASE_URL "${RAG_MIGRATE_DATABASE_URL:-}"
 
+# 迁移后授权兜底（P5 实测踩坑）：DEFAULT PRIVILEGES 只覆盖"之后"新建的对象，
+# 且 schema USAGE 无法预授给迁移前尚不存在的 schema（memory.ops /
+# conversation.conversation / rag.rag 等）。每链完成后以 owner 身份对本库
+# 全部业务 schema 做幂等授权，保证 app 角色可读维护闸门等运行必需表。
+grant_app_access() {
+    name="$1"
+    url="$2"
+    app_role="$3"
+    if [ -z "$url" ]; then
+        return 0
+    fi
+    echo "[migrate-all] $name 库授权 $app_role（全业务 schema 幂等）..."
+    GRANT_URL="$url" GRANT_ROLE="$app_role" uv run --no-sync python - <<'PY' \
+        || fail "$name 库授权非零退出"
+import os
+
+import psycopg
+from psycopg import sql
+
+url = os.environ["GRANT_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
+role = os.environ["GRANT_ROLE"]
+
+with psycopg.connect(url, autocommit=True) as conn, conn.cursor() as cur:
+    cur.execute(
+        "SELECT schema_name FROM information_schema.schemata "
+        "WHERE schema_name !~ '^pg_' AND schema_name <> 'information_schema'"
+    )
+    schemas = [row[0] for row in cur.fetchall()]
+    for schema in schemas:
+        for template in (
+            "GRANT USAGE ON SCHEMA {} TO {}",
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {} TO {}",
+            "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {} TO {}",
+        ):
+            cur.execute(sql.SQL(template).format(sql.Identifier(schema), sql.Identifier(role)))
+    print(f"[grant] schemas={schemas} role={role} 完成")
+PY
+}
+
+grant_app_access memory "${MEMORY_MIGRATE_DATABASE_URL:-}" memory_app
+grant_app_access auth "${AUTH_MIGRATE_DATABASE_URL:-}" auth_app
+grant_app_access conversation "${CONVERSATION_MIGRATE_DATABASE_URL:-}" conversation_app
+grant_app_access community "${COMMUNITY_MIGRATE_DATABASE_URL:-}" community_app
+if [ "${STUDY_DOMAIN_ENABLED:-false}" = "true" ]; then
+    grant_app_access study "${STUDY_MIGRATE_DATABASE_URL:-}" study_app
+fi
+grant_app_access rag "${RAG_MIGRATE_DATABASE_URL:-}" rag_app
+
 # 全部链成功后同步知识图谱注册表（否则 /health/ready 报 knowledge_graph_registry_not_loaded）。
 # sync 写 memory 库，用属主连接串。
 if [ -n "${MEMORY_MIGRATE_DATABASE_URL:-}" ]; then
