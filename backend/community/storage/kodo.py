@@ -35,6 +35,12 @@ class KodoStorage(StorageBackend):
         self.cdn_domain = settings.kodo_cdn_domain
         self.connect_timeout = settings.kodo_connect_timeout_seconds
         self.read_timeout = settings.kodo_read_timeout_seconds
+        # qiniu 7.18 的 put_data / BucketManager.delete 均不接受 timeout 参数
+        # （旧代码按旧版 SDK 传参会 TypeError，P5 冒烟实测踩坑）；超时只能走全局配置，
+        # 且 SDK 只有 connection_timeout 一项，取两者较大值兜底。
+        from qiniu import config
+
+        config.set_default("connection_timeout", max(self.connect_timeout, self.read_timeout))
 
     async def upload(
         self,
@@ -48,8 +54,6 @@ class KodoStorage(StorageBackend):
         token = self.auth.upload_token(self.bucket, key)
         file_data = data.read()
 
-        timeout = (self.connect_timeout, self.read_timeout)
-
         def _do_upload() -> tuple[Any, Any]:
             return cast(
                 tuple[Any, Any],
@@ -59,7 +63,6 @@ class KodoStorage(StorageBackend):
                     file_data,
                     mime_type=mime,
                     check_crc=True,
-                    timeout=timeout,
                 ),
             )
 
@@ -107,12 +110,8 @@ class KodoStorage(StorageBackend):
         return StorageResult(storage_key=key, success=True)
 
     async def delete(self, key: str) -> StorageResult:
-        timeout = (self.connect_timeout, self.read_timeout)
-
         def _do_delete() -> tuple[Any, Any]:
-            return cast(
-                tuple[Any, Any], self.bucket_manager.delete(self.bucket, key, timeout=timeout)
-            )
+            return cast(tuple[Any, Any], self.bucket_manager.delete(self.bucket, key))
 
         try:
             _ret, info = await anyio.to_thread.run_sync(
