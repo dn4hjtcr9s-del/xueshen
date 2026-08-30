@@ -58,8 +58,9 @@ GET /metrics         Prometheus 指标（不含 user_id）
 
 ```bash
 cd /opt/xueshen
-export GIT_SHA=$(git rev-parse --short HEAD)
-# ① 建密钥（首次）：mkdir -p secrets && bash scripts/generate_auth_keys.sh（产物移入 secrets/ 并 chmod 600）
+# ⓪ 首次：cp deploy/env.production.example .env.production 填值 && chmod 600 .env.production
+#    && ln -sf .env.production .env（compose 插值只读 .env；服务 env_file 读 .env.production）
+# ① 建密钥（首次）：bash scripts/generate_auth_keys.sh secrets（0600 已在脚本内保证）
 # ② 前端构建（一次性 job）
 docker compose -f docker-compose.prod.yml run --rm frontend-build
 # ③ postgres
