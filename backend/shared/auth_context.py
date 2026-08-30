@@ -155,9 +155,12 @@ async def get_optional_auth_context(request: Request) -> AuthContext | None:
         headers.pop("authorization", None)
         authz = None
 
-    # 无 Authorization 头且非 development：直接匿名
-    if authz is None and not settings.is_development:
-        return None
+    # 无 Authorization 头：生产环境直接匿名；development 下无 X-Dev-User-Id 也匿名
+    if authz is None:
+        if not settings.is_development:
+            return None
+        if headers.get("x-dev-user-id") is None:
+            return None
 
     async with session_factory() as session:
         resolver_factory: Callable[[AsyncSession], IdentityMappingResolver] | None = getattr(

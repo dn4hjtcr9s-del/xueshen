@@ -329,6 +329,7 @@ async def test_post_detail_replies_pagination_and_cursor_binding(
     assert r3.status_code == 422
 
 
-async def test_auth_required(client: AsyncClient) -> None:
+async def test_anonymous_read_allowed(client: AsyncClient) -> None:
+    """D46：读接口无凭证时匿名访问，返回 200。"""
     r = await client.get("/api/v1/community/posts")
-    assert r.status_code == 401
+    assert r.status_code == 200
