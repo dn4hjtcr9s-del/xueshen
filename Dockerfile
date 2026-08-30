@@ -35,6 +35,9 @@ COPY conversation_alembic.ini ./
 COPY conversation_migrations ./conversation_migrations
 COPY community_alembic.ini ./
 COPY community_migrations ./community_migrations
+# RAG 独立迁移链（§7.16 链清单含 rag；漏打包会导致 migrate-all 在 rag 链失败，P5 实测踩坑）
+COPY rag_alembic.ini ./
+COPY rag_migrations ./rag_migrations
 COPY knowledge_graph ./knowledge_graph
 
 ENV KNOWLEDGE_GRAPH_ROOT=/app/knowledge_graph \
