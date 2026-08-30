@@ -44,3 +44,62 @@ GET /metrics         Prometheus 指标（不含 user_id）
 - 日志：`LOG_LEVEL`、`LOG_HMAC_KEY`（日志中 user_id 只以 HMAC 摘要出现）
 
 `.local/` 已加入 `.gitignore`；密钥与备份不得入库。
+
+
+---
+
+## 生产部署（community-rebuild-plan.md Phase 5，v3.9 冻结）
+
+部署目录 `/opt/xueshen`（git clone/pull）；自研镜像服务器本地 `docker compose -f docker-compose.prod.yml build`，tag = git short SHA（`GIT_SHA`）。公网入口只有宿主机 nginx（443），memory-api 仅绑定 `127.0.0.1:8000`。
+
+**与计划 5.1/5.3/5.4 的偏离（所有者签字确认后生效）**：计划原设计 compose 内含 nginx + certbot 容器；实际宿主机已装 nginx 1.24 + certbot（`xueshen.xin` ECDSA 证书，certbot.timer 自动续期），改为宿主机 nginx 反代 + 托管 `frontend/dist`，compose 不含 nginx/certbot。站点配置 `deploy/nginx/xueshen.conf`。
+
+### 启动顺序（5.2 冻结，命令级）
+
+```bash
+cd /opt/xueshen
+export GIT_SHA=$(git rev-parse --short HEAD)
+# ① 建密钥（首次）：mkdir -p secrets && bash scripts/generate_auth_keys.sh（产物移入 secrets/ 并 chmod 600）
+# ② 前端构建（一次性 job）
+docker compose -f docker-compose.prod.yml run --rm frontend-build
+# ③ postgres
+docker compose -f docker-compose.prod.yml up -d postgres
+# ④ 五链迁移（restart:"no"，任一链失败即整体失败、应用不启动）
+docker compose -f docker-compose.prod.yml run --rm migrate
+# ⑤ 应用 + workers + backup
+docker compose -f docker-compose.prod.yml up -d
+# ⑥ 宿主机 nginx（首次安装站点配置后）：nginx -t && systemctl reload nginx
+# ⑦ 冒烟：curl http://127.0.0.1:8000/health/ready；浏览器走 5.7 清单
+```
+
+### 备份与恢复（5.5）
+
+backup 容器每日 03:17（UTC）逐库 `pg_dump -Fc` 到 named volume `backups`；任一失败产生 `/backups/FAILED-{yyyymmdd}` 标记（巡检发现，MVP 无主动告警）；成功则清 7 天前旧备份。恢复演练：`pg_restore` 到新建临时库，恢复后按需 `alembic upgrade`。
+
+### 5.6 部署记录表（格式冻结；任一行未确认 → 禁止进入 5.7 真实部署）
+
+| 项 | 值 | 确认人 | 确认日期 |
+|---|---|---|---|
+| postgres tag | 待抄录 | | |
+| nginx（宿主机）版本 | 1.24.0 (Ubuntu) | | |
+| certbot（宿主机）版本/续期 | certbot.timer 自动续期 | | |
+| alpine tag + postgresql17-client apk 版本 | 待抄录 | | |
+| python 基础镜像补丁版（根 Dockerfile FROM） | 待抄录（当前 `python:3.13-slim`，P5 改补丁版后独立 chore 提交） | | |
+| node 构建镜像补丁版 | 待抄录 | | |
+| Docker Engine / Compose 版本 | 29.7.2 / v5.5.0 | | |
+| git commit | 待填（部署时 HEAD） | | |
+| 回滚用旧 commit | 待填 | | |
+| 前端产物目录 | /opt/xueshen/frontend/dist | | |
+| 域名 / CDN 域名 / DNS | xueshen.xin + www / 待填 / A 记录已生效 | | |
+| Kodo 五项（脱敏：只记是否已配置） | 待确认 | | |
+| 管理员 UUID 名单（脱敏） | 待确认 | | |
+| 升配完成（2C4G + 2G swap） | 已完成（3.4Gi + 2Gi swap） | | |
+| 偏离项：宿主机 nginx/certbot 替代容器化 | 待所有者签字 | | |
+
+### 环境变量
+
+模板 `deploy/env.production.example` → `/opt/xueshen/.env.production`（chmod 600，`.env.*` 已 gitignore）。生产启动强校验：Kodo 五项 + `COMMUNITY_ADMIN_USER_IDS` + 认证密钥，缺即 Settings 构造抛错、进程不启动。
+
+### 回滚（5.6 冻结）
+
+先 downgrade（`alembic -c community_alembic.ini downgrade`，0002 downgrade 会清除附件/申请数据，已接受）→ 再切回旧镜像（`GIT_SHA=<旧>` 重新 `up -d`）。

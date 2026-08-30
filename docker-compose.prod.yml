@@ -1,0 +1,213 @@
+# 生产 Compose（community-rebuild-plan.md 5.1，独立新文件；开发用 docker-compose.yml 不动）。
+#
+# 与计划 5.1 的一处偏离（已写入 5.6 部署记录表待所有者签字确认）：
+#   计划原设计 compose 内含 nginx + certbot 容器；实际服务器宿主机已装好
+#   nginx 1.24 + certbot（xueshen.xin 证书，certbot.timer 自动续期），
+#   故本文件不含 nginx/certbot，改为宿主机 nginx 反代 127.0.0.1:8000 +
+#   托管 /opt/xueshen/frontend/dist（站点配置见 deploy/nginx/xueshen.conf）。
+#
+# 部署目录约定：/opt/xueshen（git clone/pull；自研镜像服务器本地 build，tag=git short SHA）。
+# 镜像版本冻结（计划 5.1 总规则：禁一切浮动 tag）：POSTGRES_IMAGE / NODE_IMAGE /
+# ALPINE_IMAGE / GIT_SHA 均在 .env.production 中显式固定，执行时抄录进 5.6 部署记录表。
+#
+# 启动顺序（计划 5.2 冻结）：
+#   ① postgres healthy → ② migrate（restart:"no"，五链 upgrade head + sync 图谱）
+#   → ③ memory-api（depends_on migrate=service_completed_successfully）
+#   → ④ workers/publishers → ⑤ 宿主机 nginx reload → ⑥ 冒烟
+
+name: xueshen-prod
+
+x-backend-image: &backend-image "xueshen-backend:${GIT_SHA:?GIT_SHA 未配置（git short SHA）}"
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE 未配置（执行时抄录补丁版，禁浮动 tag）}
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      # POSTGRES_PASSWORD 来自 .env.production（超级用户仅运维/备份用，不进入应用配置）
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # 空 volume 首启自动执行：五库 + owner/app 双角色（密码读 env，见脚本注释）
+      - ./deploy/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    # 不发布端口：仅 compose 网络内访问（应用 + backup），运维经 docker exec
+
+  migrate:
+    image: *backend-image
+    build: .
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env.production
+    environment:
+      APP_ENV: production
+      KNOWLEDGE_GRAPH_ROOT: /app/knowledge_graph
+    volumes:
+      - ./knowledge_graph:/app/knowledge_graph:ro
+      - ./scripts/migrate-all.sh:/app/scripts/migrate-all.sh:ro
+    # §7.16：逐链 upgrade head，任一失败非零退出 → 应用不启动
+    command: ["sh", "/app/scripts/migrate-all.sh"]
+
+  memory-api:
+    image: *backend-image
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file: .env.production
+    environment:
+      APP_ENV: production
+      KNOWLEDGE_GRAPH_ROOT: /app/knowledge_graph
+      MEMORY_STORAGE_ROOT: /data/memory
+      BACKUP_ROOT: /backups
+      AUTH_PRIVATE_KEY_FILE: /secrets/auth_private.pem
+      AUTH_PUBLIC_KEY_FILE: /secrets/auth_public.pem
+      # Memory runtime 经内部 Reader 读社区来源（token 在 .env.production）
+      COMMUNITY_READER_BASE_URL: http://memory-api:8000
+    ports:
+      # 仅绑定 loopback：公网入口只有宿主机 nginx
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - memory-data:/data/memory
+      - ./knowledge_graph:/app/knowledge_graph:ro
+      - backups:/backups
+      # 生产 RSA 密钥对（0600，部署时由 scripts/generate_auth_keys.sh 生成到宿主机）
+      - ./secrets:/secrets:ro
+    command: uv run --no-sync uvicorn backend.app:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      # slim 镜像无 curl/wget，用 python 探测；ready 含 DB/迁移版本/图谱注册表检查
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5).status == 200 else 1)"
+      interval: 10s
+      timeout: 8s
+      retries: 30
+      start_period: 30s
+
+  memory-worker:
+    image: *backend-image
+    restart: unless-stopped
+    depends_on:
+      memory-api:
+        condition: service_started
+    env_file: .env.production
+    environment:
+      APP_ENV: production
+      KNOWLEDGE_GRAPH_ROOT: /app/knowledge_graph
+      MEMORY_STORAGE_ROOT: /data/memory
+      BACKUP_ROOT: /backups
+      COMMUNITY_READER_BASE_URL: http://memory-api:8000
+    volumes:
+      - memory-data:/data/memory
+      - ./knowledge_graph:/app/knowledge_graph:ro
+      - backups:/backups
+    command: uv run --no-sync python -m backend.memory.worker.main
+
+  memory-scheduler:
+    image: *backend-image
+    restart: unless-stopped
+    depends_on:
+      memory-api:
+        condition: service_started
+    env_file: .env.production
+    environment:
+      APP_ENV: production
+      KNOWLEDGE_GRAPH_ROOT: /app/knowledge_graph
+      MEMORY_STORAGE_ROOT: /data/memory
+      BACKUP_ROOT: /backups
+      MEMORY_SCHEDULER_TIMEZONE: Asia/Shanghai
+    volumes:
+      - memory-data:/data/memory
+      - ./knowledge_graph:/app/knowledge_graph:ro
+      - backups:/backups
+    command: uv run --no-sync python -m backend.memory.worker.scheduler
+
+  memory-outbox-consumer:
+    image: *backend-image
+    restart: unless-stopped
+    depends_on:
+      memory-api:
+        condition: service_started
+    env_file: .env.production
+    environment:
+      APP_ENV: production
+      KNOWLEDGE_GRAPH_ROOT: /app/knowledge_graph
+      MEMORY_STORAGE_ROOT: /data/memory
+      BACKUP_ROOT: /backups
+    volumes:
+      - memory-data:/data/memory
+      - ./knowledge_graph:/app/knowledge_graph:ro
+      - backups:/backups
+    command: uv run --no-sync python -m backend.memory.worker.outbox_consumer
+
+  conversation-worker:
+    image: *backend-image
+    restart: unless-stopped
+    depends_on:
+      memory-api:
+        condition: service_started
+    env_file: .env.production
+    environment:
+      APP_ENV: production
+      KNOWLEDGE_GRAPH_ROOT: /app/knowledge_graph
+      MEMORY_STORAGE_ROOT: /data/memory
+      MEMORY_API_BASE_URL: http://memory-api:8000
+    volumes:
+      - memory-data:/data/memory
+      - ./knowledge_graph:/app/knowledge_graph:ro
+    command: uv run --no-sync python -m backend.conversation.worker.main
+
+  conversation-outbox-publisher:
+    image: *backend-image
+    restart: unless-stopped
+    depends_on:
+      memory-api:
+        condition: service_started
+    env_file: .env.production
+    environment:
+      APP_ENV: production
+      MEMORY_API_BASE_URL: http://memory-api:8000
+    command: uv run --no-sync python -m backend.conversation.publisher.main
+
+  backup:
+    build:
+      context: ./deploy/backup
+      args:
+        ALPINE_IMAGE: ${ALPINE_IMAGE:?ALPINE_IMAGE 未配置（执行时抄录补丁版）}
+    image: "xueshen-backup:${GIT_SHA:?GIT_SHA 未配置}"
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env.production
+    volumes:
+      # 备份产物宿主机可直接取走（异地副本由所有者手动/rsync，MVP 不做自动异地）
+      - backups:/backups
+
+  frontend-build:
+    # 一次性构建 job：npm ci && npm run build 产出 frontend/dist，
+    # 由宿主机 nginx 直接托管（root /opt/xueshen/frontend/dist）。
+    image: ${NODE_IMAGE:?NODE_IMAGE 未配置（node:24.x-slim 补丁版，不降 22）}
+    restart: "no"
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    command: sh -c "npm ci && npm run build"
+
+volumes:
+  postgres-data:
+  memory-data:
+  backups:
