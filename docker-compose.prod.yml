@@ -21,7 +21,16 @@ x-backend-image: &backend-image "xueshen-backend:${GIT_SHA:?GIT_SHA 未配置（
 
 services:
   postgres:
-    image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE 未配置（执行时抄录补丁版，禁浮动 tag）}
+    # 自研镜像：POSTGRES_IMAGE 基础版 + pgvector（RAG 链 vector 扩展，P5 实测踩坑）。
+    # 基础镜像仍由 .env.production 的 POSTGRES_IMAGE 固定补丁版；数据卷与 postgres:17.11
+    # 二进制兼容，仅新增扩展文件，无需重建数据。
+    image: "xueshen-postgres:${GIT_SHA:?GIT_SHA 未配置（git short SHA）}"
+    build:
+      context: ./deploy/postgres
+      args:
+        POSTGRES_IMAGE: ${POSTGRES_IMAGE:?POSTGRES_IMAGE 未配置（执行时抄录补丁版，禁浮动 tag）}
+        HTTP_PROXY: http://172.17.0.1:3128
+        HTTPS_PROXY: http://172.17.0.1:3128
     restart: unless-stopped
     env_file: .env.production
     environment:
