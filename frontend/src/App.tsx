@@ -29,7 +29,7 @@ import { ChatPage } from "./pages/Chat";
 import { PlanPage } from "./pages/Plan";
 import { KnowledgeMapPage } from "./pages/KnowledgeMap";
 import { KnowledgeSummariesPage } from "./pages/KnowledgeSummaries";
-import { CommunityPage } from "./pages/Community";
+import { CommunityPage } from "./pages/community";
 import { ProfilePage } from "./pages/Profile";
 
 const KNOWLEDGE_SUMMARY_ENABLED = import.meta.env.VITE_KNOWLEDGE_SUMMARY_ENABLED === "true";
@@ -156,7 +156,7 @@ function NotifPanel({
 }
 
 export default function App() {
-  const { initials } = useAuth();
+  const { initials, user } = useAuth();
   const [page, setPage] = useState<PageKey>("home");
   const [chatDraft, setChatDraft] = useState("");
   const [showNotif, setShowNotif] = useState(false);
@@ -165,6 +165,10 @@ export default function App() {
   const [unreadTotal, setUnreadTotal] = useState(0);
   // §6.5：Community 通知点击 → 切社区 Tab 并打开详情；详情打开/关闭后清空
   const [communityTargetPostId, setCommunityTargetPostId] = useState<string | null>(null);
+  // §九 行为①：社区页访问后保持挂载（隐藏不卸载），登录跳转后子视图状态保留；
+  // loginReturnPending 标记"因社区写操作跳登录"，登录成功后自动切回社区
+  const [communityVisited, setCommunityVisited] = useState(false);
+  const loginReturnPending = useRef(false);
   const [chatTarget, setChatTarget] = useState<{ threadId: string; turnId: string } | null>(null);
   const [summaryTargetId, setSummaryTargetId] = useState<string | null>(null);
   const [summaryFeatureUnavailable, setSummaryFeatureUnavailable] = useState(false);
@@ -261,6 +265,24 @@ export default function App() {
     setCommunityTargetPostId(postId);
   };
 
+  // §九：进入社区页后标记已访问（保持挂载，子视图状态跨页面切换保留）
+  useEffect(() => {
+    if (page === "community") setCommunityVisited(true);
+  }, [page]);
+
+  // §九 行为①：因社区写操作跳 profile 登录的，登录成功后自动切回社区原子视图
+  useEffect(() => {
+    if (user && loginReturnPending.current) {
+      loginReturnPending.current = false;
+      setPage("community");
+    }
+  }, [user]);
+
+  const communityLoginRequired = useCallback(() => {
+    loginReturnPending.current = true;
+    setPage("profile");
+  }, []);
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -328,11 +350,14 @@ export default function App() {
                 onFeatureUnavailable={handleSummaryFeatureUnavailable}
               />
             )}
-            {page === "community" && (
-              <CommunityPage
-                targetPostId={communityTargetPostId}
-                onTargetConsumed={() => setCommunityTargetPostId(null)}
-              />
+            {communityVisited && (
+              <div style={page === "community" ? undefined : { display: "none" }}>
+                <CommunityPage
+                  targetPostId={communityTargetPostId}
+                  onTargetConsumed={() => setCommunityTargetPostId(null)}
+                  onLoginRequired={communityLoginRequired}
+                />
+              </div>
             )}
             {page === "profile" && <ProfilePage />}
           </div>

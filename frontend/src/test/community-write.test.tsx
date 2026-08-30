@@ -1,19 +1,47 @@
-// Community 写交互前端测试（方案 §15.3，PR-C）：发帖/回复/点赞/解决/删除。
+// 社区写交互测试（§十二 前端矩阵）：发帖图片交互、点赞、删除确认。
+// 注：jsdom 环境 FormData 与 undici fetch 序列化不兼容，CreatePost 的上传/发帖
+// 走 vi.mock 的 api 层（真实请求通道由 community.test.tsx 的 client 测试覆盖）。
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CommunityPostSummary } from "../api/community";
-import { CommunityPage } from "../pages/Community";
+import { MemoryApiError } from "../api/client";
+import type { CommunityBoard, CommunityPostSummary } from "../api/community";
+import CreatePost from "../pages/community/CreatePost";
+import PostDetail from "../pages/community/PostDetail";
 import { server } from "./server";
+
+vi.mock("../api/community", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api/community")>();
+  return {
+    ...actual,
+    uploadAttachment: vi.fn(),
+    createPost: vi.fn(),
+  };
+});
+
+import { createPost, uploadAttachment } from "../api/community";
+
+const uploadMock = vi.mocked(uploadAttachment);
+const createPostMock = vi.mocked(createPost);
+
+// jsdom 无 objectURL：补齐 stub（CreatePost 本地预览依赖）
+if (typeof URL.createObjectURL !== "function") {
+  URL.createObjectURL = vi.fn(() => "blob:mock-preview");
+  URL.revokeObjectURL = vi.fn();
+}
+
+const BOARD: CommunityBoard = {
+  board_id: "da38ecb6-6f37-5724-be95-10e496b5f3dd",
+  slug: "linear-algebra",
+  name: "线性代数",
+  description: "",
+  post_count: 0,
+  sort_order: 10,
+};
 
 const POST: CommunityPostSummary = {
   post_id: "11111111-1111-4111-8111-111111111111",
-  board: {
-    board_id: "da38ecb6-6f37-5724-be95-10e496b5f3dd",
-    slug: "linear-algebra",
-    name: "线性代数",
-    description: "",
-  },
+  board: BOARD,
   author: { display_name: "alice" },
   title: "特征值直觉",
   pinned: false,
@@ -23,211 +51,177 @@ const POST: CommunityPostSummary = {
   viewer_liked: false,
   created_at: "2026-08-14T01:00:00Z",
   last_activity_at: "2026-08-14T02:00:00Z",
+  attachments: [],
 };
 
-const DETAIL = {
-  ...POST,
-  title: "特征值直觉",
-  body: "正文内容",
-  deleted: false,
-  discussion_status: "open",
-  viewer_is_author: true,
-  solved_reply_id: null,
-  deleted_at: null,
-};
+function makeFile(name: string): File {
+  return new File(["img-bytes"], name, { type: "image/png" });
+}
 
-function mockDetailFlow(overrides: Record<string, unknown> = {}) {
-  server.use(
-    http.get("*/memory-api/api/v1/community/boards", () =>
-      HttpResponse.json({ items: [POST.board] }),
-    ),
-    http.get("*/memory-api/api/v1/community/posts", () =>
-      HttpResponse.json({ items: [POST], next_cursor: null, has_more: false }),
-    ),
-    http.get("*/memory-api/api/v1/community/posts/:postId", () =>
-      HttpResponse.json({
-        post: { ...DETAIL, ...overrides },
-        replies: { items: [], next_cursor: null, has_more: false },
-      }),
-    ),
+function pickImages(input: HTMLInputElement, count: number) {
+  const files = Array.from({ length: count }, (_, i) => makeFile(`p${i}.png`));
+  fireEvent.change(input, { target: { files } });
+}
+
+function renderCreatePost(overrides: Partial<Parameters<typeof CreatePost>[0]> = {}) {
+  return render(
+    <CreatePost
+      boardId={BOARD.board_id}
+      boards={[BOARD]}
+      onDone={vi.fn()}
+      onCancel={vi.fn()}
+      isLoggedIn={true}
+      onLoginRequired={vi.fn()}
+      {...overrides}
+    />,
   );
 }
 
-function openDetail() {
-  render(<CommunityPage />);
-  return screen.findAllByText(POST.title).then(() => {
-    const row = screen.getByText(POST.title).closest(".post-row");
-    row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    return waitFor(() => expect(screen.getByText("正文内容")).toBeInTheDocument());
-  });
+function fillForm() {
+  fireEvent.change(screen.getByPlaceholderText(/标题/), { target: { value: "测试标题" } });
+  fireEvent.change(screen.getByPlaceholderText(/正文/), { target: { value: "测试正文" } });
 }
 
-describe("Community 写交互", () => {
-  beforeEach(() => server.resetHandlers());
+beforeEach(() => server.resetHandlers());
 
-  it("发帖面板提交成功后刷新列表", async () => {
-    const create = vi.fn();
-    server.use(
-      http.get("*/memory-api/api/v1/community/boards", () =>
-        HttpResponse.json({ items: [POST.board] }),
-      ),
-      http.get("*/memory-api/api/v1/community/posts", () =>
-        HttpResponse.json({ items: [], next_cursor: null, has_more: false }),
-      ),
-      http.post("*/memory-api/api/v1/community/posts", async ({ request }) => {
-        create(await request.json());
-        return HttpResponse.json(DETAIL, { status: 201 });
-      }),
-    );
-    render(<CommunityPage />);
-    await waitFor(() => {
-      expect(screen.getByText("发起讨论")).toBeInTheDocument();
-    });
-    screen.getByText("发起讨论").click();
-    const inputs = await screen.findAllByRole("textbox");
-    fireEvent.change(inputs[0], { target: { value: "新帖标题" } });
-    fireEvent.change(inputs[1], { target: { value: "新帖正文" } });
-    const publish = screen.getByText("发布");
-    await waitFor(() => expect((publish as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(publish);
-    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
-    expect(create.mock.calls[0][0]).toEqual({
-      board_id: POST.board.board_id,
-      title: "新帖标题",
-      body: "新帖正文",
-    });
+describe("发帖图片交互", () => {
+  it("选图第 4 张被阻止（最多 3 张）", () => {
+    renderCreatePost();
+    const input = document.querySelector<HTMLInputElement>(".img-picker-add input[type=file]")!;
+    pickImages(input, 4);
+    expect(document.querySelectorAll(".img-preview")).toHaveLength(3);
+    expect(screen.getByText("已达 3 张上限")).toBeInTheDocument();
   });
 
-  it("回复提交调用创建接口并清空输入框", async () => {
-    const create = vi.fn();
-    mockDetailFlow();
-    server.use(
-      http.post("*/memory-api/api/v1/community/posts/:postId/replies", async ({ request }) => {
-        create(await request.json());
-        return HttpResponse.json(
-          {
-            reply_id: "22222222-2222-4222-8222-222222222222",
-            author: { display_name: "alice" },
-            body: "我的回复",
-            deleted: false,
-            viewer_is_author: true,
-            solved: false,
-            created_at: "2026-08-14T03:00:00Z",
-          },
-          { status: 201 },
+  it("部分上传失败：可移除失败项后发布成功", async () => {
+    uploadMock.mockImplementation(async (file: File) => {
+      if (file.name === "p1.png") {
+        throw new MemoryApiError(
+          502,
+          { code: "COMMUNITY_UPLOAD_FAILED", message: "x", retryable: true },
+          "fallback",
         );
-      }),
-    );
-    await openDetail();
-    const textarea = screen.getAllByRole("textbox")[0] as HTMLTextAreaElement;
-    fireEvent.change(textarea, { target: { value: "我的回复" } });
-    fireEvent.click(screen.getByText("发布"));
-    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
-    expect(create.mock.calls[0][0]).toEqual({ body: "我的回复" });
-  });
-
-  it("点赞/取消点赞切换", async () => {
-    const like = vi.fn();
-    const unlike = vi.fn();
-    mockDetailFlow();
-    server.use(
-      http.post("*/memory-api/api/v1/community/posts/:postId/like", () => {
-        like();
-        return HttpResponse.json({ status: "ok" });
-      }),
-      http.delete("*/memory-api/api/v1/community/posts/:postId/like", () => {
-        unlike();
-        return HttpResponse.json({ status: "ok" });
-      }),
-    );
-    await openDetail();
-    fireEvent.click(screen.getByText("0"));
-    await waitFor(() => expect(like).toHaveBeenCalledTimes(1));
-  });
-
-  it("作者删除帖子需确认（§6.6 弹层文案）；确认后调用删除接口并返回列表", async () => {
-    const remove = vi.fn();
-    mockDetailFlow();
-    server.use(
-      http.delete("*/memory-api/api/v1/community/posts/:postId", () => {
-        remove();
-        return HttpResponse.json({ status: "ok" });
-      }),
-    );
-    await openDetail();
-    const deleteBtn = screen.getAllByText("删除")[0];
-    fireEvent.click(deleteBtn);
-    // 冻结文案（§6.6）：确认弹层出现；未确认不触发删除
-    await waitFor(() => {
-      expect(screen.getByText("删除这条帖子？")).toBeInTheDocument();
+      }
+      return {
+        attachment_id: `att-${file.name}`,
+        url: `/u/${file.name}`,
+        mime: "image/png",
+        width: 10,
+        height: 10,
+        size_bytes: 100,
+      };
     });
-    expect(remove).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByText("确认删除"));
-    await waitFor(() => expect(remove).toHaveBeenCalledTimes(1));
+    createPostMock.mockResolvedValue({} as Awaited<ReturnType<typeof createPost>>);
+    const onDone = vi.fn();
+    renderCreatePost({ onDone });
+    fillForm();
+    const input = document.querySelector<HTMLInputElement>(".img-picker-add input[type=file]")!;
+    pickImages(input, 2); // p0 成功，p1 失败
+
+    fireEvent.click(screen.getByText("发布"));
+    await waitFor(() =>
+      expect(screen.getByText(/部分图片上传失败/)).toBeInTheDocument(),
+    );
+    expect(onDone).not.toHaveBeenCalled();
+    expect(createPostMock).not.toHaveBeenCalled();
+
+    // 移除失败项（不调后端删除接口）后可发布
+    const removeButtons = screen.getAllByText("移除");
+    fireEvent.click(removeButtons[1]);
+    fireEvent.click(screen.getByText("发布"));
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    expect(createPostMock).toHaveBeenCalledTimes(1);
+    expect(createPostMock.mock.calls[0][0]["attachment_ids"]).toEqual(["att-p0.png"]);
   });
 
-  it("解决状态切换调用 resolve 接口（标记/取消）", async () => {
-    const resolve = vi.fn();
-    mockDetailFlow();
-    server.use(
-      http.get("*/memory-api/api/v1/community/posts/:postId", () =>
-        HttpResponse.json({
-          post: {
-            ...DETAIL,
-            solved: true,
-            solved_reply_id: "22222222-2222-4222-8222-222222222222",
-          },
-          replies: {
-            items: [
-              {
-                reply_id: "22222222-2222-4222-8222-222222222222",
-                author: { display_name: "bob" },
-                body: "答案",
-                deleted: false,
-                viewer_is_author: false,
-                solved: true,
-                created_at: "2026-08-14T03:00:00Z",
-              },
-            ],
-            next_cursor: null,
-            has_more: false,
-          },
-        }),
+  it("发帖 422 失败保留文本与附件", async () => {
+    uploadMock.mockResolvedValue({
+      attachment_id: "att-1",
+      url: "/u/a.png",
+      mime: "image/png",
+      width: 1,
+      height: 1,
+      size_bytes: 1,
+    });
+    createPostMock.mockRejectedValue(
+      new MemoryApiError(
+        422,
+        {
+          code: "COMMUNITY_CONTENT_INVALID",
+          message: "标题不符合规范",
+          retryable: false,
+          field: "title",
+        },
+        "fallback",
       ),
-      http.post("*/memory-api/api/v1/community/posts/:postId/resolve", async ({ request }) => {
-        resolve(await request.json());
+    );
+    renderCreatePost();
+    fillForm();
+    const input = document.querySelector<HTMLInputElement>(".img-picker-add input[type=file]")!;
+    pickImages(input, 1);
+    fireEvent.click(screen.getByText("发布"));
+    await waitFor(() => expect(screen.getByText("标题不符合规范")).toBeInTheDocument());
+    // 文本与已上传附件保留（重试不重传）
+    expect(screen.getByPlaceholderText(/标题/)).toHaveValue("测试标题");
+    expect(screen.getByText("已上传")).toBeInTheDocument();
+  });
+});
+
+describe("帖子详情写交互", () => {
+  const DETAIL = {
+    ...POST,
+    body: "正文",
+    deleted: false,
+    discussion_status: "open",
+    viewer_is_author: true,
+    solved_reply_id: null,
+    deleted_at: null,
+    attachments: [],
+  };
+
+  function mockDetail() {
+    server.use(
+      http.get(`*/memory-api/api/v1/community/posts/${POST.post_id}`, () =>
+        HttpResponse.json({ post: DETAIL, replies: { items: [], next_cursor: null, has_more: false } }),
+      ),
+    );
+  }
+
+  it("点赞调用 like 接口", async () => {
+    mockDetail();
+    let likeCalls = 0;
+    server.use(
+      http.post(`*/memory-api/api/v1/community/posts/${POST.post_id}/like`, () => {
+        likeCalls += 1;
         return HttpResponse.json({ status: "ok" });
       }),
     );
-    await openDetail();
-    await waitFor(() => expect(screen.getByText("取消解决")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("取消解决"));
-    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1));
-    expect(resolve.mock.calls[0][0]).toEqual({ reply_id: null });
+    render(
+      <PostDetail postId={POST.post_id} onBack={() => {}} isLoggedIn={true} onLoginRequired={() => {}} />,
+    );
+    await waitFor(() => expect(screen.getByText("特征值直觉")).toBeInTheDocument());
+    const likeButton = document.querySelector<HTMLButtonElement>(".comm-action")!;
+    fireEvent.click(likeButton);
+    await waitFor(() => expect(likeCalls).toBe(1));
   });
 
-  it("通知跳转：targetPostId 直接打开详情并消费", async () => {
-    mockDetailFlow();
-    const consumed = vi.fn();
-    const { rerender } = render(
-      <CommunityPage targetPostId={null} onTargetConsumed={consumed} />,
+  it("删除帖子：确认弹层 → DELETE → 返回", async () => {
+    mockDetail();
+    let deleteCalls = 0;
+    server.use(
+      http.delete(`*/memory-api/api/v1/community/posts/${POST.post_id}`, () => {
+        deleteCalls += 1;
+        return HttpResponse.json({ status: "ok" });
+      }),
     );
-    rerender(
-      <CommunityPage targetPostId={POST.post_id} onTargetConsumed={consumed} />,
+    const onBack = vi.fn();
+    render(
+      <PostDetail postId={POST.post_id} onBack={onBack} isLoggedIn={true} onLoginRequired={() => {}} />,
     );
-    await waitFor(() => expect(screen.getByText("正文内容")).toBeInTheDocument());
-    await waitFor(() => expect(consumed).toHaveBeenCalled());
-  });
-
-  it("通知跳转时先切到讨论区 Tab（§6.5#5）", async () => {
-    mockDetailFlow();
-    const { rerender } = render(<CommunityPage />);
-    // 切到其他 Tab
-    fireEvent.click(screen.getByText("打卡圈"));
-    expect(screen.getByText("即将开放")).toBeInTheDocument();
-    rerender(<CommunityPage targetPostId={POST.post_id} onTargetConsumed={() => {}} />);
-    // target 到达后自动切回讨论区并打开详情（不被"打卡圈"Tab 清掉）
-    await waitFor(() => expect(screen.getByText("正文内容")).toBeInTheDocument());
-    expect(screen.queryByText("该帖子已被作者删除")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("特征值直觉")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("删除"));
+    fireEvent.click(screen.getByText("确认删除"));
+    await waitFor(() => expect(deleteCalls).toBe(1));
+    await waitFor(() => expect(onBack).toHaveBeenCalledTimes(1));
   });
 });

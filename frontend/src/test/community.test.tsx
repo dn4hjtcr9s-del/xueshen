@@ -1,24 +1,37 @@
-// Community 前端测试（方案 §15.3，PR-B）：API client + 讨论区列表/详情渲染。
+// 社区重建前端测试（docs/community-rebuild-plan.md §十二 前端矩阵）：
+// API client 契约 + 首页/详情/审核渲染 + 匿名行为。
 import { render, screen, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  getPostDetail,
+  createBoardApplication,
+  createPost,
+  getBoardDetail,
+  listAdminBoardApplications,
   listBoards,
-  listPosts,
+  listMyBoardApplications,
+  uploadAttachment,
+  type CommunityBoard,
   type CommunityPostSummary,
 } from "../api/community";
-import { CommunityPage } from "../pages/Community";
+import { communityErrorMessage } from "../pages/community/format";
+import CommunityHome from "../pages/community/CommunityHome";
+import PostDetail from "../pages/community/PostDetail";
+import AdminApplications from "../pages/community/AdminApplications";
 import { server } from "./server";
+
+const BOARD: CommunityBoard = {
+  board_id: "da38ecb6-6f37-5724-be95-10e496b5f3dd",
+  slug: "linear-algebra",
+  name: "线性代数",
+  description: "矩阵、向量空间、特征值与线性变换",
+  post_count: 5,
+  sort_order: 10,
+};
 
 const POST: CommunityPostSummary = {
   post_id: "11111111-1111-4111-8111-111111111111",
-  board: {
-    board_id: "da38ecb6-6f37-5724-be95-10e496b5f3dd",
-    slug: "linear-algebra",
-    name: "线性代数",
-    description: "矩阵、向量空间、特征值与线性变换",
-  },
+  board: BOARD,
   author: { display_name: "alice" },
   title: "大家都是怎么建立特征值的直觉的？",
   pinned: false,
@@ -28,216 +41,357 @@ const POST: CommunityPostSummary = {
   viewer_liked: false,
   created_at: "2026-08-14T01:00:00Z",
   last_activity_at: "2026-08-14T02:00:00Z",
+  attachments: [],
 };
 
-const BOARDS = [
-  { board_id: "da38ecb6-6f37-5724-be95-10e496b5f3dd", slug: "linear-algebra", name: "线性代数", description: "" },
-  { board_id: "dcd2a3a5-7e06-5b7e-891f-e065765dcde0", slug: "calculus", name: "微积分", description: "" },
-];
+const APPLICATION = {
+  application_id: "22222222-2222-4222-8222-222222222222",
+  name: "心理咨询",
+  slug: "psych-counseling",
+  description: "聊聊心事",
+  reason: "希望有一个可以倾诉的地方",
+  status: "pending",
+  board_id: null,
+  reviewed_at: null,
+  reject_reason: null,
+  created_at: "2026-08-20T01:00:00Z",
+};
 
-describe("community API client", () => {
-  beforeEach(() => server.resetHandlers());
+function publicError(status: number, code: string, message: string) {
+  return HttpResponse.json(
+    { error: { code, message, retryable: false, field: null, trace_id: "trace-test" } },
+    { status },
+  );
+}
 
-  it("401 refresh 后幂等重试不重复发帖（幂等键保持不变）", async () => {
-    // §15.3：401 → single-flight refresh → 重放；createPost 只重放一次且
-    // Idempotency-Key 不变（客户端幂等键保证服务端去重）
-    const { setAccessToken } = await import("../auth/tokenStore");
-    setAccessToken("stale-token");
-    let postCalls = 0;
-    let refreshCalls = 0;
-    const capturedKeys: string[] = [];
+beforeEach(() => server.resetHandlers());
+
+describe("community API client（重建新增接口）", () => {
+  it("listBoards 返回 items（含 post_count）", async () => {
     server.use(
-      http.post("*/api/v1/auth/refresh", () => {
-        refreshCalls += 1;
-        return HttpResponse.json({ access_token: "refreshed-token" });
+      http.get("*/memory-api/api/v1/community/boards", () =>
+        HttpResponse.json({ items: [BOARD] }),
+      ),
+    );
+    const boards = await listBoards();
+    expect(boards).toHaveLength(1);
+    expect(boards[0].post_count).toBe(5);
+  });
+
+  it("getBoardDetail 返回平铺板块对象（无包裹层）", async () => {
+    server.use(
+      http.get("*/memory-api/api/v1/community/boards/linear-algebra", () =>
+        HttpResponse.json({
+          ...BOARD,
+          post_count: 5,
+          created_at: "2026-08-01T00:00:00Z",
+          viewer_is_owner: false,
+        }),
+      ),
+    );
+    const resp = await getBoardDetail("linear-algebra");
+    expect(resp.slug).toBe("linear-algebra");
+    expect(resp.viewer_is_owner).toBe(false);
+  });
+
+  it("createPost 携带 attachment_ids（顺序敏感）", async () => {
+    let captured: Record<string, unknown> | null = null;
+    server.use(
+      http.post("*/memory-api/api/v1/community/posts", async ({ request }) => {
+        captured = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({}, { status: 201 });
       }),
-      http.post("*/memory-api/api/v1/community/posts", ({ request }) => {
-        postCalls += 1;
-        capturedKeys.push(request.headers.get("Idempotency-Key") ?? "");
-        if (request.headers.get("Authorization") !== "Bearer refreshed-token") {
-          return new HttpResponse(null, { status: 401 });
-        }
+    );
+    await createPost({
+      board_id: BOARD.board_id,
+      title: "t",
+      body: "b",
+      attachment_ids: ["a-1", "a-2"],
+    });
+    expect(captured).not.toBeNull();
+    expect(captured!["attachment_ids"]).toEqual(["a-1", "a-2"]);
+  });
+
+  it("uploadAttachment 发送 multipart 表单 + Idempotency-Key", async () => {
+    // 注：jsdom 环境 FormData 与 undici fetch 的序列化存在差异（Content-Type 显示
+    // text/plain），multipart 断言只在真实浏览器有效；此处验证请求通道与幂等键。
+    let idemKey: string | null = null;
+    server.use(
+      http.post("*/memory-api/api/v1/community/uploads", ({ request }) => {
+        idemKey = request.headers.get("Idempotency-Key");
         return HttpResponse.json(
           {
-            ...POST,
-            body: "正文",
-            deleted: false,
-            discussion_status: "open",
-            viewer_is_author: true,
-            solved_reply_id: null,
-            deleted_at: null,
+            attachment_id: "33333333-3333-4333-8333-333333333333",
+            url: "/api/v1/community/local-uploads/community/2026-08/x.png",
+            mime: "image/png",
+            width: 10,
+            height: 10,
+            size_bytes: 100,
           },
           { status: 201 },
         );
       }),
     );
-    const { createPost } = await import("../api/community");
-    const resp = await createPost({ board_id: "b1", title: "t", body: "b" });
-    expect(resp.post_id).toBe(POST.post_id);
-    expect(refreshCalls).toBe(1);
-    expect(postCalls).toBe(2); // 1 次 401 + 1 次重放
-    // 幂等键在 401 重试中保持不变 → 服务端可按同键去重（§8.3）
-    expect(capturedKeys[0]).toBe(capturedKeys[1]);
-    expect(capturedKeys[0]).toMatch(/^[0-9a-f-]{36}$/);
+    const file = new File(["x"], "x.png", { type: "image/png" });
+    const uploaded = await uploadAttachment(file);
+    expect(idemKey).toBeTruthy();
+    expect(uploaded.attachment_id).toBe("33333333-3333-4333-8333-333333333333");
   });
 
-  it("帖子列表请求带筛选/游标参数", async () => {
+  it("建吧申请接口：提交 / mine / admin 列表", async () => {
     server.use(
-      http.get("*/memory-api/api/v1/community/posts", ({ request }) => {
+      http.post("*/memory-api/api/v1/community/applications", () =>
+        HttpResponse.json(APPLICATION, { status: 201 }),
+      ),
+      http.get("*/memory-api/api/v1/community/applications/mine", () =>
+        HttpResponse.json({ items: [APPLICATION], next_cursor: null, has_more: false }),
+      ),
+      http.get("*/memory-api/api/v1/community/admin/applications", ({ request }) => {
         const url = new URL(request.url);
-        expect(url.searchParams.get("sort")).toBe("unanswered");
-        expect(url.searchParams.get("board_id")).toBe(BOARDS[0].board_id);
-        expect(url.searchParams.get("cursor")).toBe("c1");
-        return HttpResponse.json({
-          items: [POST],
-          next_cursor: null,
-          has_more: false,
-        });
+        expect(url.searchParams.get("status")).toBe("all");
+        return HttpResponse.json({ items: [APPLICATION], next_cursor: null, has_more: false });
       }),
     );
-    const page = await listPosts({
-      board_id: BOARDS[0].board_id,
-      sort: "unanswered",
-      cursor: "c1",
+    const created = await createBoardApplication({
+      name: "心理咨询",
+      slug: "psych-counseling",
+      description: "聊聊心事",
+      reason: "希望有一个可以倾诉的地方",
     });
-    expect(page.items[0].title).toBe(POST.title);
-    expect(page.has_more).toBe(false);
+    expect(created.status).toBe("pending");
+    const mine = await listMyBoardApplications();
+    expect(mine.items).toHaveLength(1);
+    const admin = await listAdminBoardApplications({ status: "all" });
+    expect(admin.items[0].slug).toBe("psych-counseling");
   });
 
-  it("板块列表返回 items 数组", async () => {
+  it("409 BOARD_NAME_CONFLICT 映射为占用文案", async () => {
     server.use(
-      http.get("*/memory-api/api/v1/community/boards", () =>
-        HttpResponse.json({ items: BOARDS }),
+      http.post("*/memory-api/api/v1/community/applications", () =>
+        publicError(409, "BOARD_NAME_CONFLICT", "该名称或标识已被占用"),
       ),
     );
-    expect(await listBoards()).toHaveLength(2);
+    try {
+      await createBoardApplication({ name: "n", slug: "nn", description: "", reason: "r" });
+      expect.unreachable();
+    } catch (e) {
+      expect(communityErrorMessage(e, "申请提交失败")).toBe("该名称或标识已被占用");
+    }
   });
 
-  it("详情接口返回帖子和回复分页", async () => {
-    server.use(
-      http.get("*/memory-api/api/v1/community/posts/:postId", () =>
-        HttpResponse.json({
-          post: { ...POST, body: "正文", deleted: false, discussion_status: "open",
-                  viewer_is_author: true, solved_reply_id: null, deleted_at: null },
-          replies: { items: [], next_cursor: null, has_more: false },
-        }),
+  it("429 / 502 文案按 code 映射（不读 retryable）", async () => {
+    const { MemoryApiError } = await import("../api/client");
+    expect(
+      communityErrorMessage(
+        new MemoryApiError(
+          429,
+          { code: "COMMUNITY_RATE_LIMITED", message: "x", retryable: true },
+          "fallback",
+        ),
+        "fallback",
       ),
-    );
-    const resp = await getPostDetail({ post_id: POST.post_id });
-    expect(resp.post.body).toBe("正文");
+    ).toBe("操作太频繁，请稍后再试");
+    expect(
+      communityErrorMessage(
+        new MemoryApiError(
+          502,
+          {
+            code: "COMMUNITY_UPLOAD_FAILED",
+            message: "x",
+            retryable: true,
+          },
+          "fallback",
+        ),
+        "fallback",
+      ),
+    ).toBe("服务繁忙，请稍后再试");
   });
 });
 
-describe("CommunityPage 讨论区", () => {
-  beforeEach(() => {
-    server.resetHandlers();
-    server.use(
-      http.get("*/memory-api/api/v1/community/boards", () =>
-        HttpResponse.json({ items: BOARDS }),
-      ),
-    );
-  });
+describe("社区首页", () => {
+  const noop = () => {};
 
-  it("列表渲染帖子行并支持点击进入详情", async () => {
+  it("渲染板块宫格与帖子流", async () => {
     server.use(
       http.get("*/memory-api/api/v1/community/posts", () =>
         HttpResponse.json({ items: [POST], next_cursor: null, has_more: false }),
       ),
-      http.get("*/memory-api/api/v1/community/posts/:postId", () =>
-        HttpResponse.json({
-          post: { ...POST, body: "正文内容", deleted: false, discussion_status: "open",
-                  viewer_is_author: true, solved_reply_id: null, deleted_at: null },
-          replies: {
-            items: [
-              { reply_id: "22222222-2222-4222-8222-222222222222",
-                author: { display_name: "bob" }, body: "可以先从线性变换理解。",
-                deleted: false, viewer_is_author: false, solved: false,
-                created_at: "2026-08-14T03:00:00Z" },
-            ],
-            next_cursor: null,
-            has_more: false,
-          },
-        }),
+    );
+    render(
+      <CommunityHome
+        boards={[BOARD]}
+        boardsLoading={false}
+        onOpenBoard={noop}
+        onOpenPost={noop}
+        onCreatePost={noop}
+        onApply={noop}
+        onAdmin={noop}
+        isAdmin={false}
+        isLoggedIn={false}
+        onLoginRequired={noop}
+      />,
+    );
+    expect(screen.getByText("线性代数")).toBeInTheDocument();
+    expect(screen.getByText("5 帖")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByText("大家都是怎么建立特征值的直觉的？")).toBeInTheDocument(),
+    );
+  });
+
+  it("帖子流加载失败显示重试", async () => {
+    server.use(
+      http.get("*/memory-api/api/v1/community/posts", () =>
+        publicError(500, "INTERNAL_ERROR", "boom"),
       ),
     );
-    render(<CommunityPage />);
-    await waitFor(() => {
-      expect(screen.getByText(POST.title)).toBeInTheDocument();
-    });
-    // 点击帖子行（标题唯一；板块名同时出现在筛选 chip 与帖子 tag 中）
-    const row = screen.getByText(POST.title).closest(".post-row");
-    expect(row).not.toBeNull();
-    row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    await waitFor(() => {
-      expect(screen.getByText("正文内容")).toBeInTheDocument();
-    });
-    expect(screen.getByText("可以先从线性变换理解。")).toBeInTheDocument();
-  });
-
-  it("空态与错误重试", async () => {
-    let fail = true;
-    server.use(
-      http.get("*/memory-api/api/v1/community/posts", () => {
-        if (fail) return HttpResponse.json({ error: { code: "X", message: "boom" } }, { status: 500 });
-        return HttpResponse.json({ items: [POST], next_cursor: null, has_more: false });
-      }),
+    render(
+      <CommunityHome
+        boards={[BOARD]}
+        boardsLoading={false}
+        onOpenBoard={noop}
+        onOpenPost={noop}
+        onCreatePost={noop}
+        onApply={noop}
+        onAdmin={noop}
+        isAdmin={false}
+        isLoggedIn={false}
+        onLoginRequired={noop}
+      />,
     );
-    render(<CommunityPage />);
-    await waitFor(() => {
-      expect(screen.getByText("重试")).toBeInTheDocument();
-    });
-    fail = false;
-    screen.getByText("重试").click();
-    await waitFor(() => {
-      expect(screen.getByText(POST.title)).toBeInTheDocument();
-    });
+    await waitFor(() => expect(screen.getByText("重试")).toBeInTheDocument());
   });
 
-  it("空列表显示冻结空态文案", async () => {
+  it("管理员才渲染审核入口", () => {
     server.use(
       http.get("*/memory-api/api/v1/community/posts", () =>
         HttpResponse.json({ items: [], next_cursor: null, has_more: false }),
       ),
     );
-    render(<CommunityPage />);
-    await waitFor(() => {
-      expect(screen.getByText("还没有帖子，来发起第一个讨论吧")).toBeInTheDocument();
-    });
+    const { rerender } = render(
+      <CommunityHome
+        boards={[BOARD]}
+        boardsLoading={false}
+        onOpenBoard={noop}
+        onOpenPost={noop}
+        onCreatePost={noop}
+        onApply={noop}
+        onAdmin={noop}
+        isAdmin={false}
+        isLoggedIn={true}
+        onLoginRequired={noop}
+      />,
+    );
+    expect(screen.queryByText("建吧审核")).toBeNull();
+    rerender(
+      <CommunityHome
+        boards={[BOARD]}
+        boardsLoading={false}
+        onOpenBoard={noop}
+        onOpenPost={noop}
+        onCreatePost={noop}
+        onApply={noop}
+        onAdmin={noop}
+        isAdmin={true}
+        isLoggedIn={true}
+        onLoginRequired={noop}
+      />,
+    );
+    expect(screen.getByText("建吧审核")).toBeInTheDocument();
+  });
+});
+
+describe("帖子详情", () => {
+  const DETAIL = {
+    ...POST,
+    title: "特征值直觉",
+    body: "正文第一行\n第二行",
+    deleted: false,
+    discussion_status: "open",
+    viewer_is_author: false,
+    solved_reply_id: null,
+    deleted_at: null,
+    attachments: [
+      { attachment_id: "a1", url: "/u/1.png", width: 100, height: 80, mime: "image/png", position: 0 },
+      { attachment_id: "a2", url: "/u/2.png", width: 90, height: 70, mime: "image/png", position: 1 },
+    ],
+  };
+
+  function mockDetail() {
+    server.use(
+      http.get(`*/memory-api/api/v1/community/posts/${POST.post_id}`, () =>
+        HttpResponse.json({ post: DETAIL, replies: { items: [], next_cursor: null, has_more: false } }),
+      ),
+    );
+  }
+
+  it("正文保留换行渲染、配图按 position 序渲染", async () => {
+    mockDetail();
+    render(
+      <PostDetail postId={POST.post_id} onBack={() => {}} isLoggedIn={false} onLoginRequired={() => {}} />,
+    );
+    await waitFor(() => expect(screen.getByText("特征值直觉")).toBeInTheDocument());
+    const imgs = document.querySelectorAll(".comm-attachment img");
+    expect(imgs).toHaveLength(2);
+    expect(imgs[0].getAttribute("src")).toBe("/u/1.png");
+    expect(imgs[1].getAttribute("src")).toBe("/u/2.png");
+    expect(document.querySelector(".comm-detail-body")?.textContent).toContain("正文第一行");
   });
 
-  it("墓碑详情不泄露原正文（即使后端违约返回 body 也不渲染）", async () => {
+  it("匿名点回复发布触发 onLoginRequired，不调用 API", async () => {
+    mockDetail();
+    let replyCalls = 0;
     server.use(
-      http.get("*/memory-api/api/v1/community/posts", () =>
-        HttpResponse.json({ items: [POST], next_cursor: null, has_more: false }),
-      ),
-      http.get("*/memory-api/api/v1/community/posts/:postId", () =>
-        // 模拟后端契约违约：deleted=true 但仍带正文（真实泄露场景）
+      http.post(`*/memory-api/api/v1/community/posts/${POST.post_id}/replies`, () => {
+        replyCalls += 1;
+        return HttpResponse.json({}, { status: 201 });
+      }),
+    );
+    const onLoginRequired = vi.fn();
+    const { getByPlaceholderText, getByText } = render(
+      <PostDetail postId={POST.post_id} onBack={() => {}} isLoggedIn={false} onLoginRequired={onLoginRequired} />,
+    );
+    await waitFor(() => expect(screen.getByText("特征值直觉")).toBeInTheDocument());
+    const { fireEvent } = await import("@testing-library/react");
+    fireEvent.change(getByPlaceholderText("写下你的回复…"), { target: { value: "你好" } });
+    fireEvent.click(getByText("发布"));
+    expect(onLoginRequired).toHaveBeenCalledTimes(1);
+    expect(replyCalls).toBe(0);
+  });
+
+  it("用户内容纯文本渲染（<script> 原样显示）", async () => {
+    server.use(
+      http.get(`*/memory-api/api/v1/community/posts/${POST.post_id}`, () =>
         HttpResponse.json({
-          post: {
-            ...POST,
-            title: "SECRET_LEAK_TITLE",
-            body: "SECRET_LEAK_BODY",
-            deleted: true,
-            discussion_status: "closed",
-            viewer_is_author: true,
-            solved_reply_id: null,
-            deleted_at: "2026-08-14T04:00:00Z",
-          },
+          post: { ...DETAIL, body: "<script>alert(1)</script>", attachments: [] },
           replies: { items: [], next_cursor: null, has_more: false },
         }),
       ),
     );
-    render(<CommunityPage />);
-    await waitFor(() => {
-      expect(screen.getByText(POST.title)).toBeInTheDocument();
-    });
-    const row = screen.getByText(POST.title).closest(".post-row");
-    row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    await waitFor(() => {
-      expect(screen.getByText("该帖子已被作者删除")).toBeInTheDocument();
-    });
-    // 组件层面保证：墓碑渲染不泄露原正文（§6.6/§15.3）
-    expect(screen.queryByText("SECRET_LEAK_TITLE")).not.toBeInTheDocument();
-    expect(screen.queryByText("SECRET_LEAK_BODY")).not.toBeInTheDocument();
+    render(
+      <PostDetail postId={POST.post_id} onBack={() => {}} isLoggedIn={false} onLoginRequired={() => {}} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText("<script>alert(1)</script>")).toBeInTheDocument(),
+    );
+    expect(document.querySelector(".comm-detail-body script")).toBeNull();
+  });
+});
+
+describe("管理员审核视图", () => {
+  it("已登录非管理员直达显示 403 提示卡", () => {
+    render(<AdminApplications onBack={() => {}} isAdmin={false} />);
+    expect(screen.getByText(/需要社区管理员权限/)).toBeInTheDocument();
+  });
+
+  it("管理员看到待审核列表与通过/拒绝操作", async () => {
+    server.use(
+      http.get("*/memory-api/api/v1/community/admin/applications", () =>
+        HttpResponse.json({ items: [APPLICATION], next_cursor: null, has_more: false }),
+      ),
+    );
+    render(<AdminApplications onBack={() => {}} isAdmin={true} />);
+    await waitFor(() => expect(screen.getByText("心理咨询")).toBeInTheDocument());
+    expect(screen.getByText("通过")).toBeInTheDocument();
+    expect(screen.getByText("拒绝")).toBeInTheDocument();
   });
 });

@@ -214,6 +214,10 @@ export interface RequestOptions {
   query?: Record<string, string>;
   /** auth 端点自身（login/refresh 等）不参与 401 自动刷新，避免递归 */
   auth?: boolean;
+  /** multipart 上传（与 body 互斥）：不设置 Content-Type，由浏览器生成 boundary */
+  formData?: FormData;
+  /** 上传取消（AbortController，§九 D24） */
+  signal?: AbortSignal;
 }
 
 async function rawFetch(method: string, path: string, options: RequestOptions): Promise<Response> {
@@ -230,7 +234,8 @@ async function rawFetch(method: string, path: string, options: RequestOptions): 
     method,
     headers,
     credentials: "include",
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+    body: options.formData ?? (options.body !== undefined ? JSON.stringify(options.body) : undefined),
+    signal: options.signal,
   });
 }
 
