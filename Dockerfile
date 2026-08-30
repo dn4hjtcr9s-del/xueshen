@@ -9,13 +9,10 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.26 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# 依赖下载参数：默认官方 PyPI（本地开发不变）；生产构建经 compose build args
-# 注入国内镜像（UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/）并放宽超时，
-# 解决 1Mbps 带宽下 pypi.org 直连超时（P5 实测 tiktoken 下载失败）。
-ARG UV_INDEX_URL=https://pypi.org/simple
-ARG UV_HTTP_TIMEOUT=300
-ENV UV_INDEX_URL=${UV_INDEX_URL} \
-    UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT}
+# 放宽 uv 下载超时（生产 1Mbps 带宽下默认 30s 不足，P5 实测）。
+# 注：uv.lock 的 registry 已固定为阿里云 PyPI 镜像（--frozen 严格按锁文件源下载，
+# UV_INDEX_URL 对锁定 registry 无效，P5 实测），无需再注入镜像地址。
+ENV UV_HTTP_TIMEOUT=300
 
 # 先拷贝依赖清单，利用构建缓存
 COPY pyproject.toml uv.lock ./

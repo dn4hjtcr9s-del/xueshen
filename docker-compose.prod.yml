@@ -41,11 +41,7 @@ services:
 
   migrate:
     image: *backend-image
-    build:
-      context: .
-      args:
-        # 生产构建走阿里云 PyPI 镜像（1Mbps 直连 pypi.org 超时，P5 实测）
-        UV_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+    build: .
     restart: "no"
     depends_on:
       postgres:
@@ -62,11 +58,7 @@ services:
 
   memory-api:
     image: *backend-image
-    build:
-      context: .
-      args:
-        # 生产构建走阿里云 PyPI 镜像（1Mbps 直连 pypi.org 超时，P5 实测）
-        UV_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+    build: .
     restart: unless-stopped
     depends_on:
       postgres:
