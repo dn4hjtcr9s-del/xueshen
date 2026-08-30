@@ -207,6 +207,9 @@ services:
     environment:
       APP_ENV: production
       MEMORY_API_BASE_URL: http://memory-api:8000
+    volumes:
+      # 生产 Settings 强校验要求 RSA 密钥文件（P5 实测踩坑：无 volumes 块被批量补丁漏掉）
+      - ./secrets:/secrets:ro
     command: uv run --no-sync python -m backend.conversation.publisher.main
 
   backup:

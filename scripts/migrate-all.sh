@@ -100,6 +100,42 @@ if [ "${STUDY_DOMAIN_ENABLED:-false}" = "true" ]; then
 fi
 grant_app_access rag "${RAG_MIGRATE_DATABASE_URL:-}" rag_app
 
+# LangGraph checkpointer 运行时自建表（saver.setup() 在应用启动时执行 DDL），
+# app 角色必须持有对应 schema 的 CREATE 权限；CREATE TABLE IF NOT EXISTS 在表已存在时
+# 依然要求 CREATE，无法靠预建表规避（P5 实测踩坑：memory-api/worker 启动即崩）。
+# 冻结清单：memory 库 public schema（memory_app）、conversation 库
+# conversation_checkpoints schema（conversation_app）。
+grant_checkpoint_create() {
+    name="$1"
+    url="$2"
+    schema="$3"
+    app_role="$4"
+    if [ -z "$url" ]; then
+        return 0
+    fi
+    echo "[migrate-all] $name 库授权 ${app_role} CREATE ON SCHEMA ${schema}（LangGraph 运行时 DDL）..."
+    GRANT_URL="$url" GRANT_SCHEMA="$schema" GRANT_ROLE="$app_role" \
+        uv run --no-sync python - <<'PY' || fail "$name 库 checkpoint CREATE 授权非零退出"
+import os
+
+import psycopg
+from psycopg import sql
+
+url = os.environ["GRANT_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
+with psycopg.connect(url, autocommit=True) as conn, conn.cursor() as cur:
+    cur.execute(
+        sql.SQL("GRANT CREATE ON SCHEMA {} TO {}").format(
+            sql.Identifier(os.environ["GRANT_SCHEMA"]),
+            sql.Identifier(os.environ["GRANT_ROLE"]),
+        )
+    )
+print("[grant] checkpoint CREATE 完成")
+PY
+}
+
+grant_checkpoint_create memory "${MEMORY_MIGRATE_DATABASE_URL:-}" public memory_app
+grant_checkpoint_create conversation "${CONVERSATION_MIGRATE_DATABASE_URL:-}" conversation_checkpoints conversation_app
+
 # 全部链成功后同步知识图谱注册表（否则 /health/ready 报 knowledge_graph_registry_not_loaded）。
 # sync 写 memory 库，用属主连接串。
 if [ -n "${MEMORY_MIGRATE_DATABASE_URL:-}" ]; then
