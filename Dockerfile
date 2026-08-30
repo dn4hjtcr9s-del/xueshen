@@ -14,6 +14,12 @@ WORKDIR /app
 # UV_INDEX_URL 对锁定 registry 无效，P5 实测），无需再注入镜像地址。
 ENV UV_HTTP_TIMEOUT=300
 
+# 构建期正向代理（P5：CDN 对 python/uv 客户端指纹识别限速，宿主机 squid 满速）。
+# 仅声明 ARG 供 RUN 环境使用（docker 预定义代理参数需显式 ARG 才进 RUN 环境，
+# P5 实测未声明时 squid access.log 零命中），不写入镜像层、不影响缓存键。
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+
 # 先拷贝依赖清单，利用构建缓存
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
