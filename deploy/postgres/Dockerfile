@@ -10,7 +10,9 @@ ARG HTTPS_PROXY
 
 # pgvector 已在 Debian 官方源（trixie/main），临时移除镜像自带的 pgdg 源：
 # apt.postgresql.org 国内访问近乎不可用（P5 实测 6.7KB 索引卡死 7 分钟+）。
+# deb.debian.org 经代理同样不稳定，构建期换阿里云镜像（仅镜像内 apt，与运行时无关）。
 RUN rm -f /etc/apt/sources.list.d/pgdg.list \
+    && sed -i 's|//deb.debian.org|//mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends postgresql-17-pgvector \
     && rm -rf /var/lib/apt/lists/*
