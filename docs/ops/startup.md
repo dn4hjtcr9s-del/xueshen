@@ -81,19 +81,19 @@ backup 容器每日 03:17（UTC）逐库 `pg_dump -Fc` 到 named volume `backups
 
 | 项 | 值 | 确认人 | 确认日期 |
 |---|---|---|---|
-| postgres tag | 待抄录 | | |
+| postgres tag | postgres:17.11 | | |
 | nginx（宿主机）版本 | 1.24.0 (Ubuntu) | | |
-| certbot（宿主机）版本/续期 | certbot.timer 自动续期 | | |
-| alpine tag + postgresql17-client apk 版本 | 待抄录 | | |
-| python 基础镜像补丁版（根 Dockerfile FROM） | 待抄录（当前 `python:3.13-slim`，P5 改补丁版后独立 chore 提交） | | |
-| node 构建镜像补丁版 | 待抄录 | | |
+| certbot（宿主机）版本/续期 | 证书 xueshen.xin ECDSA 至 2026-11-28；certbot.timer 自动续期 | | |
+| alpine tag + postgresql17-client apk 版本 | alpine:3.24.1 + postgresql17-client（apk 实际版本部署时 `docker exec` 抄录） | | |
+| python 基础镜像补丁版（根 Dockerfile FROM） | python:3.13.15-slim（chore f2148b1 已提交） | | |
+| node 构建镜像补丁版 | node:24.20.0-slim | | |
 | Docker Engine / Compose 版本 | 29.7.2 / v5.5.0 | | |
-| git commit | 待填（部署时 HEAD） | | |
-| 回滚用旧 commit | 待填 | | |
+| git commit | a8f14ae | | |
+| 回滚用旧 commit | 07b0c4c | | |
 | 前端产物目录 | /opt/xueshen/frontend/dist | | |
-| 域名 / CDN 域名 / DNS | xueshen.xin + www / 待填 / A 记录已生效 | | |
-| Kodo 五项（脱敏：只记是否已配置） | 待确认 | | |
-| 管理员 UUID 名单（脱敏） | 待确认 | | |
+| 域名 / CDN 域名 / DNS | xueshen.xin + www.xueshen.xin / tkkx5xhrb.hd-bkt.clouddn.com / A 记录已生效 | | |
+| Kodo 五项（脱敏：只记是否已配置） | 已配置（AK/SK/Bucket=xueshenprod/Region=z0/CDN 域名；测试分桶 xueshentest） | | |
+| 管理员 UUID 名单（脱敏） | 部署冒烟注册后补填 | | |
 | 升配完成（2C4G + 2G swap） | 已完成（3.4Gi + 2Gi swap） | | |
 | 偏离项：宿主机 nginx/certbot 替代容器化 | 待所有者签字 | | |
 
