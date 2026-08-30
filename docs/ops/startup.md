@@ -68,6 +68,11 @@ docker compose -f docker-compose.prod.yml up -d postgres
 # ④ 五链迁移（restart:"no"，任一链失败即整体失败、应用不启动）
 docker compose -f docker-compose.prod.yml run --rm migrate
 # ⑤ 应用 + workers + backup
+#    首次启动或 checkpoint 表被清空后，必须先单起 memory-api 再全量：
+#    LangGraph saver.setup() 首启执行 CREATE INDEX CONCURRENTLY，多进程并发
+#    会互等锁卡死（P5 实测踩坑）；表建好后 setup 幂等，之后可正常全量 up。
+docker compose -f docker-compose.prod.yml up -d memory-api   # 等 healthy
+docker compose -f docker-compose.prod.yml up -d conversation-worker   # 首次：单建 conversation 检查点表
 docker compose -f docker-compose.prod.yml up -d
 # ⑥ 宿主机 nginx（首次安装站点配置后）：nginx -t && systemctl reload nginx
 # ⑦ 冒烟：curl http://127.0.0.1:8000/health/ready；浏览器走 5.7 清单
@@ -81,21 +86,28 @@ backup 容器每日 03:17（UTC）逐库 `pg_dump -Fc` 到 named volume `backups
 
 | 项 | 值 | 确认人 | 确认日期 |
 |---|---|---|---|
-| postgres tag | postgres:17.11 | | |
+| postgres tag | postgres:17.11（自研叠加 pgvector 0.8.0-1，见偏离项） | | |
 | nginx（宿主机）版本 | 1.24.0 (Ubuntu) | | |
 | certbot（宿主机）版本/续期 | 证书 xueshen.xin ECDSA 至 2026-11-28；certbot.timer 自动续期 | | |
-| alpine tag + postgresql17-client apk 版本 | alpine:3.24.1 + postgresql17-client（apk 实际版本部署时 `docker exec` 抄录） | | |
+| alpine tag + postgresql17-client apk 版本 | alpine:3.24.1 + postgresql17-client-17.11-r0 | | |
 | python 基础镜像补丁版（根 Dockerfile FROM） | python:3.13.15-slim（chore f2148b1 已提交） | | |
 | node 构建镜像补丁版 | node:24.20.0-slim | | |
 | Docker Engine / Compose 版本 | 29.7.2 / v5.5.0 | | |
-| git commit | a8f14ae | | |
-| 回滚用旧 commit | 07b0c4c | | |
+| git commit | d0e0562 | | |
+| 回滚用旧 commit | 5252d20（P5 首次拉栈基线） | | |
 | 前端产物目录 | /opt/xueshen/frontend/dist | | |
-| 域名 / CDN 域名 / DNS | xueshen.xin + www.xueshen.xin / tkkx5xhrb.hd-bkt.clouddn.com / A 记录已生效 | | |
+| 域名 / CDN 域名 / DNS | xueshen.xin + www.xueshen.xin / tkkx5xhrb.hd-bkt.clouddn.com（仅 HTTP 可用，见偏离项）/ A 记录已生效 | | |
 | Kodo 五项（脱敏：只记是否已配置） | 已配置（AK/SK/Bucket=xueshenprod/Region=z0/CDN 域名；测试分桶 xueshentest） | | |
-| 管理员 UUID 名单（脱敏） | 部署冒烟注册后补填 | | |
+| 管理员 UUID 名单（脱敏） | 已配置（冒烟注册账号 smoketest） | | |
 | 升配完成（2C4G + 2G swap） | 已完成（3.4Gi + 2Gi swap） | | |
 | 偏离项：宿主机 nginx/certbot 替代容器化 | 待所有者签字 | | |
+| 偏离项：postgres 自研镜像叠加 pgvector | RAG 链 vector 扩展需要，postgres:17.11 + postgresql-17-pgvector 0.8.0-1（deploy/postgres/Dockerfile，apt 走阿里云源、去 pgdg 源） | | |
+| 偏离项：squid 正向代理支撑镜像构建 | 国内 CDN 对 python/uv 客户端指纹限速 ~200KB/s，构建期 HTTP(S)_PROXY=http://172.17.0.1:3128（systemd 常驻，重启自启） | | |
+| 偏离项：uv.lock 全量换阿里云 PyPI 镜像 | registry + 571 个包文件直链 sed 替换（哈希不变，uv sync --frozen 审计通过） | | |
+| 偏离项：迁移后授权兜底 + LangGraph CREATE 授权 | initdb DEFAULT PRIVILEGES 去 IN SCHEMA 限定；migrate-all 增全 schema 幂等授权（仅 owner 自有对象）+ checkpoint schema CREATE 授权（memory.public / conversation.conversation_checkpoints） | | |
+| 偏离项：dcron 改常驻循环 | alpine dcron 容器内每分钟 setpgid 报错退出码 1，改 cron-loop.sh（触发语义不变：每日 UTC 03:17） | | |
+| 偏离项：qiniu SDK 7.18 适配 | put_data/delete 不再接受 timeout；set_default 须具名传参（两处 P5 冒烟实测踩坑修复） | | |
+| 待办：CDN 自定义域名 | 七牛测试域名仅 HTTP 可用（HTTPS 证书不匹配 + 403）；正式使用需在七牛控制台绑定自定义 CDN 域名（如 cdn.xueshen.xin）并配置 HTTPS 证书，然后改 .env.production 的 KODO_CDN_DOMAIN | | |
 
 ### 环境变量
 
