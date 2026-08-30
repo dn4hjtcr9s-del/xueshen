@@ -74,6 +74,9 @@ from psycopg import sql
 url = os.environ["GRANT_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
 role = os.environ["GRANT_ROLE"]
 
+# 只授权 current_user（owner）自己拥有的对象：LangGraph 运行时以 app 角色自建的
+# checkpoint 表归 app 所有，owner 对非自有对象 GRANT 会报 InsufficientPrivilege
+# （P5 实测踩坑）；app 自建表天然全权，无需 owner 再授。
 with psycopg.connect(url, autocommit=True) as conn, conn.cursor() as cur:
     cur.execute(
         "SELECT schema_name FROM information_schema.schemata "
@@ -81,13 +84,35 @@ with psycopg.connect(url, autocommit=True) as conn, conn.cursor() as cur:
     )
     schemas = [row[0] for row in cur.fetchall()]
     for schema in schemas:
-        for template in (
-            "GRANT USAGE ON SCHEMA {} TO {}",
-            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {} TO {}",
-            "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {} TO {}",
-        ):
-            cur.execute(sql.SQL(template).format(sql.Identifier(schema), sql.Identifier(role)))
-    print(f"[grant] schemas={schemas} role={role} 完成")
+        cur.execute(
+            sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                sql.Identifier(schema), sql.Identifier(role)
+            )
+        )
+    cur.execute(
+        "SELECT schemaname, tablename FROM pg_tables "
+        "WHERE schemaname !~ '^pg_' AND schemaname <> 'information_schema' "
+        "AND tableowner = current_user"
+    )
+    tables = cur.fetchall()
+    for schema, table in tables:
+        cur.execute(
+            sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {}.{} TO {}").format(
+                sql.Identifier(schema), sql.Identifier(table), sql.Identifier(role)
+            )
+        )
+    cur.execute(
+        "SELECT schemaname, sequencename FROM pg_sequences "
+        "WHERE schemaname !~ '^pg_' AND schemaname <> 'information_schema' "
+        "AND sequenceowner = current_user"
+    )
+    for schema, seq in cur.fetchall():
+        cur.execute(
+            sql.SQL("GRANT USAGE, SELECT ON SEQUENCE {}.{} TO {}").format(
+                sql.Identifier(schema), sql.Identifier(seq), sql.Identifier(role)
+            )
+        )
+    print(f"[grant] schemas={schemas} tables={len(tables)} role={role} 完成")
 PY
 }
 
