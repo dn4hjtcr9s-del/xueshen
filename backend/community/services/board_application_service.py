@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import text
-from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -18,6 +15,8 @@ from backend.community.contracts.errors import (
     ApplicationDuplicatePendingError,
     BoardNameConflictError,
     BoardSlugReservedError,
+    CommunityContentInvalidError,
+    CommunityIdempotencyConflictError,
     CommunityNotFoundError,
     RejectReasonInvalidError,
 )
@@ -25,6 +24,11 @@ from backend.community.persistence import board_applications as applications_rep
 from backend.community.persistence import boards as boards_repo
 from backend.community.persistence import idempotency as idem_repo
 from backend.community.persistence import notifications as notifications_repo
+from backend.community.services.content_safety import (
+    validate_application_reason,
+    validate_board_description,
+    validate_board_name,
+)
 from backend.community.services.notification_templates import (
     application_approved_body,
     application_rejected_body,
@@ -62,11 +66,6 @@ def _normalize_slug(raw: str) -> str:
     return raw.strip().lower()
 
 
-def _normalize_name(raw: str) -> str:
-    name = raw.strip()
-    return unicodedata.normalize("NFC", name)
-
-
 def validate_application_input(
     settings: Settings,
     *,
@@ -75,28 +74,26 @@ def validate_application_input(
     description: str,
     reason: str,
 ) -> tuple[str, str, str, str]:
-    """应用层校验；返回规范化后的值。"""
-    name = _normalize_name(name)
-    slug = _normalize_slug(slug)
-    description = description.strip()
-    reason = reason.strip()
+    """应用层校验；返回规范化后的值。
 
-    if not name or len(name) > settings.community_board_name_max_chars:
-        raise BoardNameConflictError(
-            f"吧名长度须在 1–{settings.community_board_name_max_chars} 字符之间"
-        )
-    if len(description) > settings.community_board_description_max_chars:
-        raise BoardNameConflictError(
-            f"简介长度不得超过 {settings.community_board_description_max_chars} 字符"
-        )
-    if not reason or len(reason) > settings.community_application_reason_max_chars:
-        raise RejectReasonInvalidError(
-            f"申请理由长度须在 1–{settings.community_application_reason_max_chars} 字符之间"
-        )
+    §7.5：吧名/简介/申请理由/slug 的内容校验（空/长度/正则）→ 422
+    `COMMUNITY_CONTENT_INVALID`（field 为对应字段）；仅保留字 → 422
+    `BOARD_SLUG_RESERVED`。名称被占等业务冲突由 service 另行映射 409。
+    """
+    name = validate_board_name(name, max_chars=settings.community_board_name_max_chars)
+    slug = _normalize_slug(slug)
+    description = validate_board_description(
+        description, max_chars=settings.community_board_description_max_chars
+    )
+    reason = validate_application_reason(
+        reason, max_chars=settings.community_application_reason_max_chars
+    )
     if len(slug) < 2 or len(slug) > settings.community_board_slug_max_chars:
-        raise BoardSlugReservedError("slug 长度须在 2–30 字符之间")
+        raise CommunityContentInvalidError(
+            f"slug 长度须在 2–{settings.community_board_slug_max_chars} 字符之间", field="slug"
+        )
     if not _SLUG_RE.match(slug):
-        raise BoardSlugReservedError("slug 只能包含小写字母、数字和单个连字符")
+        raise CommunityContentInvalidError("slug 只能包含小写字母、数字和单个连字符", field="slug")
     if slug in _RESERVED_SLUGS:
         raise BoardSlugReservedError("slug 为系统保留字")
     return name, slug, description, reason
@@ -117,7 +114,7 @@ class BoardApplicationService:
         *,
         limit: int,
         after: tuple[str, UUID] | None,
-    ) -> tuple[list[BoardApplicationView], tuple[str, UUID] | None, bool]:
+    ) -> tuple[list[BoardApplicationView], tuple[str, str] | None, bool]:
         async with self._session_factory() as session:
             last_created_at = after[0] if after else None
             last_application_id = str(after[1]) if after else None
@@ -130,10 +127,11 @@ class BoardApplicationService:
             )
             has_more = len(rows) > limit
             page_rows = rows[:limit]
-            next_after: tuple[str, UUID] | None = None
+            next_after: tuple[str, str] | None = None
             if page_rows:
                 last = page_rows[-1]
-                next_after = (last["created_at"].isoformat(), last["application_id"])
+                # cursor sort_key 须 JSON 可序列化：application_id 统一为 str
+                next_after = (last["created_at"].isoformat(), str(last["application_id"]))
             return [_to_view(row) for row in page_rows], next_after, has_more
 
     async def list_admin(
@@ -142,7 +140,7 @@ class BoardApplicationService:
         status: str | None,
         limit: int,
         after: tuple[str, UUID] | None,
-    ) -> tuple[list[BoardApplicationView], tuple[str, UUID] | None, bool]:
+    ) -> tuple[list[BoardApplicationView], tuple[str, str] | None, bool]:
         async with self._session_factory() as session:
             last_created_at = after[0] if after else None
             last_application_id = str(after[1]) if after else None
@@ -155,10 +153,11 @@ class BoardApplicationService:
             )
             has_more = len(rows) > limit
             page_rows = rows[:limit]
-            next_after: tuple[str, UUID] | None = None
+            next_after: tuple[str, str] | None = None
             if page_rows:
                 last = page_rows[-1]
-                next_after = (last["created_at"].isoformat(), last["application_id"])
+                # cursor sort_key 须 JSON 可序列化：application_id 统一为 str
+                next_after = (last["created_at"].isoformat(), str(last["application_id"]))
             return [_to_view(row) for row in page_rows], next_after, has_more
 
     async def create_application(
@@ -169,14 +168,62 @@ class BoardApplicationService:
         slug: str,
         description: str,
         reason: str,
+        idempotency_key: str,
     ) -> BoardApplicationView:
         name, slug, description, reason = validate_application_input(
             self.settings, name=name, slug=slug, description=description, reason=reason
         )
-
+        # §7.11：create_application 幂等 hash 输入 = 规范化后值
+        payload_hash = _idempotency_payload_hash(
+            {
+                "description": description,
+                "name": name,
+                "reason": reason,
+                "slug": slug,
+            }
+        )
+        application_id = uuid4()
         async with self._session_factory() as session:
             async with session.begin():
-                # 申请提交时即查 boards 冲突
+                existing = await idem_repo.get_request(
+                    session,
+                    user_id=applicant_id,
+                    operation="create_application",
+                    idempotency_key=idempotency_key,
+                )
+                if existing is not None:
+                    if existing["payload_hash"] != payload_hash:
+                        raise CommunityIdempotencyConflictError(_IDEM_CONFLICT_MSG)
+                    row = await applications_repo.get_application_by_id(
+                        session, existing["resource_id"]
+                    )
+                    return _to_view(row)
+
+                won = await idem_repo.insert_request(
+                    session,
+                    user_id=applicant_id,
+                    operation="create_application",
+                    idempotency_key=idempotency_key,
+                    payload_hash=payload_hash,
+                    resource_type="application",
+                    resource_id=application_id,
+                    retention_days=self.settings.community_idempotency_retention_days,
+                )
+                if not won:
+                    existing = await idem_repo.get_request(
+                        session,
+                        user_id=applicant_id,
+                        operation="create_application",
+                        idempotency_key=idempotency_key,
+                    )
+                    if existing is None or existing["payload_hash"] != payload_hash:
+                        raise CommunityIdempotencyConflictError("幂等键并发冲突且无法读取原资源")
+                    row = await applications_repo.get_application_by_id(
+                        session, existing["resource_id"]
+                    )
+                    return _to_view(row)
+
+                # 申请提交时即查 boards 冲突（§7.4 D47）
                 if await boards_repo.check_board_name_conflict(session, name, slug):
                     raise BoardNameConflictError("吧名或标识已被现有板块占用")
 
@@ -186,7 +233,6 @@ class BoardApplicationService:
                 if existing is not None:
                     raise ApplicationDuplicatePendingError("你已有一个待审核的建吧申请")
 
-                application_id = uuid4()
                 try:
                     await applications_repo.insert_application(
                         session,
@@ -215,55 +261,10 @@ class BoardApplicationService:
         *,
         application_id: UUID,
         reviewer_id: UUID,
-        idempotency_key: str,
     ) -> BoardApplicationView:
-        payload_hash = _idempotency_payload_hash(
-            {"application_id": str(application_id), "reviewer_id": str(reviewer_id)}
-        )
+        """审核通过（D38）：锁行 → INSERT boards → 单语句 UPDATE → 通知。"""
         async with self._session_factory() as session:
             async with session.begin():
-                existing = await idem_repo.get_request(
-                    session,
-                    user_id=reviewer_id,
-                    operation="approve_application",
-                    idempotency_key=idempotency_key,
-                )
-                if existing is not None:
-                    if existing["payload_hash"] != payload_hash:
-                        from backend.community.contracts.errors import (
-                            CommunityIdempotencyConflictError,
-                        )
-
-                        raise CommunityIdempotencyConflictError(_IDEM_CONFLICT_MSG)
-                    row = await applications_repo.get_application_by_id(session, application_id)
-                    return _to_view(row)
-
-                won = await idem_repo.insert_request(
-                    session,
-                    user_id=reviewer_id,
-                    operation="approve_application",
-                    idempotency_key=idempotency_key,
-                    payload_hash=payload_hash,
-                    resource_type="application",
-                    resource_id=application_id,
-                    retention_days=self.settings.community_idempotency_retention_days,
-                )
-                if not won:
-                    existing = await idem_repo.get_request(
-                        session,
-                        user_id=reviewer_id,
-                        operation="approve_application",
-                        idempotency_key=idempotency_key,
-                    )
-                    if existing is None or existing["payload_hash"] != payload_hash:
-                        from backend.community.contracts.errors import (
-                            CommunityIdempotencyConflictError,
-                        )
-
-                        raise CommunityIdempotencyConflictError(_IDEM_CONFLICT_MSG)
-                    row = await applications_repo.get_application_by_id(session, application_id)
-                    return _to_view(row)
-
                 application = await applications_repo.get_application_by_id(
                     session, application_id, for_update=True
                 )
@@ -321,64 +322,16 @@ class BoardApplicationService:
         application_id: UUID,
         reviewer_id: UUID,
         reason: str,
-        idempotency_key: str,
     ) -> BoardApplicationView:
+        """审核拒绝（D38）：锁行 → 单语句 UPDATE → 通知；0 行 → 409。"""
         reason = reason.strip()
         if not reason or len(reason) > self.settings.community_reject_reason_max_chars:
             raise RejectReasonInvalidError(
                 f"拒绝理由长度须在 1–{self.settings.community_reject_reason_max_chars} 字符之间"
             )
 
-        payload = {
-            "application_id": str(application_id),
-            "reviewer_id": str(reviewer_id),
-            "reason": reason,
-        }
-        payload_hash = _idempotency_payload_hash(payload)
         async with self._session_factory() as session:
             async with session.begin():
-                existing = await idem_repo.get_request(
-                    session,
-                    user_id=reviewer_id,
-                    operation="reject_application",
-                    idempotency_key=idempotency_key,
-                )
-                if existing is not None:
-                    if existing["payload_hash"] != payload_hash:
-                        from backend.community.contracts.errors import (
-                            CommunityIdempotencyConflictError,
-                        )
-
-                        raise CommunityIdempotencyConflictError(_IDEM_CONFLICT_MSG)
-                    row = await applications_repo.get_application_by_id(session, application_id)
-                    return _to_view(row)
-
-                won = await idem_repo.insert_request(
-                    session,
-                    user_id=reviewer_id,
-                    operation="reject_application",
-                    idempotency_key=idempotency_key,
-                    payload_hash=payload_hash,
-                    resource_type="application",
-                    resource_id=application_id,
-                    retention_days=self.settings.community_idempotency_retention_days,
-                )
-                if not won:
-                    existing = await idem_repo.get_request(
-                        session,
-                        user_id=reviewer_id,
-                        operation="reject_application",
-                        idempotency_key=idempotency_key,
-                    )
-                    if existing is None or existing["payload_hash"] != payload_hash:
-                        from backend.community.contracts.errors import (
-                            CommunityIdempotencyConflictError,
-                        )
-
-                        raise CommunityIdempotencyConflictError(_IDEM_CONFLICT_MSG)
-                    row = await applications_repo.get_application_by_id(session, application_id)
-                    return _to_view(row)
-
                 application = await applications_repo.get_application_by_id(
                     session, application_id, for_update=True
                 )
@@ -387,15 +340,13 @@ class BoardApplicationService:
                 if application["status"] != "pending":
                     raise ApplicationAlreadyReviewedError("该申请已被审核")
 
-                result = await session.execute(
-                    text(
-                        "UPDATE community_board_applications SET status='rejected', "
-                        "reviewer_id=:reviewer_id, reviewed_at=now(), reject_reason=:reason, "
-                        "updated_at=now() WHERE application_id=:id AND status='pending'"
-                    ),
-                    {"reviewer_id": reviewer_id, "reason": reason, "id": application_id},
+                updated = await applications_repo.reject_application(
+                    session,
+                    application_id=application_id,
+                    reviewer_id=reviewer_id,
+                    reason=reason,
                 )
-                if isinstance(result, CursorResult) and result.rowcount == 0:
+                if updated == 0:
                     raise ApplicationAlreadyReviewedError("该申请已被审核")
 
                 await notifications_repo.insert_notification(

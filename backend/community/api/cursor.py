@@ -109,16 +109,22 @@ def resolve_application_cursor(
     route: str,
     token: str | None,
     *,
+    user_id: UUID,
     filters: dict[str, Any],
 ) -> dict[str, Any] | None:
-    return resolve_public_cursor(request, route, token, filters=filters)
+    # §八：mine/审核列表与用户身份相关，使用私有游标（bind_principal=True），
+    # 防止游标跨用户复用（#14/#15）。
+    return resolve_private_cursor(request, route, token, user_id=user_id, filters=filters)
 
 
 def issue_application_cursor(
     request: Request,
     *,
     route: str,
+    user_id: UUID,
     filters: dict[str, Any],
     next_after: Sequence[Any] | None,
 ) -> str | None:
-    return issue_public_cursor(request, route=route, filters=filters, next_after=next_after)
+    return issue_private_cursor(
+        request, route=route, user_id=user_id, filters=filters, next_after=next_after
+    )

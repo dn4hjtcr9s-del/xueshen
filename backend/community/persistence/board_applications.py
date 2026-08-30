@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -151,8 +152,9 @@ async def reject_application(
     application_id: UUID,
     reviewer_id: UUID,
     reason: str,
-) -> None:
-    await session.execute(
+) -> int:
+    """单语句状态转换（§7.14：0 行 → 409）；返回影响行数。"""
+    result = await session.execute(
         text(
             """
             UPDATE community_board_applications
@@ -167,6 +169,7 @@ async def reject_application(
             "reason": reason,
         },
     )
+    return int(result.rowcount or 0) if isinstance(result, CursorResult) else 0
 
 
 async def count_applications_for_admin(

@@ -413,20 +413,20 @@ class Settings(BaseSettings):
     community_outbox_max_attempts: int = Field(default=10, alias="COMMUNITY_OUTBOX_MAX_ATTEMPTS")
     community_outbox_batch_size: int = Field(default=50, alias="COMMUNITY_OUTBOX_BATCH_SIZE")
     community_maintenance_interval_seconds: int = Field(
-        default=3600, alias="COMMUNITY_MAINTENANCE_INTERVAL_SECONDS"
+        default=3600, ge=60, le=86400, alias="COMMUNITY_MAINTENANCE_INTERVAL_SECONDS"
     )
     # 保留与清理（§12.4）
     community_idempotency_retention_days: int = Field(
-        default=7, alias="COMMUNITY_IDEMPOTENCY_RETENTION_DAYS"
+        default=7, ge=1, le=90, alias="COMMUNITY_IDEMPOTENCY_RETENTION_DAYS"
     )
     community_outbox_delivered_retention_days: int = Field(
-        default=30, alias="COMMUNITY_OUTBOX_DELIVERED_RETENTION_DAYS"
+        default=30, ge=1, le=365, alias="COMMUNITY_OUTBOX_DELIVERED_RETENTION_DAYS"
     )
     community_outbox_dead_letter_retention_days: int = Field(
-        default=90, alias="COMMUNITY_OUTBOX_DEAD_LETTER_RETENTION_DAYS"
+        default=90, ge=1, le=365, alias="COMMUNITY_OUTBOX_DEAD_LETTER_RETENTION_DAYS"
     )
     community_notification_retention_days: int = Field(
-        default=90, alias="COMMUNITY_NOTIFICATION_RETENTION_DAYS"
+        default=90, ge=1, le=365, alias="COMMUNITY_NOTIFICATION_RETENTION_DAYS"
     )
     community_cleanup_batch_size: int = Field(
         default=500, ge=1, le=5000, alias="COMMUNITY_CLEANUP_BATCH_SIZE"

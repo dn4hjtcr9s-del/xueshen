@@ -248,9 +248,22 @@ class BoardDetailResponse(BaseModel):
     viewer_is_owner: bool
 
 
+class BoardListItem(BaseModel):
+    """板块列表项（§八 #1 冻结：不含 created_at/viewer_is_owner）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    board_id: UUID
+    slug: str
+    name: str
+    description: str
+    post_count: int
+    sort_order: int
+
+
 class BoardListResponse(BaseModel):
     """板块列表响应（§八 #1）。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    items: list[BoardDetailResponse]
+    items: list[BoardListItem]

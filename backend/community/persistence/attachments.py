@@ -61,6 +61,19 @@ async def get_attachment_by_id(
     return dict(result) if result is not None else None
 
 
+async def get_attachment_by_storage_key(
+    session: AsyncSession,
+    storage_key: str,
+) -> dict[str, Any] | None:
+    """local-uploads 路由：按 storage_key 查附件记录（§7.12 查找规则）。"""
+    row = await session.execute(
+        text("SELECT * FROM community_attachments WHERE storage_key = :key"),
+        {"key": storage_key},
+    )
+    result = row.mappings().fetchone()
+    return dict(result) if result is not None else None
+
+
 async def get_attachments_by_post_id(
     session: AsyncSession,
     post_id: UUID,

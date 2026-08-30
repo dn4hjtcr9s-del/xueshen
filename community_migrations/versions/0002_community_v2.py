@@ -6,8 +6,9 @@
 
 from __future__ import annotations
 
-from alembic import op
 from sqlalchemy import text
+
+from alembic import op
 
 revision = "0002_community_v2"
 down_revision = "0001_community_core"
@@ -98,9 +99,19 @@ def upgrade() -> None:
     # 3) 重插 seed
     # ------------------------------------------------------------------
     for board_id, slug, name, description, sort_order in BOARDS_SEED:
-        op.execute(
-            "INSERT INTO community_boards (board_id, slug, name, description, sort_order) "
-            f"VALUES ('{board_id}', '{slug}', '{name}', '{description}', {sort_order})"
+        op.get_bind().execute(
+            text(
+                "INSERT INTO community_boards "
+                "(board_id, slug, name, description, sort_order) "
+                "VALUES (:board_id, :slug, :name, :description, :sort_order)"
+            ),
+            {
+                "board_id": board_id,
+                "slug": slug,
+                "name": name,
+                "description": description,
+                "sort_order": sort_order,
+            },
         )
 
     # ------------------------------------------------------------------
@@ -163,17 +174,15 @@ def upgrade() -> None:
     )
     op.execute(f"ALTER TABLE community_idempotency_requests DROP CONSTRAINT {idem_op_check}")
     op.execute(f"ALTER TABLE community_idempotency_requests DROP CONSTRAINT {idem_res_check}")
+    # §7.2 冻结：仅 4 个幂等 operation（create_post/create_reply/upload_attachment/create_application）；
+    # approve/reject 不用 Idempotency-Key（§八），不进入 CHECK，也不建 resource 索引。
     op.execute(
         "ALTER TABLE community_idempotency_requests ADD CONSTRAINT ck_community_idempotency_operation "
-        "CHECK (operation IN ('create_post','create_reply','upload_attachment','create_application','approve_application','reject_application'))"
+        "CHECK (operation IN ('create_post','create_reply','upload_attachment','create_application'))"
     )
     op.execute(
         "ALTER TABLE community_idempotency_requests ADD CONSTRAINT ck_community_idempotency_resource_type "
         "CHECK (resource_type IN ('post','reply','attachment','application'))"
-    )
-    op.execute(
-        "CREATE INDEX ix_community_idempotency_requests_resource "
-        "ON community_idempotency_requests (resource_type, resource_id)"
     )
 
     # ------------------------------------------------------------------
@@ -298,11 +307,8 @@ def downgrade() -> None:
         "ck_community_idempotency_resource_type"
     )
     op.execute(
-        "DROP INDEX IF EXISTS ix_community_idempotency_requests_resource"
-    )
-    op.execute(
         "DELETE FROM community_idempotency_requests WHERE operation IN "
-        "('upload_attachment','create_application','approve_application','reject_application')"
+        "('upload_attachment','create_application')"
     )
     op.execute(
         "ALTER TABLE community_idempotency_requests ADD CONSTRAINT ck_community_idempotency_operation "

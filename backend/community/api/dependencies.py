@@ -16,6 +16,7 @@ from fastapi import Depends, Request
 from backend.auth.context import AuthContext
 from backend.community.contracts.errors import (
     AdminRequiredError,
+    CommunityContentInvalidError,
     CommunityRateLimitedError,
 )
 from backend.community.persistence.database import CommunityDatabase
@@ -32,6 +33,20 @@ if TYPE_CHECKING:
     from backend.community.services.public_user_profile_reader import PublicUserProfileReader
     from backend.community.services.reply_service import ReplyService
     from backend.community.storage.base import StorageBackend
+
+#: Idempotency-Key 合法格式（§7.11 冻结：ASCII 可见字符，1–200）。
+#: 格式非法由路由 Header(pattern=...) 在 FastAPI 路由前拦截为 422 INVALID_PAYLOAD；
+#: 缺失则进 require_idempotency_key → 422 COMMUNITY_CONTENT_INVALID。
+IDEMPOTENCY_KEY_RE = r"^[\x21-\x7e]{1,200}$"
+
+
+def require_idempotency_key(idempotency_key: str | None) -> str:
+    """§8.3/§7.11：幂等键缺失 → 422 COMMUNITY_CONTENT_INVALID（field=Idempotency-Key）。"""
+    if not idempotency_key:
+        raise CommunityContentInvalidError(
+            "缺少或非法的 Idempotency-Key（ASCII 可见字符，1–200）", field="Idempotency-Key"
+        )
+    return idempotency_key
 
 
 @dataclass

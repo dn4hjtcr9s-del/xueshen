@@ -141,6 +141,10 @@ class ReplyService:
                 reply = await replies_repo.get_reply_any_status(session, reply_id)
                 if reply is None or str(reply["status"]) == "hidden":
                     raise CommunityNotFoundError("回复不存在或无权访问")
+                # §7.6 ⑤⑥：父帖不可见（不存在/hidden 板块）→ 404（含按 ID 直达）
+                post = await posts_repo.get_post_any_status(session, UUID(str(reply["post_id"])))
+                if post is None or str(post["status"]) == "hidden":
+                    raise CommunityNotFoundError("回复不存在或无权访问")
                 if UUID(str(reply["user_id"])) != actor_user_id:
                     raise CommunityNotFoundError("回复不存在或无权访问")
                 if str(reply["status"]) == "deleted":

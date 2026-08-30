@@ -87,18 +87,22 @@ class KodoStorage(StorageBackend):
                 storage_key=key,
                 success=False,
                 error_message=f"Kodo 服务错误: {info.status_code}",
+                status_code=int(info.status_code),
             )
         if info is not None and info.status_code >= 400:
             return StorageResult(
                 storage_key=key,
                 success=False,
                 error_message=f"Kodo 客户端错误: {info.status_code}",
+                status_code=int(info.status_code),
             )
         if not ret or "key" not in ret:
+            # HTTP 200 但响应体缺 key → retryable=false（§7.9/§7.11）
             return StorageResult(
                 storage_key=key,
                 success=False,
                 error_message="Kodo 返回缺少 key",
+                status_code=int(info.status_code) if info is not None else 200,
             )
         return StorageResult(storage_key=key, success=True)
 

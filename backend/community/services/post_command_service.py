@@ -285,17 +285,29 @@ class PostCommandService:
                     raise CommunityNotFoundError("帖子不存在或无权访问")
                 if str(post["status"]) == "deleted":
                     return
-                deleted_rows = await posts_repo.mark_post_deleted(session, post_id)
-                if deleted_rows == 0:
-                    # 并发下已被删除
-                    return
-                await attachments_repo.mark_attachments_deleted_by_post(session, post_id)
-                await boards_repo.bump_post_count(session, UUID(str(post["board_id"])), -1)
-                await self._enqueue_source_deleted(
-                    session,
-                    user_id=UUID(str(post["user_id"])),
-                    source_ref=f"community:post:{post_id}",
-                )
+                await self.delete_post_content(session, post_id=post_id, user_id=actor_user_id)
+
+    async def delete_post_content(
+        self, session: AsyncSession, *, post_id: UUID, user_id: UUID
+    ) -> None:
+        """§7.17 #5 删除机制（须在活动事务内调用；purge 与普通删除共用同一服务函数）。
+
+        条件 `mark_post_deleted`（影响 1 行才继续）→ 附件条件转 deleted → boards
+        `post_count - 1` → source_deletion Outbox。已删除/并发已删（影响 0 行）→
+        幂等跳过（不重扣计数、不重发事件）。purge 系统路径不校验作者/可见性。
+        """
+        deleted_rows = await posts_repo.mark_post_deleted(session, post_id)
+        if deleted_rows == 0:
+            return
+        post = await posts_repo.get_post_for_publisher(session, post_id)
+        await attachments_repo.mark_attachments_deleted_by_post(session, post_id)
+        if post is not None:
+            await boards_repo.bump_post_count(session, UUID(str(post["board_id"])), -1)
+        await self._enqueue_source_deleted(
+            session,
+            user_id=user_id,
+            source_ref=f"community:post:{post_id}",
+        )
 
     # ------------------------------------------------------------------
     # 内部辅助

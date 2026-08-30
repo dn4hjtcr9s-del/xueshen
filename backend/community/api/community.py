@@ -23,10 +23,12 @@ from backend.community.api.cursor import (
     resolve_public_cursor,
 )
 from backend.community.api.dependencies import (
+    IDEMPOTENCY_KEY_RE,
     get_post_command_service,
     get_post_service,
     get_reply_service,
     rate_limit,
+    require_idempotency_key,
 )
 from backend.community.contracts.api import (
     BoardDetailResponse,
@@ -42,14 +44,15 @@ from backend.community.contracts.api import (
     PermissionsResponse,
     ResolveRequest,
 )
-from backend.community.contracts.errors import (
-    CommunityContentInvalidError,
-    CommunityCursorInvalidError,
-)
+from backend.community.contracts.errors import CommunityCursorInvalidError
 from backend.community.services.post_service import PostReadService
 from backend.shared.auth_context import get_auth_context, get_optional_auth_context
 
+#: 核心路由（§7.1/D11：flag 无关，community_database_url 配置即挂载）：
+#: #1、#3–#11（板块列表/帖子/回复/点赞/解决/删除/通知）
 router = APIRouter(prefix="/api/v1/community", tags=["community"])
+#: V2 路由（§八：仅 COMMUNITY_V2_ENABLED=true 时挂载）：#2 板块详情、#18 permissions
+community_v2_router = APIRouter(prefix="/api/v1/community", tags=["community"])
 
 
 class PostListResponse(BaseModel):
@@ -68,7 +71,7 @@ _POSTS_ROUTE = "community.posts"
 _REPLIES_ROUTE = "community.posts.detail.replies"
 
 
-@router.get("/permissions", response_model=PermissionsResponse)
+@community_v2_router.get("/permissions", response_model=PermissionsResponse)
 async def get_permissions(
     request: Request,
     auth: AuthContext | None = Depends(get_optional_auth_context),
@@ -91,7 +94,7 @@ async def list_boards(
     return BoardListResponse(items=items)
 
 
-@router.get("/boards/{slug}", response_model=BoardDetailResponse)
+@community_v2_router.get("/boards/{slug}", response_model=BoardDetailResponse)
 async def get_board_detail(
     request: Request,
     slug: str,
@@ -182,30 +185,18 @@ async def get_post_detail(
 # ---------------------------------------------------------------------------
 
 
-_IDEMPOTENCY_KEY_RE = r"^[\x21-\x7e]{1,200}$"
-
-
-def _require_idempotency_key(idempotency_key: str | None) -> str:
-    """§8.3：幂等键缺失/格式非法统一 422（§8.7 无专码，映射 CONTENT_INVALID）。"""
-    if not idempotency_key:
-        raise CommunityContentInvalidError(
-            "缺少或非法的 Idempotency-Key（ASCII 可见字符，1–200）", field="Idempotency-Key"
-        )
-    return idempotency_key
-
-
 @router.post("/posts", response_model=CommunityPostDetail, status_code=201)
 async def create_post(
     request: Request,
     payload: CreatePostRequest,
     auth: AuthContext = Depends(get_auth_context),
     idempotency_key: str | None = Header(
-        default=None, alias="Idempotency-Key", pattern=_IDEMPOTENCY_KEY_RE
+        default=None, alias="Idempotency-Key", pattern=IDEMPOTENCY_KEY_RE
     ),
     _rate: None = Depends(rate_limit("community.post.create")),
 ) -> CommunityPostDetail:
     """发帖（§8.3）：user_id 来自认证上下文；支持最多 3 张配图。"""
-    _require_idempotency_key(idempotency_key)
+    require_idempotency_key(idempotency_key)
     service = get_post_command_service(request)
     return await service.create_post(
         user_id=auth.user_id,
@@ -224,13 +215,13 @@ async def create_reply(
     payload: CreateReplyRequest,
     auth: AuthContext = Depends(get_auth_context),
     idempotency_key: str | None = Header(
-        default=None, alias="Idempotency-Key", pattern=_IDEMPOTENCY_KEY_RE
+        default=None, alias="Idempotency-Key", pattern=IDEMPOTENCY_KEY_RE
     ),
     _rate: None = Depends(rate_limit("community.reply.create.minute")),
     _rate_hour: None = Depends(rate_limit("community.reply.create.hour")),
 ) -> CommunityReplyView:
     """回复（§8.4）：分钟 + 小时双窗口限流（§9.3）。"""
-    _require_idempotency_key(idempotency_key)
+    require_idempotency_key(idempotency_key)
     service = get_reply_service(request)
     row = await service.create_reply(
         user_id=auth.user_id,
@@ -275,6 +266,7 @@ async def resolve_post(
     post_id: UUID,
     payload: ResolveRequest,
     auth: AuthContext = Depends(get_auth_context),
+    _rate: None = Depends(rate_limit("community.read")),
 ) -> dict[str, str]:
     """标记解决/取消解决（§8.5：reply_id=null 表示取消）。"""
     await get_post_command_service(request).resolve(
@@ -288,6 +280,7 @@ async def delete_post(
     request: Request,
     post_id: UUID,
     auth: AuthContext = Depends(get_auth_context),
+    _rate: None = Depends(rate_limit("community.read")),
 ) -> dict[str, str]:
     """删除帖子（§11.1）：作者本人；重复删除幂等成功。"""
     await get_post_command_service(request).delete_post(actor_user_id=auth.user_id, post_id=post_id)
@@ -300,6 +293,7 @@ async def delete_reply(
     post_id: UUID,
     reply_id: UUID,
     auth: AuthContext = Depends(get_auth_context),
+    _rate: None = Depends(rate_limit("community.read")),
 ) -> dict[str, str]:
     """删除回复（§11.1）：作者本人；solved 回复清除解决标记（D34）。"""
     await get_reply_service(request).delete_reply(actor_user_id=auth.user_id, reply_id=reply_id)
@@ -396,6 +390,7 @@ async def mark_notification_read(
     request: Request,
     notification_id: UUID,
     auth: AuthContext = Depends(get_auth_context),
+    _rate: None = Depends(rate_limit("community.read")),
 ) -> ReadAllResponse:
     """标记单条已读（§8.6：幂等；recipient 条件保证不能跨用户标记）。"""
     from backend.community.api.dependencies import get_community_runtime
@@ -415,6 +410,7 @@ async def mark_notification_read(
 async def read_all_notifications(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
+    _rate: None = Depends(rate_limit("community.read")),
 ) -> ReadAllResponse:
     """全部已读（§8.6/D14：只更新当前认证用户的未读记录）。"""
     from backend.community.api.dependencies import get_community_runtime

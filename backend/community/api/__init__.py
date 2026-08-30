@@ -13,7 +13,12 @@ from fastapi import APIRouter, FastAPI
 
 from backend.community.api.admin import router as admin_router
 from backend.community.api.applications import router as applications_router
-from backend.community.api.community import router as community_router
+from backend.community.api.community import (
+    community_v2_router,
+)
+from backend.community.api.community import (
+    router as community_router,
+)
 from backend.community.api.dependencies import CommunityRuntime
 from backend.community.api.local_uploads import router as local_uploads_router
 from backend.community.api.uploads import router as uploads_router
@@ -31,7 +36,8 @@ def build_community_routers(app: FastAPI) -> APIRouter | None:
     自定义 Settings（测试/运维），装配必须与注入配置一致。
     """
     settings = app.state.settings
-    if not settings.community_database_url or not settings.community_v2_enabled:
+    # D25：未配置社区库 → 不挂载任何 Community 路由（readiness fail-closed）
+    if not settings.community_database_url:
         return None
 
     from backend.community.services.post_command_service import PostCommandService
@@ -86,10 +92,15 @@ def build_community_routers(app: FastAPI) -> APIRouter | None:
     app.state.community_runtime = runtime
 
     router = APIRouter()
+    # §7.1/D11：核心接口（#1、#3–#11）flag 无关，配置了社区库即挂载
     router.include_router(community_router)
-    router.include_router(uploads_router)
-    router.include_router(applications_router)
-    router.include_router(admin_router)
+    # §八：新功能路由（#2、#12–#18）仅 COMMUNITY_V2_ENABLED=true 挂载
+    if settings.community_v2_enabled:
+        router.include_router(community_v2_router)
+        router.include_router(uploads_router)
+        router.include_router(applications_router)
+        router.include_router(admin_router)
+    # #19 local-uploads 仅受 backend=local 控制（flag 无关）
     if settings.community_storage_backend == "local":
         router.include_router(local_uploads_router)
     return router

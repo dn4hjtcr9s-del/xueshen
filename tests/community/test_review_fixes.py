@@ -535,7 +535,7 @@ async def test_upload_attachment_idempotency_same_file_replays(
 async def test_upload_attachment_idempotency_different_file_conflicts(
     community_session_factory,
 ) -> None:
-    """同 Idempotency-Key + 不同文件 → 409 冲突。"""
+    """同 Idempotency-Key + 不同文件 → 422 冲突（COMMUNITY_IDEMPOTENCY_CONFLICT，8020 定稿）。"""
     app = await _make_app(community_session_factory)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -603,10 +603,10 @@ async def test_deleted_post_detail_has_no_attachments(
     assert post["attachments"] == []
 
 
-async def test_admin_approve_application_idempotency(
+async def test_admin_approve_then_reapprove_conflicts(
     community_session_factory,
 ) -> None:
-    """管理员通过同 Idempotency-Key 重复 approve → 返回同一 board_id。"""
+    """§八 #16：approve/reject 不用 Idempotency-Key（D38 行锁 + 状态判定）；已审核再审核 → 409。"""
     app = await _make_app(
         community_session_factory,
         COMMUNITY_ADMIN_USER_IDS=USER_A,
@@ -627,15 +627,168 @@ async def test_admin_approve_application_idempotency(
         application_id = app_resp.json()["application_id"]
         a1 = await client.post(
             f"/api/v1/community/admin/applications/{application_id}/approve",
-            headers={**_admin_auth(), "Idempotency-Key": "admin-approve-001"},
+            headers=_admin_auth(),
         )
         assert a1.status_code == 200, a1.text
+        assert a1.json()["board_id"] is not None
+        # 重复 approve（无 key）→ 409 APPLICATION_ALREADY_REVIEWED（§八）
         a2 = await client.post(
             f"/api/v1/community/admin/applications/{application_id}/approve",
-            headers={**_admin_auth(), "Idempotency-Key": "admin-approve-001"},
+            headers=_admin_auth(),
         )
-        assert a2.status_code == 200, a2.text
-    assert a1.json()["board_id"] == a2.json()["board_id"]
+        assert a2.status_code == 409
+        assert a2.json()["error"]["code"] == "APPLICATION_ALREADY_REVIEWED"
+
+
+async def test_create_application_idempotency(
+    community_session_factory,
+) -> None:
+    """§7.11：#13 创建类接口必须 Idempotency-Key；同键同 body → 同 application_id。"""
+    app = await _make_app(community_session_factory)
+    transport = ASGITransport(app=app)
+    body = {"name": "幂等申请", "slug": "idem-create", "description": "d", "reason": "r"}
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r1 = await client.post(
+            "/api/v1/community/applications",
+            headers={**_auth(USER_B), "Idempotency-Key": "create-app-001"},
+            json=body,
+        )
+        assert r1.status_code == 201, r1.text
+        r2 = await client.post(
+            "/api/v1/community/applications",
+            headers={**_auth(USER_B), "Idempotency-Key": "create-app-001"},
+            json=body,
+        )
+        assert r2.status_code == 201, r2.text
+        assert r1.json()["application_id"] == r2.json()["application_id"]
+
+
+async def test_application_admin_list_pagination(
+    community_session_factory,
+) -> None:
+    """H2：#15 admin 列表第二页不 500（游标按 sort_key 解析，非顶层 created_at）。"""
+    app = await _make_app(community_session_factory, COMMUNITY_ADMIN_USER_IDS=USER_A)
+    transport = ASGITransport(app=app)
+    applicants = [USER_A, USER_B, "33333333-3333-4333-8333-333333333333"]
+    async with community_session_factory() as session:
+        async with session.begin():
+            for i, uid in enumerate(applicants):
+                await session.execute(
+                    text(
+                        "INSERT INTO community_board_applications "
+                        "(application_id, applicant_id, name, slug, description, reason, "
+                        " status, created_at, updated_at) "
+                        "VALUES (:aid, :uid, :name, :slug, 'd', 'r', 'pending', now(), now())"
+                    ),
+                    {"aid": str(uuid4()), "uid": uid, "name": f"申请{i}", "slug": f"app-{i}"},
+                )
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        p1 = await client.get(
+            "/api/v1/community/admin/applications",
+            headers=_admin_auth(),
+            params={"limit": 2},
+        )
+        assert p1.status_code == 200, p1.text
+        cursor = p1.json()["next_cursor"]
+        assert cursor
+        p2 = await client.get(
+            "/api/v1/community/admin/applications",
+            headers=_admin_auth(),
+            params={"limit": 2, "cursor": cursor},
+        )
+        assert p2.status_code == 200, p2.text
+        assert len(p2.json()["items"]) == 1
+
+
+async def test_posts_list_hidden_board_404(community_session_factory) -> None:
+    """§7.6 ③：按 hidden 板块查帖子流 → 404（而非空列表）。"""
+    app = await _make_app(community_session_factory)
+    transport = ASGITransport(app=app)
+    async with community_session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                text("UPDATE community_boards SET status='hidden' WHERE slug='linear-algebra'")
+            )
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(
+            "/api/v1/community/posts", headers=_auth(USER_A), params={"board_id": BOARD[0]}
+        )
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "COMMUNITY_NOT_FOUND"
+
+
+async def test_board_detail_slug_case_insensitive(community_session_factory) -> None:
+    """§7.4：{slug} 路由层转小写后查询（/boards/Linear-Algebra → 200）。"""
+    app = await _make_app(community_session_factory)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/api/v1/community/boards/Linear-Algebra", headers=_auth(USER_A))
+    assert r.status_code == 200, r.text
+    assert r.json()["slug"] == "linear-algebra"
+
+
+async def test_create_application_content_validation_422(
+    community_session_factory,
+) -> None:
+    """§7.5：吧名超长 → 422 COMMUNITY_CONTENT_INVALID（而非 409 BOARD_NAME_CONFLICT）。"""
+    app = await _make_app(community_session_factory)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/api/v1/community/applications",
+            headers={**_auth(USER_B), "Idempotency-Key": "long-name"},
+            json={"name": "超" * 200, "slug": "long-name", "description": "d", "reason": "r"},
+        )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "COMMUNITY_CONTENT_INVALID"
+
+
+async def test_local_upload_orphaned_404(community_session_factory) -> None:
+    """§7.12：orphaned 附件 → 404（不服务）。"""
+    app = await _make_app(community_session_factory)
+    transport = ASGITransport(app=app)
+    key = "community/2026-08/00000000-0000-0000-0000-000000000000.png"
+    async with community_session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                text(
+                    "INSERT INTO community_attachments "
+                    "(attachment_id, uploader_id, storage_key, mime, size_bytes, width, "
+                    " height, status, created_at, updated_at) "
+                    "VALUES (:aid, :uid, :key, 'image/png', 1, 1, 1, 'orphaned', now(), now())"
+                ),
+                {"aid": str(uuid4()), "uid": USER_A, "key": key},
+            )
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/api/v1/community/local-uploads/{key}")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "COMMUNITY_NOT_FOUND"
+
+
+async def test_frozen_flag_gating(community_settings) -> None:
+    """§7.1/D11：flag 只控制新路由（#2/#12-#18），核心接口在 flag=false 仍挂载。"""
+    from backend.app import create_app
+    from backend.settings import Settings
+
+    flag_off = Settings(app_env="development", community_v2_enabled=False)
+    paths_off = create_app(settings=flag_off).openapi()["paths"]
+    # 核心接口（#1、#3–#11）flag 无关
+    for path in (
+        "/api/v1/community/boards",
+        "/api/v1/community/posts",
+        "/api/v1/community/posts/{post_id}",
+        "/api/v1/community/notifications",
+    ):
+        assert path in paths_off
+    # 新功能路由（#2、#12–#18）不挂载
+    for path in (
+        "/api/v1/community/boards/{slug}",
+        "/api/v1/community/permissions",
+        "/api/v1/community/uploads",
+        "/api/v1/community/applications",
+        "/api/v1/community/admin/applications",
+    ):
+        assert path not in paths_off
 
 
 async def test_create_application_conflict_with_existing_board(

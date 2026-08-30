@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 
 from backend.auth.context import AuthContext
 from backend.community.contracts.api import (
@@ -13,6 +13,7 @@ from backend.community.contracts.api import (
     Page,
     RejectApplicationRequest,
 )
+from backend.community.contracts.errors import CommunityCursorInvalidError
 from backend.community.services.board_application_service import BoardApplicationService
 from backend.shared.auth_context import get_auth_context
 
@@ -38,10 +39,16 @@ async def list_applications_for_review(
 ) -> Page[BoardApplicationView]:
     filters: dict[str, Any] = {"status": status or "all"}
     route = "community.admin.applications"
-    resolved = resolve_application_cursor(request, route, cursor, filters=filters)
+    # §八 #15：私有游标绑定当前管理员；normalized_filters 承载 status（all 写 "all"）
+    resolved = resolve_application_cursor(
+        request, route, cursor, user_id=auth.user_id, filters=filters
+    )
     after = None
     if resolved is not None:
-        after = (resolved["created_at"], UUID(resolved["application_id"]))
+        sort_key = resolved["sort_key"]
+        if not isinstance(sort_key, list) or len(sort_key) != 2:
+            raise CommunityCursorInvalidError("游标缺少完整排序键")
+        after = (sort_key[0], UUID(str(sort_key[1])))
     rows, next_after, has_more = await service.list_admin(
         status=status,
         limit=limit,
@@ -50,6 +57,7 @@ async def list_applications_for_review(
     next_cursor = issue_application_cursor(
         request,
         route=route,
+        user_id=auth.user_id,
         filters=filters,
         next_after=next_after,
     )
@@ -63,15 +71,14 @@ async def list_applications_for_review(
 )
 async def approve_application(
     application_id: UUID,
-    idempotency_key: str = Header(..., min_length=1, pattern=r"^[A-Za-z0-9_-]{16,128}$"),
     auth: AuthContext = Depends(get_auth_context),
     _: AuthContext = Depends(require_community_admin),
     service: BoardApplicationService = Depends(get_application_service),
 ) -> BoardApplicationView:
+    """审核通过（§八 #16）：approve/reject 不用 Idempotency-Key（§八）。"""
     return await service.approve(
         application_id=application_id,
         reviewer_id=auth.user_id,
-        idempotency_key=idempotency_key,
     )
 
 
@@ -83,14 +90,13 @@ async def approve_application(
 async def reject_application(
     application_id: UUID,
     payload: RejectApplicationRequest,
-    idempotency_key: str = Header(..., min_length=1, pattern=r"^[A-Za-z0-9_-]{16,128}$"),
     auth: AuthContext = Depends(get_auth_context),
     _: AuthContext = Depends(require_community_admin),
     service: BoardApplicationService = Depends(get_application_service),
 ) -> BoardApplicationView:
+    """审核拒绝（§八 #17）：approve/reject 不用 Idempotency-Key（§八）。"""
     return await service.reject(
         application_id=application_id,
         reviewer_id=auth.user_id,
         reason=payload.reason,
-        idempotency_key=idempotency_key,
     )

@@ -96,10 +96,14 @@ async def purge_account(
     """
     runtime = get_community_runtime(request)
     session_factory = runtime.database.session_factory
+    command_service = runtime.post_command_service
+    if command_service is None:
+        raise RuntimeError("Community 写服务尚未装配")
     user_id = payload.user_id
     async with session_factory() as session:
         async with session.begin():
-            # 1. 该用户帖子：deleted + closed + eligible=false（不级联他人回复）
+            # 1. 该用户帖子：与普通删除共用同一服务函数（§7.17 #5），
+            #    含 boards.post_count-1、附件条件转 deleted、仅在真正删除时发 deletion 事件
             posts = (
                 (
                     await session.execute(
@@ -114,14 +118,7 @@ async def purge_account(
                 .all()
             )
             for post_id in posts:
-                await posts_repo.mark_post_deleted(session, post_id)
-                await _enqueue_source_deleted(
-                    session,
-                    user_id=user_id,
-                    source_ref=f"community:post:{post_id}",
-                    aggregate_type="post",
-                    aggregate_id=str(post_id),
-                )
+                await command_service.delete_post_content(session, post_id=post_id, user_id=user_id)
             # 2. 该用户回复：deleted + eligible=false，维护 reply_count，
             #    必要时清除 solved_reply_id（purge 不使用 hidden，D16）
             replies = (
@@ -138,7 +135,10 @@ async def purge_account(
                 .all()
             )
             for row in replies:
-                await replies_repo.mark_reply_deleted(session, row["reply_id"])
+                deleted_rows = await replies_repo.mark_reply_deleted(session, row["reply_id"])
+                if deleted_rows == 0:
+                    # 并发下已被删除：不重扣计数、不重发事件（§7.14）
+                    continue
                 await posts_repo.decrement_reply_count(session, row["post_id"])
                 post = await posts_repo.get_post_any_status(session, row["post_id"])
                 if post is not None and str(post.get("solved_reply_id")) == str(row["reply_id"]):

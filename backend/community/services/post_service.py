@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.community.contracts.api import (
     BoardDetailResponse,
+    BoardListItem,
     CommunityAttachment,
     CommunityAuthor,
     CommunityBoard,
@@ -55,16 +56,17 @@ class PostReadService:
     # 板块（§8.1 / §八 #1-#2）
     # ------------------------------------------------------------------
 
-    async def list_boards(self) -> list[BoardDetailResponse]:
+    async def list_boards(self) -> list[BoardListItem]:
         async with self._session_factory() as session:
             rows = await boards_repo.list_active_boards(session)
-        return [self._board_detail_view(row, viewer_user_id=None) for row in rows]
+        return [self._board_list_item_view(row) for row in rows]
 
     async def get_board_detail_by_slug(
         self, slug: str, viewer_user_id: UUID | None
     ) -> BoardDetailResponse:
+        # §7.4：slug 存储即小写，路由层对 {slug} 转小写后查询
         async with self._session_factory() as session:
-            row = await boards_repo.get_active_board_by_slug(session, slug)
+            row = await boards_repo.get_active_board_by_slug(session, slug.strip().lower())
         if row is None:
             raise CommunityNotFoundError("板块不存在或无权访问")
         return self._board_detail_view(row, viewer_user_id)
@@ -84,6 +86,11 @@ class PostReadService:
     ) -> tuple[list[CommunityPostSummary], tuple[Any, ...] | None, bool]:
         """返回 (items, next_after_key, has_more)。after_key 与游标 sort_key 一一对应。"""
         async with self._session_factory() as session:
+            # §7.6 ③：指定 hidden/不存在的板块查帖子流 → 404（而非空列表）
+            if board_id is not None:
+                board = await boards_repo.get_board_any_status(session, board_id)
+                if board is None or str(board["status"]) != "active":
+                    raise CommunityNotFoundError("板块不存在或无权访问")
             rows = await posts_repo.list_posts(
                 session,
                 board_id=board_id,
@@ -192,6 +199,17 @@ class PostReadService:
             slug=row["slug"],
             name=row["name"],
             description=row["description"],
+        )
+
+    @staticmethod
+    def _board_list_item_view(row: dict[str, Any]) -> BoardListItem:
+        return BoardListItem(
+            board_id=row["board_id"],
+            slug=row["slug"],
+            name=row["name"],
+            description=row["description"],
+            post_count=int(row["post_count"]),
+            sort_order=int(row["sort_order"]),
         )
 
     def _board_detail_view(

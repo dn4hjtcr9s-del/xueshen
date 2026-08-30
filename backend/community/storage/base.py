@@ -14,6 +14,9 @@ class StorageResult:
     storage_key: str
     success: bool
     error_message: str | None = None
+    #: HTTP 状态码（Kodo 响应）；None = 无结构化状态（超时/连接/未知异常）。
+    #: 用于上传失败的可重试分类（§7.9/§7.11）。
+    status_code: int | None = None
 
 
 class StorageBackend(ABC):
