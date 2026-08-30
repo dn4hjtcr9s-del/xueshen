@@ -41,7 +41,13 @@ services:
 
   migrate:
     image: *backend-image
-    build: .
+    build:
+      context: .
+      args:
+        # 构建期走宿主机 squid 正向代理（P5 实测：CDN 对 python/uv 客户端限速至
+        # ~200KB/s，curl/squid 客户端满速；代理对 --frozen 锁文件透明，不换源）
+        HTTP_PROXY: http://172.17.0.1:3128
+        HTTPS_PROXY: http://172.17.0.1:3128
     restart: "no"
     depends_on:
       postgres:
@@ -58,7 +64,13 @@ services:
 
   memory-api:
     image: *backend-image
-    build: .
+    build:
+      context: .
+      args:
+        # 构建期走宿主机 squid 正向代理（P5 实测：CDN 对 python/uv 客户端限速至
+        # ~200KB/s，curl/squid 客户端满速；代理对 --frozen 锁文件透明，不换源）
+        HTTP_PROXY: http://172.17.0.1:3128
+        HTTPS_PROXY: http://172.17.0.1:3128
     restart: unless-stopped
     depends_on:
       postgres:
