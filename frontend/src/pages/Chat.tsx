@@ -1,13 +1,54 @@
-/** AI 对话页：Conversation SSE 主链路 + 知识总结 Generation REST 状态。 */
+/** AI 对话页：欢迎态、会话历史与 Conversation SSE 主链路。 */
 import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import { Copy, Plus, SendHorizontal, ThumbsDown, ThumbsUp } from "lucide-react";
+import {
+  ArrowUp,
+  BookOpen,
+  CalendarDays,
+  Compass,
+  Copy,
+  GraduationCap,
+  MessageSquarePlus,
+  Sparkles,
+  ThumbsDown,
+  ThumbsUp,
+} from "lucide-react";
 import { useConversation } from "../hooks/useConversation";
 import { useKnowledgeSummaryGeneration } from "../hooks/useKnowledgeSummaryGeneration";
 import { useTurnStream } from "../hooks/useTurnStream";
 import type { ConversationMessage } from "../types/conversation";
+
+const STARTER_PROMPTS = [
+  {
+    label: "告诉我你掌握的知识范围",
+    prompt:
+      "请根据已有的学习记录、知识图谱和相关资料，告诉我目前已经掌握了哪些知识，分别属于哪些领域，并指出还不够完整的部分。",
+    icon: BookOpen,
+    tone: "blue",
+  },
+  {
+    label: "探索你喜欢的学习内容",
+    prompt: "请根据我的学习记录和已掌握的知识，推荐一些适合我继续探索的学习内容，并说明推荐理由。",
+    icon: Compass,
+    tone: "violet",
+  },
+  {
+    label: "为自己设置学习计划",
+    prompt:
+      "请根据我的学习情况和学习目标，帮我制定一个合理、循序渐进的学习计划，包括学习主题、顺序和建议安排。",
+    icon: CalendarDays,
+    tone: "green",
+  },
+  {
+    label: "测试一下我的知识水平",
+    prompt:
+      "请根据我的学习记录和已掌握的知识，设计一组适合我的测试题，先不要直接给出答案，并根据我的回答评估知识掌握情况。",
+    icon: GraduationCap,
+    tone: "orange",
+  },
+] as const;
 
 export function ChatPage({
   initialPrompt = "",
@@ -30,6 +71,7 @@ export function ChatPage({
     send,
     cancel,
     remove,
+    refreshList,
   } = useConversation();
   const [input, setInput] = useState("");
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
@@ -38,6 +80,14 @@ export function ChatPage({
   const [pendingUser, setPendingUser] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const { state: stream } = useTurnStream(streamUrl);
+  const hasHistory = threads.length > 0;
+  const showWelcome =
+    !loading &&
+    messages.length === 0 &&
+    !pendingUser &&
+    !streamUrl &&
+    !activeTurnId &&
+    stream.status === "idle";
 
   useEffect(() => {
     if (!initialPrompt) return;
@@ -46,12 +96,19 @@ export function ChatPage({
   }, [initialPrompt]);
 
   useEffect(() => {
-    if (chatTarget?.threadId) void openThread(chatTarget.threadId);
+    if (!chatTarget?.threadId) return;
+    setPendingUser(null);
+    setStreamUrl(null);
+    setActiveTurnId(null);
+    void openThread(chatTarget.threadId);
   }, [chatTarget?.threadId, openThread]);
 
   useEffect(() => {
-    if (detail) setMessages(detail.messages);
-    else setMessages([]);
+    if (detail) {
+      setMessages(detail.messages);
+      return;
+    }
+    setMessages([]);
     setPendingUser(null);
     setStreamUrl(null);
     setActiveTurnId(null);
@@ -64,30 +121,61 @@ export function ChatPage({
   }, [chatTarget?.turnId, detail]);
 
   useEffect(() => {
-    if (!['completed', 'failed', 'cancelled'].includes(stream.status)) return;
+    if (!["completed", "failed", "cancelled"].includes(stream.status)) return;
     setStreamUrl(null);
     setActiveTurnId(null);
     setPendingUser(null);
-    if (activeThreadId) void openThread(activeThreadId);
-  }, [stream.status, activeThreadId, openThread]);
+    if (activeThreadId) {
+      void openThread(activeThreadId);
+      void refreshList();
+    }
+  }, [stream.status, activeThreadId, openThread, refreshList]);
 
   const handleSend = useCallback(async () => {
     const content = input.trim();
-    if (!content || sending) return;
+    if (!content || sending || loading) return;
     setInput("");
     setPendingUser(content);
     const response = await send(content);
     if (response) {
+      setPendingUser(null);
       setActiveTurnId(response.turn_id);
       setStreamUrl(response.event_stream_path);
+    } else {
+      setInput(content);
+      setPendingUser(null);
     }
     inputRef.current?.focus();
-  }, [input, sending, send]);
+  }, [input, loading, sending, send]);
 
   const handleFollowup = useCallback((text: string) => {
     setInput(text);
     inputRef.current?.focus();
   }, []);
+
+  const handleOpenThread = useCallback(
+    (threadId: string) => {
+      if (loading || sending) return;
+      if (activeThreadId && activeTurnId) void cancel(activeThreadId, activeTurnId);
+      setPendingUser(null);
+      setStreamUrl(null);
+      setActiveTurnId(null);
+      void openThread(threadId);
+    },
+    [activeThreadId, activeTurnId, cancel, loading, openThread, sending],
+  );
+
+  const handleNewThread = useCallback(() => {
+    if (loading || sending) return;
+    if (activeThreadId && activeTurnId) void cancel(activeThreadId, activeTurnId);
+    newThread();
+    setInput("");
+    setMessages([]);
+    setPendingUser(null);
+    setStreamUrl(null);
+    setActiveTurnId(null);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [activeThreadId, activeTurnId, cancel, loading, newThread, sending]);
 
   const handleCancel = useCallback(() => {
     if (activeThreadId && activeTurnId) {
@@ -97,66 +185,226 @@ export function ChatPage({
   }, [activeThreadId, activeTurnId, cancel]);
 
   return (
-    <div className="chat-layout" style={{ maxWidth: 1160, margin: "0 auto" }}>
-      <div className="conv-list rise">
-        <button className="btn btn-primary conv-new" onClick={() => void newThread()}>
-          <Plus size={15} /> 新对话
-        </button>
-        {threads.map((thread) => (
+    <div className={`chat-layout ${hasHistory ? "" : "chat-layout--solo"}`}>
+      {hasHistory ? (
+        <aside className="conv-list rise" aria-label="历史对话">
           <button
-            key={thread.thread_id}
-            className={`conv-item ${thread.thread_id === activeThreadId ? "active" : ""}`}
-            onClick={() => void openThread(thread.thread_id)}
+            className="chat-new-button"
+            onClick={handleNewThread}
+            disabled={loading || sending}
             type="button"
           >
-            <div className="conv-line">
-              <span className="conv-title">{thread.title || "新对话"}</span>
-              <span className="conv-leader" />
-              <span className="conv-time">{new Date(thread.updated_at).toLocaleDateString()}</span>
-            </div>
+            <MessageSquarePlus size={17} strokeWidth={1.8} />
+            <span>新对话</span>
           </button>
-        ))}
-        {activeThreadId && <button className="chip-btn conv-remove" onClick={() => void remove(activeThreadId)}>删除当前会话</button>}
-      </div>
+          <div className="conv-history">
+            {threads.map((thread) => (
+              <button
+                key={thread.thread_id}
+                className={`conv-item ${thread.thread_id === activeThreadId ? "active" : ""}`}
+                onClick={() => handleOpenThread(thread.thread_id)}
+                disabled={loading || sending}
+                type="button"
+              >
+                <span className="conv-title">{thread.title || "新对话"}</span>
+                <span className="conv-time">{new Date(thread.updated_at).toLocaleDateString()}</span>
+              </button>
+            ))}
+          </div>
+          {activeThreadId && (
+            <button
+              className="chip-btn conv-remove"
+              onClick={() => void remove(activeThreadId)}
+              disabled={loading || sending || Boolean(activeTurnId)}
+              type="button"
+            >
+              删除当前会话
+            </button>
+          )}
+        </aside>
+      ) : (
+        <div className="chat-toolbar rise">
+          <button
+            className="chat-new-button"
+            onClick={handleNewThread}
+            disabled={loading || sending}
+            type="button"
+          >
+            <MessageSquarePlus size={17} strokeWidth={1.8} />
+            <span>新对话</span>
+          </button>
+        </div>
+      )}
 
-      <div className="chat-main rise" style={{ animationDelay: "0.08s" }}>
-        <div className="chat-scroll">
+      <main className="chat-main rise" style={{ animationDelay: "0.08s" }}>
+        <div className={`chat-scroll ${showWelcome ? "chat-scroll--welcome" : ""}`}>
           {loading && <div className="loading-hint">加载会话…</div>}
           {error && <div className="error-hint">{error}</div>}
-          {messages.map((message) => (
-            <MessageRow
-              key={message.message_id}
-              message={message}
-              threadId={message.thread_id}
-              onOpenSummary={onOpenSummary}
-            />
-          ))}
-          {pendingUser && <div className="msg user"><div className="msg-body"><div className="msg-text">{pendingUser}</div></div></div>}
-          {stream.status !== "idle" && (
-            <div className="msg assistant">
-              <div className="msg-body">
-                <div className="msg-role">学神 AI · 讲解模式</div>
-                {stream.status === "connecting" && <div className="loading-hint">正在连接…</div>}
-                {stream.answer && <div className="msg-text md"><ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{stream.answer}</ReactMarkdown></div>}
-                {stream.citations.length > 0 && <div className="source-box"><div className="source-head">注释 · NOTES & SOURCES</div>{stream.citations.map((source, index) => <div key={source.citation_id} className="source-item"><span className="source-num">[{index + 1}]</span><div><div className="source-cite">{source.book_name} · {source.chapter_path.join("/")} <span className="page">P.{source.page_start ?? "—"}</span></div><div className="source-snippet">「{source.snippet}」</div></div></div>)}</div>}
-                {stream.status === "streaming" && <button className="chip-btn" onClick={handleCancel}>停止生成</button>}
-                {stream.status === "failed" && <div className="error-hint">{stream.error?.message ?? "回答失败，请重试"}</div>}
-                {stream.status === "cancelled" && <div className="loading-hint">已取消</div>}
-                {stream.memorySubmission === "accepted" && <div className="memory-hint">记忆请求已接收</div>}
-                {stream.memorySubmission === "retrying" && <div className="memory-hint">记忆请求尚未确认，系统将重试</div>}
-                {stream.status === "completed" && activeThreadId && activeTurnId && <KnowledgeSummaryGenerationActions threadId={activeThreadId} turnId={activeTurnId} onOpenSummary={onOpenSummary} />}
-                <div className="msg-actions"><button className="chip-btn" onClick={() => void navigator.clipboard?.writeText(stream.answer)}><Copy size={13} /> 复制</button><button className="chip-btn"><ThumbsUp size={13} /></button><button className="chip-btn"><ThumbsDown size={13} /></button></div>
-              </div>
-            </div>
+          {showWelcome ? (
+            <WelcomePanel onSelectPrompt={handleFollowup} />
+          ) : (
+            <>
+              {messages.map((message) => (
+                <MessageRow
+                  key={message.message_id}
+                  message={message}
+                  threadId={message.thread_id}
+                  onOpenSummary={onOpenSummary}
+                />
+              ))}
+              {pendingUser && (
+                <div className="msg user">
+                  <div className="msg-body">
+                    <div className="msg-text">{pendingUser}</div>
+                  </div>
+                </div>
+              )}
+              {stream.status !== "idle" && (
+                <div className="msg assistant" aria-live="polite">
+                  <div className="msg-body">
+                    <div className="msg-role">学神 AI · 讲解模式</div>
+                    {stream.status === "connecting" && (
+                      <div className="loading-hint">正在连接…</div>
+                    )}
+                    {stream.answer && (
+                      <div className="msg-text md">
+                        <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                          {stream.answer}
+                        </ReactMarkdown>
+                      </div>
+                    )}
+                    {stream.citations.length > 0 && (
+                      <div className="source-box">
+                        <div className="source-head">注释 · NOTES & SOURCES</div>
+                        {stream.citations.map((source, index) => (
+                          <div key={source.citation_id} className="source-item">
+                            <span className="source-num">[{index + 1}]</span>
+                            <div>
+                              <div className="source-cite">
+                                {source.book_name} · {source.chapter_path.join("/")} {" "}
+                                <span className="page">P.{source.page_start ?? "—"}</span>
+                              </div>
+                              <div className="source-snippet">「{source.snippet}」</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {stream.status === "streaming" && (
+                      <button className="chip-btn" onClick={handleCancel} type="button">
+                        停止生成
+                      </button>
+                    )}
+                    {stream.status === "failed" && (
+                      <div className="error-hint">{stream.error?.message ?? "回答失败，请重试"}</div>
+                    )}
+                    {stream.status === "cancelled" && <div className="loading-hint">已取消</div>}
+                    {stream.memorySubmission === "accepted" && (
+                      <div className="memory-hint">记忆请求已接收</div>
+                    )}
+                    {stream.memorySubmission === "retrying" && (
+                      <div className="memory-hint">记忆请求尚未确认，系统将重试</div>
+                    )}
+                    {stream.status === "completed" && activeThreadId && activeTurnId && (
+                      <KnowledgeSummaryGenerationActions
+                        threadId={activeThreadId}
+                        turnId={activeTurnId}
+                        onOpenSummary={onOpenSummary}
+                      />
+                    )}
+                    <div className="msg-actions">
+                      <button
+                        className="chip-btn"
+                        onClick={() => void navigator.clipboard?.writeText(stream.answer)}
+                        type="button"
+                      >
+                        <Copy size={13} /> 复制
+                      </button>
+                      <button className="chip-btn" type="button" aria-label="回答有帮助">
+                        <ThumbsUp size={13} />
+                      </button>
+                      <button className="chip-btn" type="button" aria-label="回答没有帮助">
+                        <ThumbsDown size={13} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
-        {stream.status === "completed" && stream.followups.length > 0 && <div className="followups">{stream.followups.map((followup) => <button key={followup} className="followup-btn" onClick={() => handleFollowup(followup)}>{followup}</button>)}</div>}
-        <div className="chat-input-row">
-          <textarea ref={inputRef} className="chat-input" rows={2} value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void handleSend(); } }} placeholder="继续追问，或开始一个新问题… 支持 LaTeX，如 $\int_0^1 x^2 dx$" />
-          <button className="btn btn-red" style={{ alignSelf: "flex-end" }} onClick={() => void handleSend()} disabled={sending}><SendHorizontal size={15} /> 发送</button>
+
+        {stream.status === "completed" && stream.followups.length > 0 && (
+          <div className="followups">
+            {stream.followups.map((followup) => (
+              <button
+                key={followup}
+                className="followup-btn"
+                onClick={() => handleFollowup(followup)}
+                type="button"
+              >
+                {followup}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="chat-composer-wrap">
+          <div className="chat-input-row">
+            <textarea
+              ref={inputRef}
+              className="chat-input"
+              rows={2}
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  void handleSend();
+                }
+              }}
+              placeholder="随心输入你想学习的问题"
+              aria-label="对话输入"
+            />
+            <button
+              className="chat-send-button"
+              onClick={() => void handleSend()}
+              disabled={loading || sending || !input.trim()}
+              type="button"
+              aria-label="发送"
+              title="发送"
+            >
+              <ArrowUp size={20} strokeWidth={2.1} />
+            </button>
+          </div>
         </div>
-      </div>
+      </main>
     </div>
+  );
+}
+
+function WelcomePanel({ onSelectPrompt }: { onSelectPrompt: (prompt: string) => void }) {
+  return (
+    <section className="chat-welcome" aria-labelledby="chat-welcome-title">
+      <div className="chat-welcome-mark" aria-hidden="true">
+        <Sparkles size={24} strokeWidth={1.6} />
+      </div>
+      <h1 id="chat-welcome-title">要在 xueshen 里学习什么？</h1>
+      <div className="starter-grid" aria-label="推荐的学习方式">
+        {STARTER_PROMPTS.map(({ label, prompt, icon: Icon, tone }, index) => (
+          <button
+            key={label}
+            className={`starter-card starter-card--${tone}`}
+            style={{ animationDelay: `${0.08 + index * 0.06}s` }}
+            onClick={() => onSelectPrompt(prompt)}
+            type="button"
+          >
+            <Icon className="starter-icon" size={19} strokeWidth={1.8} />
+            <span>{label}</span>
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 

@@ -24,7 +24,7 @@ export interface UseConversationResult {
   error: string | null;
   sending: boolean;
   openThread: (threadId: string) => Promise<void>;
-  newThread: () => Promise<void>;
+  newThread: () => void;
   send: (content: string) => Promise<CreateTurnResponse | null>;
   cancel: (threadId: string, turnId: string) => Promise<void>;
   remove: (threadId: string) => Promise<void>;
@@ -67,64 +67,66 @@ export function useConversation(): UseConversationResult {
     }
   }, []);
 
-  const newThread = useCallback(async () => {
-    setSending(true);
-    try {
-      const created = await createConversation();
-      setActiveThreadId(created.thread_id);
-      setDetail({
-        thread_id: created.thread_id,
-        title: "",
-        version: 0,
-        status: "active",
-        messages: [],
-        next_cursor: null,
-        has_more: false,
-      });
-      await refreshList();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "创建会话失败");
-    } finally {
-      setSending(false);
-    }
-  }, [refreshList]);
+  const newThread = useCallback(() => {
+    // 新对话先停留在前端草稿态，首次发送时再创建后端会话，避免产生空会话。
+    setActiveThreadId(null);
+    setDetail(null);
+    setError(null);
+    pendingIdempotencyKeyRef.current = null;
+  }, []);
 
   const send = useCallback(
     async (content: string): Promise<CreateTurnResponse | null> => {
-      if (!activeThreadId || !detail) {
-        setError("请先创建或选择一个会话");
-        return null;
-      }
       setSending(true);
       setError(null);
+      let threadId = activeThreadId;
+      let conversation = detail;
       const clientRequestId = pendingIdempotencyKeyRef.current ?? idempotencyKey();
       pendingIdempotencyKeyRef.current = clientRequestId;
-      let created: CreateTurnResponse | null = null;
+
       try {
-        created = await createTurn(activeThreadId, {
+        if (!threadId || !conversation) {
+          const createdConversation = await createConversation();
+          threadId = createdConversation.thread_id;
+          conversation = {
+            thread_id: threadId,
+            title: "",
+            version: createdConversation.version,
+            status: "active",
+            messages: [],
+            next_cursor: null,
+            has_more: false,
+          };
+          setActiveThreadId(threadId);
+          setDetail(conversation);
+        }
+
+        const created = await createTurn(threadId, {
           client_request_id: clientRequestId,
           content,
-          expected_thread_version: detail.version,
+          expected_thread_version: conversation.version,
         });
         pendingIdempotencyKeyRef.current = null;
         // P2（评审）：发送成功后用响应的 thread_version 更新本地版本，
         // 后续发送不再使用过期版本（否则必然 409）。
         setDetail((prev) =>
-          prev ? { ...prev, version: created?.thread_version ?? prev.version } : prev,
+          prev ? { ...prev, version: created.thread_version } : prev,
         );
         // 乐观更新用户消息
         const userMessage: ConversationMessage = {
           message_id: created.user_message_id,
-          thread_id: activeThreadId,
+          thread_id: threadId,
           turn_id: created.turn_id,
           role: "user",
           content,
           status: "completed",
-          sequence: detail.messages.length + 1,
+          sequence: conversation.messages.length + 1,
           occurred_at: new Date().toISOString(),
           completed_at: new Date().toISOString(),
         };
         setDetail((prev) => (prev ? { ...prev, messages: [...prev.messages, userMessage] } : prev));
+        // 新会话在完成首轮发送后才进入左侧历史列表。
+        void refreshList();
         return created;
       } catch (e) {
         // P2（评审）：409 THREAD_VERSION_CONFLICT 时用响应携带的 current_version
@@ -143,7 +145,7 @@ export function useConversation(): UseConversationResult {
         setSending(false);
       }
     },
-    [activeThreadId, detail],
+    [activeThreadId, detail, refreshList],
   );
 
   const cancel = useCallback(async (threadId: string, turnId: string) => {

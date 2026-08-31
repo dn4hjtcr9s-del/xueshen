@@ -327,9 +327,9 @@ export default function App() {
           </button>
         </header>
 
-        <main className="content">
-          <div className="page">
-            {page !== "home" && (
+        <main className={`content ${page === "chat" ? "content-chat" : ""}`}>
+          <div className={`page ${page === "chat" ? "page-chat" : ""}`}>
+            {page !== "home" && page !== "chat" && (
               <Masthead
                 kicker={masthead.kicker}
                 title={masthead.title}

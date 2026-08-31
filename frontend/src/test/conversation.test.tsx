@@ -1,10 +1,12 @@
 // Conversation 前端测试（方案 §26.5）：API client + SSE reducer + 发送防双击。
-import { renderHook, act, waitFor } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createConversation, createTurn, listConversations } from "../api/conversations";
 import { startTurnEventStream } from "../api/turnEvents";
 import { useConversation } from "../hooks/useConversation";
+import { ChatPage } from "../pages/Chat";
 import { server } from "./server";
 import type { SSEEnvelope } from "../types/conversation";
 
@@ -208,5 +210,122 @@ describe("useConversation（§18.2/§18.3）", () => {
       await result.current.openThread(THREAD);
     });
     expect(result.current.detail?.thread_id).toBe(THREAD);
+  });
+
+  it("首次发送时自动创建后端会话", async () => {
+    let createCount = 0;
+    let turnBody: unknown = null;
+    server.use(
+      http.get("*/memory-api/api/v1/conversations", () =>
+        HttpResponse.json({ items: [], next_cursor: null, has_more: false }),
+      ),
+      http.post("*/memory-api/api/v1/conversations", () => {
+        createCount += 1;
+        return HttpResponse.json({ thread_id: THREAD, version: 0 }, { status: 201 });
+      }),
+      http.post("*/memory-api/api/v1/conversations/:threadId/turns", async ({ request }) => {
+        turnBody = await request.json();
+        return HttpResponse.json(
+          {
+            thread_id: THREAD,
+            turn_id: TURN,
+            user_message_id: "33333333-3333-3333-3333-333333333333",
+            thread_version: 1,
+            status: "accepted",
+            event_stream_path: `/api/v1/conversations/${THREAD}/turns/${TURN}/events`,
+          },
+          { status: 202 },
+        );
+      }),
+    );
+
+    const { result } = renderHook(() => useConversation());
+    await waitFor(() => expect(result.current.threads).toEqual([]));
+    await act(async () => {
+      await result.current.send("帮我复习极限");
+    });
+
+    expect(createCount).toBe(1);
+    expect(turnBody).toMatchObject({ content: "帮我复习极限", expected_thread_version: 0 });
+    expect(result.current.activeThreadId).toBe(THREAD);
+    expect(result.current.detail?.messages[0]?.content).toBe("帮我复习极限");
+  });
+
+  it("新对话只清空前端选择，不立即创建空会话", async () => {
+    let createCount = 0;
+    server.use(
+      http.post("*/memory-api/api/v1/conversations", () => {
+        createCount += 1;
+        return HttpResponse.json({ thread_id: THREAD, version: 0 }, { status: 201 });
+      }),
+    );
+    const { result } = renderHook(() => useConversation());
+    await waitFor(() => expect(result.current.threads.length).toBe(1));
+    await act(async () => {
+      await result.current.openThread(THREAD);
+    });
+
+    act(() => result.current.newThread());
+
+    expect(result.current.activeThreadId).toBeNull();
+    expect(result.current.detail).toBeNull();
+    expect(createCount).toBe(0);
+  });
+});
+
+describe("ChatPage 欢迎态", () => {
+  beforeEach(() => {
+    server.resetHandlers();
+    server.use(
+      http.get("*/memory-api/api/v1/conversations", () =>
+        HttpResponse.json({ items: [], next_cursor: null, has_more: false }),
+      ),
+    );
+  });
+
+  it("没有历史会话时展示欢迎语、四个入口和左上角新对话", async () => {
+    render(<ChatPage />);
+
+    expect(await screen.findByRole("heading", { name: "要在 xueshen 里学习什么？" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "新对话" })).toBeVisible();
+    expect(screen.queryByRole("complementary", { name: "历史对话" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button").filter((button) => button.classList.contains("starter-card"))).toHaveLength(4);
+  });
+
+  it("点击功能入口把对应提示词填入输入框", async () => {
+    const user = userEvent.setup();
+    render(<ChatPage />);
+
+    await user.click(await screen.findByRole("button", { name: "为自己设置学习计划" }));
+
+    expect(screen.getByRole<HTMLInputElement>("textbox", { name: "对话输入" }).value).toContain(
+      "制定一个合理、循序渐进的学习计划",
+    );
+    expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
+  });
+
+  it("有真实历史会话时在左侧栏显示对话", async () => {
+    server.use(
+      http.get("*/memory-api/api/v1/conversations", () =>
+        HttpResponse.json({
+          items: [
+            {
+              thread_id: THREAD,
+              title: "极限复习",
+              status: "active",
+              version: 1,
+              updated_at: "2026-08-30T08:00:00Z",
+            },
+          ],
+          next_cursor: null,
+          has_more: false,
+        }),
+      ),
+    );
+
+    render(<ChatPage />);
+
+    expect(await screen.findByRole("complementary", { name: "历史对话" })).toBeVisible();
+    expect(screen.getByRole("button", { name: /极限复习/ })).toBeVisible();
   });
 });
