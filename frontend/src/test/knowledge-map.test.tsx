@@ -5,7 +5,18 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import { KnowledgeMapPage } from "../pages/KnowledgeMap";
-import { EXPERT_FORBIDDEN_MESSAGE, layoutGraph } from "../pages/knowledge-map/graph";
+import {
+  clampGraphCenter,
+  displayNodeTitle,
+  EXPERT_FORBIDDEN_MESSAGE,
+  focusDepths,
+  focusedLinkDirection,
+  focusOpacity,
+  graphStage,
+  initialNodeIds,
+  progressionDepths,
+  progressionTargetY,
+} from "../pages/knowledge-map/graph";
 import { graphSnapshot, operationResult, overlay } from "./fixtures";
 import { server } from "./server";
 
@@ -28,21 +39,93 @@ function installMutableGraphHandlers(initial = [overlay({ node_id: "n002", statu
 
 const noop = () => {};
 
-describe("dagre 布局（§20.2：后端节点和边驱动，无 x/y 存储）", () => {
-  it("prerequisite 边的后继节点排在更右层（LR 层次布局）", () => {
-    const snapshot = graphSnapshot();
-    const layout = layoutGraph(snapshot.nodes, snapshot.edges);
-    const x = (id: string) => layout.nodes.get(id)!.x;
-    expect(x("n001")).toBeLessThan(x("n002"));
-    expect(x("n002")).toBeLessThan(x("n003"));
-    expect(x("n003")).toBeLessThan(x("n004"));
+describe("交互图谱阶段与关系布局语义", () => {
+  it("显示名称去掉章节编号和阶段无关前缀，但保留完整知识点内容", () => {
+    expect(displayNodeTitle("第二章 导数与微分")).toBe("导数与微分");
+    expect(displayNodeTitle("第1章 行列式")).toBe("行列式");
+    expect(displayNodeTitle("第二章 导数与微分 大学")).toBe("导数与微分");
+    expect(displayNodeTitle("数学建模 建立函数模型解决实际问题")).toBe("建立函数模型解决实际问题");
+    expect(displayNodeTitle("自定义专题")).toBe("自定义专题");
   });
 
-  it("无边孤立节点也能布局", () => {
-    const snapshot = graphSnapshot({ edges: [] });
-    const layout = layoutGraph(snapshot.nodes, snapshot.edges);
-    expect(layout.nodes.size).toBe(4);
-    expect(layout.width).toBeGreaterThan(0);
+  it("节点代理列表也使用清理后的知识点名称", async () => {
+    const snapshot = graphSnapshot({
+      nodes: [
+        { node_id: "n001", title: "第一章 有理数", group_key: "代数", metadata: {} },
+        { node_id: "n002", title: "函数", group_key: "代数", metadata: {} },
+        { node_id: "n003", title: "极限", group_key: "分析", metadata: {} },
+        { node_id: "n004", title: "导数", group_key: "分析", metadata: {} },
+      ],
+    });
+    server.use(
+      http.get("*/api/v1/knowledge-graph/nodes", () => HttpResponse.json(snapshot)),
+      http.get("*/api/v1/knowledge-graph/me/nodes", () => HttpResponse.json([])),
+    );
+    render(<KnowledgeMapPage goChat={noop} />);
+    await waitFor(() => expect(screen.getByTestId("node-n001")).toBeInTheDocument());
+    expect(screen.getByTestId("node-n001")).toHaveTextContent("有理数");
+    expect(screen.getByTestId("node-n001")).not.toHaveTextContent("第一章");
+  });
+
+  it("将只有出边、没有入边的节点标记为学习起点", () => {
+    const snapshot = graphSnapshot({
+      nodes: [
+        { node_id: "root", title: "基础", group_key: "代数", metadata: {} },
+        { node_id: "middle", title: "中间", group_key: "代数", metadata: {} },
+        { node_id: "leaf", title: "末端", group_key: "代数", metadata: {} },
+        { node_id: "isolated", title: "孤立", group_key: "代数", metadata: {} },
+      ],
+      edges: [
+        { from_node_id: "root", to_node_id: "middle", relation_type: "prerequisite" },
+        { from_node_id: "middle", to_node_id: "leaf", relation_type: "prerequisite" },
+      ],
+    });
+    expect(initialNodeIds(snapshot.nodes, snapshot.edges)).toEqual(new Set(["root"]));
+  });
+
+  it("按后端 stage 将大学放在上方、初中放在下方", () => {
+    const snapshot = graphSnapshot({
+      nodes: [
+        { node_id: "n001", title: "集合", group_key: "代数", metadata: { stage: "junior" } },
+        { node_id: "n002", title: "函数", group_key: "代数", metadata: { stage: "high" } },
+        { node_id: "n003", title: "极限", group_key: "分析", metadata: { stage: "university" } },
+      ],
+      edges: [
+        { from_node_id: "n001", to_node_id: "n002", relation_type: "prerequisite" },
+        { from_node_id: "n002", to_node_id: "n003", relation_type: "prerequisite" },
+      ],
+    });
+    const depths = progressionDepths(snapshot.nodes, snapshot.edges);
+    const maxDepth = Math.max(...depths.values());
+    expect(graphStage(snapshot.nodes[0])).toBe("junior");
+    expect(progressionTargetY("university", depths.get("n003")!, maxDepth, 600))
+      .toBeLessThan(progressionTargetY("junior", depths.get("n001")!, maxDepth, 600));
+  });
+
+  it("将图谱视口中心限制在内容范围内，避免平移到空白处", () => {
+    const bbox = { x: [-500, 500] as [number, number], y: [-300, 300] as [number, number] };
+    const viewport = { width: 1000, height: 600 };
+    expect(clampGraphCenter({ x: 5000, y: -5000 }, 1, bbox, viewport)).toEqual({ x: 48, y: -48 });
+    expect(clampGraphCenter({ x: 5000, y: -5000 }, 0.2, bbox, viewport)).toEqual({ x: 0, y: 0 });
+    expect(clampGraphCenter({ x: 5000, y: -5000 }, 2, bbox, viewport)).toEqual({ x: 274, y: -174 });
+  });
+
+  it("按焦点节点区分入方向前置线和出方向学习线", () => {
+    const snapshot = graphSnapshot();
+    expect(focusedLinkDirection(snapshot.edges[0], "n002")).toBe("incoming");
+    expect(focusedLinkDirection(snapshot.edges[1], "n002")).toBe("outgoing");
+    expect(focusedLinkDirection(snapshot.edges[0], "n004")).toBe(null);
+  });
+
+  it("以无向关系距离计算焦点层级并逐级降低透明度", () => {
+    const snapshot = graphSnapshot();
+    const depths = focusDepths(snapshot.edges, "n002");
+    expect(depths.get("n002")).toBe(0);
+    expect(depths.get("n001")).toBe(1);
+    expect(depths.get("n004")).toBe(2);
+    expect(focusOpacity(0)).toBeGreaterThan(focusOpacity(1));
+    expect(focusOpacity(1)).toBeGreaterThan(focusOpacity(2));
+    expect(focusOpacity(undefined)).toBeLessThan(focusOpacity(2));
   });
 });
 

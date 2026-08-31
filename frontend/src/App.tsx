@@ -54,7 +54,7 @@ const MASTHEADS: Record<PageKey, { kicker: string; title: string; aside: string[
   home: { kicker: "Tuesday · 星期二", title: "今日", aside: ["VOL.04 — 特征值与对角化", "第 12 天连续学习"] },
   chat: { kicker: "Ask · 有问必答", title: "AI 对话", aside: ["讲解模式", "引用可溯源"] },
   plan: { kicker: "Plan · 循序渐进", title: "学习计划", aside: ["等待你的第一个目标", "由 AI 生成并动态调整"] },
-  map: { kicker: "Atlas · 了如指掌", title: "知识地图", aside: ["11 个知识点", "3 个领域"] },
+  map: { kicker: "Atlas · 了如指掌", title: "知识地图", aside: ["关系驱动布局", "初中 → 高中 → 大学"] },
   summaries: { kicker: "Knowledge Summary · 对话沉淀", title: "知识总结", aside: ["定义 · 定理 · 公式", "来源可追溯"] },
   community: { kicker: "Community · 教学相长", title: "社区", aside: ["讨论区 · 小组 · 打卡"] },
   profile: { kicker: "Profile · 君子慎独", title: "个人中心", aside: ["记忆透明可管"] },
@@ -327,8 +327,12 @@ export default function App() {
           </button>
         </header>
 
-        <main className={`content ${page === "chat" ? "content-chat" : ""}`}>
-          <div className={`page ${page === "chat" ? "page-chat" : ""}`}>
+        <main
+          className={`content ${page === "chat" ? "content-chat" : ""} ${page === "map" ? "content-map" : ""}`}
+        >
+          <div
+            className={`page ${page === "chat" ? "page-chat" : ""} ${page === "map" ? "page-map" : ""}`}
+          >
             {page !== "home" && page !== "chat" && (
               <Masthead
                 kicker={masthead.kicker}
