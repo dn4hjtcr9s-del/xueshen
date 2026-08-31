@@ -24,6 +24,7 @@ import {
   type CommunityNotification,
 } from "./api/community";
 import { Masthead } from "./ui";
+import { SiteFooter } from "./SiteFooter";
 import { HomePage } from "./pages/Home";
 import { ChatPage } from "./pages/Chat";
 import { PlanPage } from "./pages/Plan";
@@ -366,6 +367,7 @@ export default function App() {
             {page === "profile" && <ProfilePage />}
           </div>
         </main>
+        <SiteFooter />
       </div>
 
       {showNotif && (
