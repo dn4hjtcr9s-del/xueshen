@@ -43,6 +43,8 @@ async def _run() -> None:
     db = ConversationDatabase(settings)
     try:
         # Gateways
+        from backend.auth.context import SCOPE_MEMORY_CONTEXT
+        from backend.auth_service.agent_tokens import issue_agent_token
         from backend.conversation.gateways.embedding import QueryEmbeddingGateway
         from backend.conversation.gateways.memory import MemoryGateway
         from backend.conversation.gateways.openai import OpenAIGateway
@@ -51,9 +53,20 @@ async def _run() -> None:
         from backend.rag.retrieval import RetrievalService
 
         openai_gateway = OpenAIGateway(settings=settings, logger=logger)
+
+        def issue_memory_context_token(user_id: str) -> str:
+            """为当前用户签发短时上下文读取 token，避免跨用户复用静态凭证。"""
+            return issue_agent_token(
+                agent_subject=f"conversation-agent-{settings.app_env}",
+                delegated_sub=user_id,
+                actor_type="conversation_agent",
+                requested_scopes=[SCOPE_MEMORY_CONTEXT],
+            )
+
         memory_client = MemoryClient(
             settings.memory_api_base_url,
             token=settings.memory_agent_token,
+            user_token_provider=issue_memory_context_token,
             timeout=max(settings.memory_context_timeout_seconds, 10.0),
         )
         memory_gateway = MemoryGateway(client=memory_client, logger=logger)

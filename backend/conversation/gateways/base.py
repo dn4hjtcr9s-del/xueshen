@@ -43,7 +43,11 @@ class MemoryGateway(Protocol):
     """MemoryGateway（§16.1）：包装既有 MemoryClient。"""
 
     async def build_learning_context(
-        self, *, query: str, token_budget: int | None = None
+        self,
+        *,
+        query: str,
+        token_budget: int | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         """读取长期记忆（§16.1）；返回 LearningContext dict 或抛域错误。"""
         ...

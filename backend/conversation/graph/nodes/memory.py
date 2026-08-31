@@ -35,6 +35,7 @@ async def recall_memory(
         context = await runtime.memory_gateway.build_learning_context(
             query=query_seed,
             token_budget=None,  # 预算在快照构建后由 ContextService 固化（§9.2）
+            user_id=str(state["user_id"]),
         )
     except MemoryUnavailableError as exc:
         # 第三轮必改 4：401/403 与 4xx 契约错误必须 Turn 失败，不静默降级

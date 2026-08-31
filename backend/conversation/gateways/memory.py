@@ -28,7 +28,11 @@ class MemoryGateway:
         self._logger = logger or logging.getLogger("conversation.gateways.memory")
 
     async def build_learning_context(
-        self, *, query: str, token_budget: int | None = None
+        self,
+        *,
+        query: str,
+        token_budget: int | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         """读取长期记忆（§16.1 / 第三轮必改 4）。
 
@@ -37,7 +41,7 @@ class MemoryGateway:
         """
         try:
             context = await self._client.build_learning_context(
-                query=query, token_budget=token_budget
+                query=query, token_budget=token_budget, user_id=user_id
             )
         except MemoryClientError as exc:
             self._logger.warning(

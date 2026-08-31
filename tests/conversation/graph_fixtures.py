@@ -90,7 +90,11 @@ class FakeMemoryGateway:
         self.errors: list[Exception] = []
 
     async def build_learning_context(
-        self, *, query: str, token_budget: int | None = None
+        self,
+        *,
+        query: str,
+        token_budget: int | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         if self.errors:
             raise self.errors.pop(0)

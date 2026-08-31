@@ -45,13 +45,15 @@ class MemoryClient:
         *,
         token: str | None = None,
         token_provider: Callable[[], str] | None = None,
+        user_token_provider: Callable[[str], str] | None = None,
         http: httpx.AsyncClient | None = None,
         timeout: float = 10.0,
     ) -> None:
-        if token is None and token_provider is None:
-            raise ValueError("必须提供 token 或 token_provider")
+        if token is None and token_provider is None and user_token_provider is None:
+            raise ValueError("必须提供 token、token_provider 或 user_token_provider")
         self._token = token
         self._token_provider = token_provider
+        self._user_token_provider = user_token_provider
         self._owns_http = http is None
         self._http = http or httpx.AsyncClient(base_url=base_url, timeout=timeout)
 
@@ -65,9 +67,14 @@ class MemoryClient:
         if self._owns_http:
             await self._http.aclose()
 
-    def _authorization(self) -> str:
-        token = self._token_provider() if self._token_provider else self._token
-        assert token is not None
+    def _authorization(self, *, user_id: str | None = None) -> str:
+        token: str | None
+        if user_id is not None and self._user_token_provider is not None:
+            token = self._user_token_provider(user_id)
+        else:
+            token = self._token_provider() if self._token_provider else self._token
+        if not token:
+            raise ValueError("MemoryClient 未能取得认证 token")
         return f"Bearer {token}"
 
     async def _request(
@@ -78,8 +85,9 @@ class MemoryClient:
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        user_id: str | None = None,
     ) -> Any:
-        headers = {"Authorization": self._authorization()}
+        headers = {"Authorization": self._authorization(user_id=user_id)}
         if idempotency_key is not None:
             headers["Idempotency-Key"] = idempotency_key
         response = await self._http.request(
@@ -252,13 +260,17 @@ class MemoryClient:
         query: str,
         topic_keys: list[str] | None = None,
         token_budget: int | None = None,
+        user_id: str | None = None,
     ) -> LearningContext:
         """组装学习上下文（§12.4/§12.5）；token_budget 省略时服务端默认 3000。"""
         body = LearningContextRequest(
             query=query, topic_keys=topic_keys or [], token_budget=token_budget
         )
         data = await self._request(
-            "POST", "/api/v1/memory/context", json_body=body.model_dump(mode="json")
+            "POST",
+            "/api/v1/memory/context",
+            json_body=body.model_dump(mode="json"),
+            user_id=user_id,
         )
         return LearningContext.model_validate(data)
 

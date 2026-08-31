@@ -240,6 +240,31 @@ async def test_build_learning_context() -> None:
     assert body == {"query": "一致收敛", "topic_keys": [], "token_budget": 1500}
 
 
+async def test_build_learning_context_uses_user_delegated_token() -> None:
+    """Conversation 读取上下文时必须按委托用户生成 token，不能跨用户复用静态凭证。"""
+    recorded: list[httpx.Request] = []
+    transport = _mock_transport(
+        recorded,
+        httpx.Response(200, json=_learning_context_payload()),
+    )
+    issued_for: list[str] = []
+
+    def user_token_provider(user_id: str) -> str:
+        issued_for.append(user_id)
+        return f"delegated-{user_id}"
+
+    async with MemoryClient(
+        "http://memory-api",
+        token="fallback-jwt",
+        user_token_provider=user_token_provider,
+        http=httpx.AsyncClient(transport=transport, base_url="http://memory-api"),
+    ) as client:
+        await client.build_learning_context(query="函数", user_id="user-42")
+
+    assert issued_for == ["user-42"]
+    assert recorded[0].headers["Authorization"] == "Bearer delegated-user-42"
+
+
 async def test_get_graph_recommendations_with_cursor() -> None:
     recorded: list[httpx.Request] = []
     transport = _mock_transport(
