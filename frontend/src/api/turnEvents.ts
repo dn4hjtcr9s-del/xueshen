@@ -6,6 +6,7 @@
 // 401/403、429、断线退避、页面隐藏/恢复、事件 sequence 去重。
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { getAccessToken } from "../auth/tokenStore";
+import { resolveMemoryApiUrl } from "./client";
 import type { SSEEnvelope } from "../types/conversation";
 
 export type StreamEvent = SSEEnvelope;
@@ -44,7 +45,7 @@ export function startTurnEventStream(options: TurnEventStreamOptions): () => voi
     if (token) headers.Authorization = `Bearer ${token}`;
     if (lastSequence !== null) headers["Last-Event-ID"] = String(lastSequence);
 
-    fetchEventSource(options.url, {
+    fetchEventSource(resolveMemoryApiUrl(options.url), {
       method: "GET",
       headers,
       signal: controller.signal,

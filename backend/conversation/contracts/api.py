@@ -1,6 +1,6 @@
 """Conversation REST API 与 SSE 契约（方案 §17）。
 
-冻结：REST 请求/响应形状、cursor 分页、9 种 SSE 事件 envelope 与 payload、
+冻结：REST 请求/响应形状、cursor 分页、SSE 事件 envelope 与严格 payload、
 输入上限。所有 Schema 均为 extra="forbid"，事件 payload 只允许前端渲染必需字段。
 """
 
@@ -26,10 +26,11 @@ MAX_FOLLOWUPS = 3
 SSE_DELTA_BATCH_CHARS = 64
 SSE_DELTA_BATCH_MS = 100
 
-# 合法事件类型（§17.4，9 种）
+# 合法事件类型（§17.4；新增 turn.progress 仅公开安全的阶段摘要）
 ConversationEventType = Literal[
     "turn.accepted",
     "turn.started",
+    "turn.progress",
     "answer.delta",
     "citation.available",
     "turn.degraded",
@@ -150,7 +151,7 @@ class TurnStatusResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# SSE Envelope 与 9 种固定 payload（§17.4）
+# SSE Envelope 与固定 payload（§17.4）
 # ---------------------------------------------------------------------------
 
 
@@ -180,6 +181,30 @@ class TurnStartedPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["running"] = "running"
+
+
+ProgressStage = Literal[
+    "context",
+    "memory",
+    "rewrite",
+    "retrieval",
+    "rerank",
+    "evidence",
+    "answer",
+]
+ProgressStatus = Literal["started", "completed", "skipped", "degraded"]
+
+
+class TurnProgressPayload(BaseModel):
+    """公开的流水线阶段摘要；禁止承载隐藏推理或系统提示词。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: ProgressStage
+    status: ProgressStatus
+    title: str = Field(min_length=1, max_length=80)
+    detail: str | None = Field(default=None, max_length=500)
+    metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
 
 
 class AnswerDeltaPayload(BaseModel):

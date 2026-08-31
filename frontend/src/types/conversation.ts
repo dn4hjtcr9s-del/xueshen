@@ -91,6 +91,7 @@ export interface TurnStatus {
 export type ConversationEventType =
   | "turn.accepted"
   | "turn.started"
+  | "turn.progress"
   | "answer.delta"
   | "citation.available"
   | "turn.degraded"
@@ -110,6 +111,31 @@ export interface SSEEnvelope {
   run_id: string;
   occurred_at: string;
   data: Record<string, unknown>;
+}
+
+export type TurnProgressStage =
+  | "context"
+  | "memory"
+  | "rewrite"
+  | "retrieval"
+  | "rerank"
+  | "evidence"
+  | "answer";
+
+export type TurnProgressStatus = "started" | "completed" | "skipped" | "degraded";
+
+export interface TurnProgressData {
+  stage: TurnProgressStage;
+  status: TurnProgressStatus;
+  title: string;
+  detail?: string | null;
+  metadata: Record<string, string | number | boolean | null>;
+}
+
+export interface TurnProgressItem extends TurnProgressData {
+  eventId: string;
+  sequence: number;
+  occurredAt: string;
 }
 
 export interface AnswerCompletedData {

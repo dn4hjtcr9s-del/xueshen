@@ -51,6 +51,7 @@ from backend.conversation.graph.nodes import (
 from backend.conversation.graph.nodes import (
     snapshot as snapshot_node,
 )
+from backend.conversation.graph.progress import emit_progress
 from backend.conversation.graph.state import ConversationGraphState, ConversationRuntimeContext
 
 
@@ -88,17 +89,72 @@ def build_conversation_graph(
     # 注意：节点必须是 async 函数（返回 await 结果），不能返回 coroutine 对象。
 
     async def _node_load_context(state: ConversationGraphState) -> dict[str, Any]:
+        raw_state = dict(state)
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="context",
+            status="started",
+            title="正在整理对话上下文",
+            detail="读取本轮问题、最近对话与已有摘要。",
+        )
         conversation_context = await context_node.load_conversation_context(
-            dict(state),
+            raw_state,
             session_factory=repo.session_factory,
             max_messages=int(settings.conversation_context_max_messages),
+        )
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="context",
+            status="completed",
+            title="已整理对话上下文",
+            metadata={
+                "history_messages": len(conversation_context.get("recent_messages") or []),
+                "has_summary": bool(conversation_context.get("conversation_summary")),
+            },
         )
         # 上下文节点返回的是内容字典，必须挂到 Graph State 的 conversation_context 字段，
         # 否则 LangGraph 会丢弃 current_message/recent_messages，回答模型只能看到空问题。
         return {"conversation_context": conversation_context}
 
     async def _node_recall_memory(state: ConversationGraphState) -> dict[str, Any]:
-        return await memory_node.recall_memory(dict(state), runtime=runtime_context)
+        raw_state = dict(state)
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="memory",
+            status="started",
+            title="正在读取长期记忆",
+            detail="查找与当前问题相关的学习记录和知识状态。",
+        )
+        result = await memory_node.recall_memory(raw_state, runtime=runtime_context)
+        memory_status = str((result.get("memory_context") or {}).get("status") or "unavailable")
+        progress_status = "completed"
+        title = "已读取相关记忆"
+        detail = "相关学习记录已加入本轮上下文。"
+        if not runtime_context.flags.get("memory_read", True):
+            progress_status = "skipped"
+            title = "长期记忆读取未启用"
+            detail = "本轮仅使用对话上下文与教材检索结果。"
+        elif memory_status == "unavailable":
+            progress_status = "degraded"
+            title = "长期记忆暂不可用"
+            detail = "系统将继续使用对话上下文与教材资料回答。"
+        elif memory_status == "degraded":
+            progress_status = "degraded"
+            title = "已读取部分相关记忆"
+            detail = "记忆内容经过预算截断，系统将结合教材资料补充。"
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="memory",
+            status=progress_status,
+            title=title,
+            detail=detail,
+            metadata={"memory_status": memory_status},
+        )
+        return result
 
     async def _node_build_snapshot(state: ConversationGraphState) -> dict[str, Any]:
         return await snapshot_node.build_turn_snapshot(
@@ -106,12 +162,37 @@ def build_conversation_graph(
         )
 
     async def _node_rewrite(state: ConversationGraphState) -> dict[str, Any]:
+        raw_state = dict(state)
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="rewrite",
+            status="started",
+            title="正在理解并改写问题",
+            detail="把当前问题整理成适合检索和回答的独立问题。",
+        )
         result = await rewrite_node.rewrite_and_plan(
-            dict(state),
+            raw_state,
             runtime=runtime_context,
             context_service=context_service,
             vocabulary=vocabulary,
             max_subqueries=max_subqueries,
+        )
+        plan = result.get("rewrite_plan") or {}
+        standalone = str(plan.get("standalone_question") or "").strip()
+        subqueries = plan.get("subqueries") or []
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="rewrite",
+            status="completed",
+            title="已完成问题改写",
+            detail=standalone or "已生成本轮回答计划。",
+            metadata={
+                "need_retrieval": bool(plan.get("need_retrieval")),
+                "subquery_count": len(subqueries),
+                "plan_revision": int(plan.get("plan_revision") or 0),
+            },
         )
         # C6（第三轮必改 3）：retrieval_iteration 统计**已执行的补检索轮数**——
         # 仅在非首轮（state 已有上一轮 evidence_assessment）时 +1；
@@ -125,29 +206,173 @@ def build_conversation_graph(
         return result
 
     async def _node_embed(state: ConversationGraphState) -> dict[str, Any]:
-        return await retrieval_node.embed_subqueries(dict(state), runtime=runtime_context)
+        raw_state = dict(state)
+        subqueries = (raw_state.get("rewrite_plan") or {}).get("subqueries") or []
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="retrieval",
+            status="started",
+            title="正在准备教材检索",
+            detail=f"为 {len(subqueries)} 个检索问题生成向量表示。",
+            metadata={"subquery_count": len(subqueries)},
+        )
+        try:
+            result = await retrieval_node.embed_subqueries(raw_state, runtime=runtime_context)
+        except Exception:
+            await emit_progress(
+                runtime_context,
+                raw_state,
+                stage="retrieval",
+                status="degraded",
+                title="检索准备暂时失败",
+                detail="未能生成检索向量，本轮回答已停止。",
+                metadata={"subquery_count": len(subqueries)},
+            )
+            raise
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="retrieval",
+            status="completed",
+            title="教材检索准备完成",
+            metadata={"subquery_count": len(subqueries)},
+        )
+        return result
 
     async def _node_retrieve(worker_input: dict[str, Any]) -> dict[str, Any]:
-        return await retrieval_node.retrieve_subquery(worker_input, runtime=runtime_context)
+        query_text = str(worker_input.get("query_text") or "")
+        await emit_progress(
+            runtime_context,
+            worker_input,
+            stage="retrieval",
+            status="started",
+            title="正在检索相关教材",
+            detail=query_text,
+            metadata={"subquery_id": str(worker_input.get("subquery_id") or "")},
+        )
+        try:
+            result = await retrieval_node.retrieve_subquery(worker_input, runtime=runtime_context)
+        except Exception:
+            await emit_progress(
+                runtime_context,
+                worker_input,
+                stage="retrieval",
+                status="degraded",
+                title="一组教材检索暂时失败",
+                detail=query_text,
+            )
+            raise
+        worker_results = result.get("worker_results") or {}
+        first: dict[str, Any] = next(iter(worker_results.values()), {})
+        hits = first.get("hits") or []
+        retrieval_status = str(first.get("status") or "unknown")
+        await emit_progress(
+            runtime_context,
+            worker_input,
+            stage="retrieval",
+            status="completed" if retrieval_status == "succeeded" else "degraded",
+            title="已完成一组教材检索",
+            detail=query_text,
+            metadata={
+                "subquery_id": str(worker_input.get("subquery_id") or ""),
+                "hit_count": len(hits),
+                "retrieval_status": retrieval_status,
+            },
+        )
+        return result
 
     async def _node_aggregate(state: ConversationGraphState) -> dict[str, Any]:
         return await evidence_node.aggregate_results(dict(state), runtime=runtime_context)
 
     async def _node_rerank(state: ConversationGraphState) -> dict[str, Any]:
-        return await evidence_node.deduplicate_and_rerank(
-            dict(state),
+        raw_state = dict(state)
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="rerank",
+            status="started",
+            title="正在去重并重排证据",
+            detail="合并重复片段，并优先保留覆盖问题更完整的资料。",
+            metadata={"raw_hit_count": len(raw_state.get("evidence_hits") or [])},
+        )
+        result = await evidence_node.deduplicate_and_rerank(
+            raw_state,
             runtime=runtime_context,
             settings=settings,
             token_counter=token_counter,
         )
+        evidence_set = result.get("evidence_set") or {}
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="rerank",
+            status="completed",
+            title="已完成证据重排",
+            metadata={
+                "evidence_count": len(evidence_set.get("items") or []),
+                "evidence_tokens": int(evidence_set.get("total_tokens") or 0),
+            },
+        )
+        return result
 
     async def _node_evaluate(state: ConversationGraphState) -> dict[str, Any]:
-        return await evidence_node.evaluate_evidence(dict(state), runtime=runtime_context)
+        raw_state = dict(state)
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="evidence",
+            status="started",
+            title="正在检查证据是否充分",
+            detail="判断现有资料能否完整、可靠地回答问题。",
+        )
+        result = await evidence_node.evaluate_evidence(raw_state, runtime=runtime_context)
+        assessment = result.get("evidence_assessment") or {}
+        assessment_status = str(assessment.get("status") or "unknown")
+        titles = {
+            "sufficient": "证据充分，准备回答",
+            "needs_more": "证据仍有缺口，准备补充检索",
+            "insufficient": "证据有限，将明确说明边界",
+        }
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="evidence",
+            status="completed" if assessment_status == "sufficient" else "degraded",
+            title=titles.get(assessment_status, "已完成证据检查"),
+            metadata={
+                "assessment": assessment_status,
+                "missing_aspects": len(assessment.get("missing_aspects") or []),
+            },
+        )
+        return result
 
     async def _node_answer(state: ConversationGraphState) -> dict[str, Any]:
-        return await answer_node.generate_answer(
-            dict(state), runtime=runtime_context, context_service=context_service
+        raw_state = dict(state)
+        evidence_count = len((raw_state.get("evidence_set") or {}).get("items") or [])
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="answer",
+            status="started",
+            title="正在组织回答",
+            detail="结合对话上下文、可用记忆与检索证据生成讲解。",
+            metadata={"evidence_count": evidence_count},
         )
+        result = await answer_node.generate_answer(
+            raw_state, runtime=runtime_context, context_service=context_service
+        )
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="answer",
+            status="completed",
+            title="回答内容已生成",
+            metadata={
+                "answer_chars": len(str((result.get("answer_payload") or {}).get("answer") or "")),
+            },
+        )
+        return result
 
     async def _node_validate(state: ConversationGraphState) -> dict[str, Any]:
         return await answer_node.validate_answer_and_citations(dict(state), runtime=runtime_context)
@@ -199,6 +424,9 @@ def build_conversation_graph(
                 Send(
                     "retrieve_subquery",
                     {
+                        "turn_id": state.get("turn_id"),
+                        "request_id": state.get("request_id"),
+                        "run_id": state.get("run_id"),
                         "plan_revision": plan_revision,
                         "subquery_id": str(subquery["subquery_id"]),
                         "query_text": str(subquery["query_text"]),

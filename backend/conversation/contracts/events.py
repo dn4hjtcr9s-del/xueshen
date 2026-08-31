@@ -22,6 +22,7 @@ from backend.conversation.contracts.api import (
     TurnCancelledPayload,
     TurnDegradedPayload,
     TurnFailedPayload,
+    TurnProgressPayload,
     TurnStartedPayload,
 )
 
@@ -42,6 +43,7 @@ class TurnEventWrite(BaseModel):
 _PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
     "turn.accepted": TurnAcceptedPayload,
     "turn.started": TurnStartedPayload,
+    "turn.progress": TurnProgressPayload,
     "answer.delta": AnswerDeltaPayload,
     "citation.available": CitationAvailablePayload,
     "turn.degraded": TurnDegradedPayload,

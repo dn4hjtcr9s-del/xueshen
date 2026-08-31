@@ -177,3 +177,21 @@ def test_projection_command_cross_field() -> None:
         }
     )
     assert ok.trigger_event_type == "memory.deleted"
+
+
+def test_conversation_progress_event_payload_is_strict() -> None:
+    """进度事件只允许前端展示所需的阶段摘要字段。"""
+    from backend.conversation.contracts.events import validate_event_payload
+
+    payload = validate_event_payload(
+        "turn.progress",
+        {
+            "stage": "rerank",
+            "status": "completed",
+            "title": "已完成证据重排",
+            "detail": None,
+            "metadata": {"evidence_count": 3},
+        },
+    )
+    assert payload["stage"] == "rerank"
+    assert payload["metadata"] == {"evidence_count": 3}

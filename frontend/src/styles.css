@@ -2072,3 +2072,146 @@ body::before {
     font-size: 10px;
   }
 }
+
+/* AI 工作流：只展示可验证的执行阶段，不展示模型隐藏思维链。 */
+.thinking-panel {
+  width: min(100%, 760px);
+  margin: 4px 0 22px;
+  padding: 13px 15px 12px;
+  border: 1px solid #e3e1db;
+  border-radius: 12px;
+  background: rgba(247, 246, 242, 0.72);
+}
+
+.thinking-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid #e9e7e1;
+}
+
+.thinking-panel-title {
+  color: #9a9892;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 1.6px;
+}
+
+.thinking-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--cinnabar-deep);
+  font-size: 11px;
+}
+
+.thinking-live i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cinnabar);
+  box-shadow: 0 0 0 4px rgba(189, 50, 26, 0.1);
+  animation: thinking-pulse 1.25s ease-in-out infinite;
+}
+
+.thinking-steps {
+  display: grid;
+  gap: 7px;
+  padding-top: 10px;
+}
+
+.thinking-step {
+  display: grid;
+  grid-template-columns: 19px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  min-height: 21px;
+  color: #8d8b85;
+}
+
+.thinking-step-mark {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border: 1px solid #cfcdc7;
+  border-radius: 50%;
+  color: #8f8d87;
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.thinking-step-copy {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.thinking-step-copy strong {
+  color: #56544f;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.thinking-step-copy span {
+  overflow: hidden;
+  color: #999791;
+  font-size: 11px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thinking-step-copy em {
+  color: #aaa8a1;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-style: normal;
+  line-height: 1.4;
+}
+
+.thinking-step--started .thinking-step-mark {
+  border-color: var(--cinnabar);
+  color: var(--cinnabar);
+}
+
+.thinking-step--started .thinking-step-copy strong {
+  color: var(--cinnabar-deep);
+}
+
+.thinking-step--degraded .thinking-step-mark {
+  border-color: #c88b51;
+  color: #a86b35;
+}
+
+.thinking-step--degraded .thinking-step-copy strong {
+  color: #9c6535;
+}
+
+.thinking-spinner {
+  width: 8px;
+  height: 8px;
+  border: 1px solid rgba(189, 50, 26, 0.25);
+  border-top-color: var(--cinnabar);
+  border-radius: 50%;
+  animation: thinking-spin 0.8s linear infinite;
+}
+
+@keyframes thinking-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes thinking-pulse {
+  50% { opacity: 0.35; transform: scale(0.78); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-spinner,
+  .thinking-live i {
+    animation: none;
+  }
+}

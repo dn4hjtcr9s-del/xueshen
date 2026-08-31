@@ -65,11 +65,10 @@ async def _run() -> None:
             logger=logger,
         )
 
-        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
         from backend.conversation.graph.builder import build_conversation_graph
         from backend.conversation.graph.runner import ConversationGraphRunner
         from backend.conversation.graph.state import ConversationRuntimeContext
+        from backend.conversation.persistence.checkpoint import open_checkpoint_saver
         from backend.conversation.persistence.event_writer import TurnEventWriter
         from backend.conversation.persistence.repository import ConversationRepository
         from backend.conversation.services.context_service import ContextService
@@ -114,8 +113,7 @@ async def _run() -> None:
                 "Embedding profile 与 active corpus 不匹配: " + "; ".join(embedding_failures)
             )
         vocabulary = vocabulary_loader.load()
-        async with AsyncPostgresSaver.from_conn_string(_psycopg_conninfo(settings)) as saver:
-            await saver.setup()
+        async with open_checkpoint_saver(_psycopg_conninfo(settings)) as saver:
             graph = build_conversation_graph(runtime_context=runtime, vocabulary=vocabulary)
             compiled = graph.compile(checkpointer=saver)
             runner = ConversationGraphRunner(

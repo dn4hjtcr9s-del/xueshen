@@ -5,7 +5,9 @@ import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createConversation, createTurn, listConversations } from "../api/conversations";
 import { startTurnEventStream } from "../api/turnEvents";
+import { resolveMemoryApiUrl } from "../api/client";
 import { useConversation } from "../hooks/useConversation";
+import { useTurnStream } from "../hooks/useTurnStream";
 import { ChatPage } from "../pages/Chat";
 import { server } from "./server";
 import type { SSEEnvelope } from "../types/conversation";
@@ -108,6 +110,14 @@ describe("conversations API client", () => {
   });
 });
 
+describe("SSE 地址解析", () => {
+  it("把后端返回的 /api/v1 路径接到当前 Memory API 前缀", () => {
+    expect(resolveMemoryApiUrl(`/api/v1/conversations/${THREAD}/turns/${TURN}/events`)).toBe(
+      `/memory-api/api/v1/conversations/${THREAD}/turns/${TURN}/events`,
+    );
+  });
+});
+
 describe("TurnEventStreamClient（§17.5 / Q15）", () => {
   beforeEach(() => {
     server.resetHandlers();
@@ -115,6 +125,53 @@ describe("TurnEventStreamClient（§17.5 / Q15）", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+
+  it("断开终态流后保留失败提示，直到调用方显式重置", async () => {
+    const failed = envelope("turn.failed", 1, {
+      error: {
+        code: "CONVERSATION_RUN_FAILED",
+        message: "回答失败，请重试",
+        retryable: true,
+        trace_id: "trace-1",
+      },
+    });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            `id: ${failed.sequence}\nevent: ${failed.event_type}\ndata: ${JSON.stringify(failed)}\n\n`,
+          ),
+        );
+        controller.close();
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(body, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        }),
+      ),
+    );
+
+    const initialProps: { url: string | null } = {
+      url: `/api/v1/conversations/${THREAD}/turns/${TURN}/events`,
+    };
+    const { result, rerender } = renderHook(
+      ({ url }: { url: string | null }) => useTurnStream(url),
+      { initialProps },
+    );
+    await waitFor(() => expect(result.current.state.status).toBe("failed"));
+
+    rerender({ url: null });
+    expect(result.current.state.status).toBe("failed");
+    expect(result.current.state.error?.message).toBe("回答失败，请重试");
+
+    act(() => result.current.reset());
+    expect(result.current.state.status).toBe("idle");
   });
 
   it("按 sequence 去重并传递事件", async () => {
@@ -327,5 +384,40 @@ describe("ChatPage 欢迎态", () => {
 
     expect(await screen.findByRole("complementary", { name: "历史对话" })).toBeVisible();
     expect(screen.getByRole("button", { name: /极限复习/ })).toBeVisible();
+  });
+});
+
+describe("Turn stream reducer", () => {
+  it("连续事件在同一批次到达时仍保留流程与回答内容", async () => {
+    const { initialTurnStreamState, reduceTurnStreamState } = await import("../hooks/useTurnStream");
+    const progressStarted = envelope("turn.progress", 1, {
+      stage: "memory",
+      status: "started",
+      title: "正在读取长期记忆",
+      metadata: {},
+    });
+    const progressCompleted = envelope("turn.progress", 2, {
+      stage: "memory",
+      status: "completed",
+      title: "已读取相关记忆",
+      detail: "学习记录已加入上下文",
+      metadata: { memory_status: "available" },
+    });
+    const delta = envelope("answer.delta", 3, { text_delta: "答案" });
+    const next = reduceTurnStreamState(
+      reduceTurnStreamState(
+        reduceTurnStreamState(initialTurnStreamState, progressStarted),
+        progressCompleted,
+      ),
+      delta,
+    );
+
+    expect(next.answer).toBe("答案");
+    expect(next.progress).toHaveLength(1);
+    expect(next.progress[0]).toMatchObject({
+      stage: "memory",
+      status: "completed",
+      title: "已读取相关记忆",
+    });
   });
 });

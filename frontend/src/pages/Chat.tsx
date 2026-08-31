@@ -18,7 +18,7 @@ import {
 import { useConversation } from "../hooks/useConversation";
 import { useKnowledgeSummaryGeneration } from "../hooks/useKnowledgeSummaryGeneration";
 import { useTurnStream } from "../hooks/useTurnStream";
-import type { ConversationMessage } from "../types/conversation";
+import type { ConversationMessage, TurnProgressItem } from "../types/conversation";
 
 const STARTER_PROMPTS = [
   {
@@ -79,8 +79,15 @@ export function ChatPage({
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [pendingUser, setPendingUser] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const { state: stream } = useTurnStream(streamUrl);
+  const { state: stream, reset: resetStream } = useTurnStream(streamUrl);
   const hasHistory = threads.length > 0;
+  const showLiveAssistant = stream.status !== "idle";
+  const visibleMessages =
+    showLiveAssistant && activeTurnId
+      ? messages.filter(
+          (message) => message.turn_id !== activeTurnId || message.role !== "assistant",
+        )
+      : messages;
   const showWelcome =
     !loading &&
     messages.length === 0 &&
@@ -97,11 +104,12 @@ export function ChatPage({
 
   useEffect(() => {
     if (!chatTarget?.threadId) return;
+    resetStream();
     setPendingUser(null);
     setStreamUrl(null);
     setActiveTurnId(null);
     void openThread(chatTarget.threadId);
-  }, [chatTarget?.threadId, openThread]);
+  }, [chatTarget?.threadId, openThread, resetStream]);
 
   useEffect(() => {
     if (detail) {
@@ -109,10 +117,11 @@ export function ChatPage({
       return;
     }
     setMessages([]);
+    resetStream();
     setPendingUser(null);
     setStreamUrl(null);
     setActiveTurnId(null);
-  }, [detail]);
+  }, [detail, resetStream]);
 
   useEffect(() => {
     if (!chatTarget?.turnId || !detail) return;
@@ -121,20 +130,23 @@ export function ChatPage({
   }, [chatTarget?.turnId, detail]);
 
   useEffect(() => {
-    if (!["completed", "failed", "cancelled"].includes(stream.status)) return;
+    if (!streamUrl || !["completed", "failed", "cancelled"].includes(stream.status)) return;
+    // 终态时停止网络连接，但保留本地结果，确保失败提示和执行流程不会瞬间消失。
     setStreamUrl(null);
-    setActiveTurnId(null);
     setPendingUser(null);
     if (activeThreadId) {
       void openThread(activeThreadId);
       void refreshList();
     }
-  }, [stream.status, activeThreadId, openThread, refreshList]);
+  }, [stream.status, streamUrl, activeThreadId, openThread, refreshList]);
 
   const handleSend = useCallback(async () => {
     const content = input.trim();
     if (!content || sending || loading) return;
     setInput("");
+    resetStream();
+    setStreamUrl(null);
+    setActiveTurnId(null);
     setPendingUser(content);
     const response = await send(content);
     if (response) {
@@ -146,7 +158,7 @@ export function ChatPage({
       setPendingUser(null);
     }
     inputRef.current?.focus();
-  }, [input, loading, sending, send]);
+  }, [input, loading, resetStream, sending, send]);
 
   const handleFollowup = useCallback((text: string) => {
     setInput(text);
@@ -156,18 +168,24 @@ export function ChatPage({
   const handleOpenThread = useCallback(
     (threadId: string) => {
       if (loading || sending) return;
-      if (activeThreadId && activeTurnId) void cancel(activeThreadId, activeTurnId);
+      if (activeThreadId && activeTurnId && ["connecting", "streaming"].includes(stream.status)) {
+        void cancel(activeThreadId, activeTurnId);
+      }
+      resetStream();
       setPendingUser(null);
       setStreamUrl(null);
       setActiveTurnId(null);
       void openThread(threadId);
     },
-    [activeThreadId, activeTurnId, cancel, loading, openThread, sending],
+    [activeThreadId, activeTurnId, cancel, loading, openThread, resetStream, sending, stream.status],
   );
 
   const handleNewThread = useCallback(() => {
     if (loading || sending) return;
-    if (activeThreadId && activeTurnId) void cancel(activeThreadId, activeTurnId);
+    if (activeThreadId && activeTurnId && ["connecting", "streaming"].includes(stream.status)) {
+      void cancel(activeThreadId, activeTurnId);
+    }
+    resetStream();
     newThread();
     setInput("");
     setMessages([]);
@@ -175,14 +193,14 @@ export function ChatPage({
     setStreamUrl(null);
     setActiveTurnId(null);
     requestAnimationFrame(() => inputRef.current?.focus());
-  }, [activeThreadId, activeTurnId, cancel, loading, newThread, sending]);
+  }, [activeThreadId, activeTurnId, cancel, loading, newThread, resetStream, sending, stream.status]);
 
   const handleCancel = useCallback(() => {
-    if (activeThreadId && activeTurnId) {
+    if (activeThreadId && activeTurnId && ["connecting", "streaming"].includes(stream.status)) {
       void cancel(activeThreadId, activeTurnId);
       setPendingUser(null);
     }
-  }, [activeThreadId, activeTurnId, cancel]);
+  }, [activeThreadId, activeTurnId, cancel, stream.status]);
 
   return (
     <div className={`chat-layout ${hasHistory ? "" : "chat-layout--solo"}`}>
@@ -215,7 +233,7 @@ export function ChatPage({
             <button
               className="chip-btn conv-remove"
               onClick={() => void remove(activeThreadId)}
-              disabled={loading || sending || Boolean(activeTurnId)}
+              disabled={loading || sending || ["connecting", "streaming"].includes(stream.status)}
               type="button"
             >
               删除当前会话
@@ -244,7 +262,7 @@ export function ChatPage({
             <WelcomePanel onSelectPrompt={handleFollowup} />
           ) : (
             <>
-              {messages.map((message) => (
+              {visibleMessages.map((message) => (
                 <MessageRow
                   key={message.message_id}
                   message={message}
@@ -259,10 +277,13 @@ export function ChatPage({
                   </div>
                 </div>
               )}
-              {stream.status !== "idle" && (
+              {showLiveAssistant && (
                 <div className="msg assistant" aria-live="polite">
                   <div className="msg-body">
                     <div className="msg-role">学神 AI · 讲解模式</div>
+                    {stream.progress.length > 0 && (
+                      <ThinkingTimeline items={stream.progress} status={stream.status} />
+                    )}
                     {stream.status === "connecting" && (
                       <div className="loading-hint">正在连接…</div>
                     )}
@@ -316,6 +337,7 @@ export function ChatPage({
                       <button
                         className="chip-btn"
                         onClick={() => void navigator.clipboard?.writeText(stream.answer)}
+                        disabled={!stream.answer}
                         type="button"
                       >
                         <Copy size={13} /> 复制
@@ -406,6 +428,78 @@ function WelcomePanel({ onSelectPrompt }: { onSelectPrompt: (prompt: string) => 
       </div>
     </section>
   );
+}
+
+function ThinkingTimeline({
+  items,
+  status,
+}: {
+  items: TurnProgressItem[];
+  status: string;
+}) {
+  const active = status === "connecting" || status === "streaming";
+  return (
+    <section className="thinking-panel" aria-label="AI 思考流程" aria-live="polite">
+      <div className="thinking-panel-head">
+        <span className="thinking-panel-title">AI WORKFLOW · 执行过程</span>
+        {active && (
+          <span className="thinking-live">
+            <i />处理中
+          </span>
+        )}
+      </div>
+      <div className="thinking-steps">
+        {items.map((item) => (
+          <div key={item.eventId} className={`thinking-step thinking-step--${item.status}`}>
+            <span className="thinking-step-mark" aria-hidden="true">
+              {item.status === "started" && active ? (
+                <i className="thinking-spinner" />
+              ) : item.status === "started" || item.status === "degraded" ? (
+                "!"
+              ) : item.status === "skipped" ? (
+                "–"
+              ) : (
+                "✓"
+              )}
+            </span>
+            <div className="thinking-step-copy">
+              <strong>{item.title}</strong>
+              {item.detail && <span>{item.detail}</span>}
+              <ProgressMetadata metadata={item.metadata} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ProgressMetadata({
+  metadata,
+}: {
+  metadata: TurnProgressItem["metadata"];
+}) {
+  const parts: string[] = [];
+  if (typeof metadata.subquery_count === "number") {
+    parts.push(`${metadata.subquery_count} 个检索问题`);
+  }
+  if (typeof metadata.hit_count === "number") parts.push(`命中 ${metadata.hit_count} 条`);
+  if (typeof metadata.raw_hit_count === "number") {
+    parts.push(`候选 ${metadata.raw_hit_count} 条`);
+  }
+  if (typeof metadata.evidence_count === "number") {
+    parts.push(`保留 ${metadata.evidence_count} 条证据`);
+  }
+  if (typeof metadata.evidence_tokens === "number") {
+    parts.push(`${metadata.evidence_tokens} tokens`);
+  }
+  if (typeof metadata.history_messages === "number") {
+    parts.push(`历史 ${metadata.history_messages} 条`);
+  }
+  if (metadata.assessment === "needs_more") parts.push("需要补检索");
+  if (metadata.assessment === "insufficient") parts.push("资料有限");
+  if (metadata.assessment === "sufficient") parts.push("检查通过");
+  return parts.length > 0 ? <em>{parts.join(" · ")}</em> : null;
 }
 
 function MessageRow({

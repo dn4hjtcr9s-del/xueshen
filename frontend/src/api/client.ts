@@ -15,6 +15,14 @@ const V1 = `${API_BASE}/api/v1`;
 // refresh Cookie Path=/api/v1/auth 必须与浏览器 URL 前缀一致，否则浏览器不会回传。
 const AUTH_V1 = "/api/v1";
 
+/** 把后端返回的 /api/v1 路径统一映射到当前 Memory API 前缀。 */
+export function resolveMemoryApiUrl(path: string): string {
+  if (/^https?:\/\//i.test(path)) return path;
+  if (path === API_BASE || path.startsWith(`${API_BASE}/`)) return path;
+  if (path === "/api/v1" || path.startsWith("/api/v1/")) return `${API_BASE}${path}`;
+  return path.startsWith("/") ? `${V1}${path}` : `${V1}/${path}`;
+}
+
 export interface PublicError {
   code: string;
   message: string;
