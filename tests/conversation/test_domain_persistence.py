@@ -99,8 +99,26 @@ async def test_turn_event_sequence_monotonic_and_unique(
                     payload={"text_delta": "勾股"},
                 ),
             )
+    async with conversation_session_factory() as session:
+        async with session.begin():
+            progress = await writer.append(
+                session,
+                write=TurnEventWrite(
+                    turn_id=turn_id,
+                    event_type="turn.progress",
+                    request_id="trace-1",
+                    run_id="run-1",
+                    payload={
+                        "stage": "retrieval",
+                        "status": "started",
+                        "title": "正在检索教材资料",
+                        "metadata": {},
+                    },
+                ),
+            )
     assert ev1["sequence"] == 1
     assert ev2["sequence"] == 2
+    assert progress["sequence"] == 3
 
     # 唯一约束：重复插入相同 (turn_id, sequence) 必须失败（IntegrityError）
     with pytest.raises(IntegrityError):
