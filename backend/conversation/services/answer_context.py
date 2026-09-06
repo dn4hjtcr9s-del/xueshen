@@ -35,7 +35,7 @@ def build_answer_contract(
 ) -> tuple[AnswerContract, str, list[str]]:
     """构造回答合同，并返回合同、已裁剪证据文本与证据引用。"""
     subqueries = list(rewrite_plan.get("subqueries") or [])
-    requires_evidence = bool(rewrite_plan.get("need_retrieval", True))
+    requires_evidence = bool(rewrite_plan.get("need_retrieval", False))
     tasks = _build_tasks(
         subqueries,
         evidence_items,

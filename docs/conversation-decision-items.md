@@ -132,6 +132,20 @@ EventSource 无法带 Authorization header。
   - 会话标题：首个 turn 完成后由摘要任务用 `OPENAI_CONVERSATION_SUMMARY_MODEL`
     生成，失败兜底为用户消息前 20 字。
 
+**更新（检索裁决改版，codex/agent-strategy-rewrite-retrieval-answer）**：
+- 新增 `retrieval_decision`（decision: retrieve/skip/clarify + basis_codes[] +
+  rationale），`basis_codes` 为低基数可组合标签（11 个），不逐场景预设 code；
+- `rationale` 是给前端进度展示的自然语言理由，检索/不检索都必须给出；
+- 默认值改为 fail-safe：`answer_mode=direct`、`need_retrieval=false`；
+  检索必须由 `decision=retrieve` 明确裁决；
+- 服务端硬约束：`retrieve ↔ need_retrieval=true ↔ answer_mode=rag ↔ subqueries 非空`，
+  `skip/clarify ↔ 全部相反`；矛盾输出视为非法计划，重试失败后**保守降级为不检索**
+  （不再把当前问题强制作为单查询 RAG）；
+- 未来由同一改写 Agent 在裁决前主动调用 Memory Tool；当前阶段输入记忆即全部记忆。
+- 补检索轮硬约束：上一轮已裁决 retrieve（evidence_assessment 存在）时，本轮模型
+  改判 skip/clarify 视为与上一轮证据缺口矛盾，服务端按 missing_aspects 强制 retrieve
+  （reason_codes 记 `replan_forced_retrieve`，rationale 向用户说明强制原因）。
+
 ### D12. SSE 各事件 data payload
 
 - **我的建议**：Phase 0 由我按 §7.4 事件列表逐一定义 Pydantic 模型并提交你审，

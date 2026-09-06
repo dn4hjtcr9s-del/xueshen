@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.conversation.contracts.api import Citation
 
@@ -39,6 +39,49 @@ class ConversationGraphInput(BaseModel):
 AnswerMode = Literal["direct", "memory_assisted", "rag"]
 MemoryTrigger = Literal["none", "explicit_remember"]
 
+# 检索裁决：retrieve（需要教材检索）/ skip（无需检索直接回答）/ clarify（先澄清）
+RetrievalDecisionType = Literal["retrieve", "skip", "clarify"]
+
+# 低基数、可组合的裁决依据标签：不枚举具体业务场景，只描述"为什么"的因素。
+RetrievalBasisCode = Literal[
+    # 必须依赖教材事实（定义、公式、定理、证明、例题来源）
+    "TEXTBOOK_FACT_REQUIRED",
+    # 用户明确要求查教材、出处、引用或资料
+    "EXPLICIT_SOURCE_REQUESTED",
+    # 问题目标是用户个人掌握/薄弱/学习状态
+    "USER_STATE_TARGET",
+    # 回答需要用户记忆或学习记录作为证据
+    "MEMORY_SOURCE_REQUIRED",
+    # 已有长期记忆足以支撑回答
+    "MEMORY_CONTEXT_SUFFICIENT",
+    # 已有当前对话上下文足以支撑回答
+    "CONVERSATION_CONTEXT_SUFFICIENT",
+    # 教材不能证明用户个人状态（教材不是个人掌握情况的证据）
+    "TEXTBOOK_NOT_EVIDENCE_FOR_USER_STATE",
+    # 当前上下文不足
+    "CURRENT_CONTEXT_INSUFFICIENT",
+    # 请求存在无法安全消解的歧义
+    "AMBIGUOUS_REQUEST",
+    # 仅用于服务端降级：规划器不可用
+    "PLANNER_UNAVAILABLE",
+    # 仅用于服务端降级：规划功能关闭
+    "PLANNER_DISABLED",
+]
+
+
+class RetrievalDecision(BaseModel):
+    """改写 Agent 对教材检索的裁决及其可展示依据（含前端进度展示）。
+
+    ``basis_codes`` 是低基数、可组合的决策依据标签，不枚举具体业务场景；
+    ``rationale`` 是给前端展示的自然语言说明，不承载隐藏思维链。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: RetrievalDecisionType
+    basis_codes: list[RetrievalBasisCode] = Field(default_factory=list, max_length=6)
+    rationale: str = Field(min_length=1, max_length=200)
+
 
 class RetrievalSubquery(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -56,12 +99,34 @@ class RewritePlan(BaseModel):
     schema_version: Literal["1"] = "1"
     plan_revision: int = Field(ge=0)
     standalone_question: str = Field(min_length=1, max_length=1000)
-    answer_mode: AnswerMode = "rag"
-    need_retrieval: bool = True
+    # fail-safe 默认值：不默认检索，检索必须由 retrieval_decision 明确裁决
+    answer_mode: AnswerMode = "direct"
+    need_retrieval: bool = False
+    retrieval_decision: RetrievalDecision
     memory_trigger: MemoryTrigger = "none"
     topic_hints: list[str] = Field(default_factory=list, max_length=20)
     subqueries: list[RetrievalSubquery] = Field(default_factory=list, max_length=6)
+    # 兼容既有降级观测字段；模型决策依据以 retrieval_decision 为准。
     reason_codes: list[str] = Field(default_factory=list, max_length=10)
+
+    @model_validator(mode="after")
+    def validate_retrieval_contract(self) -> RewritePlan:
+        """校验裁决、布尔路由、回答模式与子问题的一致性。
+
+        该校验既约束模型输出，也约束 Fake/兼容 Gateway 的结果；生产 Gateway
+        会在结构化输出重试阶段捕获同类 Schema 校验失败。
+        """
+        decision = self.retrieval_decision.decision
+        has_subqueries = bool(self.subqueries)
+        if decision == "retrieve":
+            if not self.need_retrieval or self.answer_mode != "rag" or not has_subqueries:
+                raise ValueError(
+                    "retrieve 裁决必须同时满足 need_retrieval=true、answer_mode=rag 且有子问题"
+                )
+        else:
+            if self.need_retrieval or self.answer_mode == "rag" or has_subqueries:
+                raise ValueError("skip/clarify 裁决必须不检索、非 rag 且 subqueries 为空")
+        return self
 
 
 # ---------------------------------------------------------------------------

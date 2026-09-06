@@ -32,7 +32,8 @@ def _failure() -> StructuredOutputError:
     )
 
 
-async def test_rewrite_failure_falls_back_to_current_question() -> None:
+async def test_rewrite_failure_falls_back_to_conservative_skip() -> None:
+    """改写失败：保守降级为不检索，不再把当前问题强行当作教材查询。"""
     runtime = build_runtime(openai_gateway=FailingStructuredGateway())
     state = {
         "snapshot": {
@@ -54,7 +55,10 @@ async def test_rewrite_failure_falls_back_to_current_question() -> None:
     )
 
     assert result["rewrite_plan"]["standalone_question"] == "请解释根值判别法"
-    assert result["rewrite_plan"]["subqueries"][0]["query_text"] == "请解释根值判别法"
+    assert result["rewrite_plan"]["need_retrieval"] is False
+    assert result["rewrite_plan"]["retrieval_decision"]["decision"] == "skip"
+    assert result["rewrite_plan"]["retrieval_decision"]["basis_codes"] == ["PLANNER_UNAVAILABLE"]
+    assert result["rewrite_plan"]["subqueries"] == []
     assert result["rewrite_plan"]["reason_codes"] == ["rewrite_structured_fallback"]
     assert result["degraded_flags"] == ["rewrite_structured_fallback"]
 

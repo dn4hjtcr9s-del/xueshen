@@ -246,8 +246,8 @@ async def test_memory_unavailable_degrades_but_completes() -> None:
     assert result["answer_payload"]["answer"] == "回答"
 
 
-async def test_flag_agentic_rag_disabled_single_query() -> None:
-    """附录 A.10：AGENTIC_RAG_ENABLED=false → 单查询降级。"""
+async def test_flag_agentic_rag_disabled_conservative_skip() -> None:
+    """AGENTIC_RAG_ENABLED=false → 规划功能关闭，保守跳过教材检索（不默认 RAG）。"""
 
     openai = FakeOpenAIGateway()
     openai.answer_payloads.append({"answer": "回答", "citations": [], "followups": []})
@@ -276,9 +276,10 @@ async def test_flag_agentic_rag_disabled_single_query() -> None:
         "conversation_summary": None,
     }
     result, _ = await _run_graph(runtime, state)
-    assert result["rewrite_plan"]["need_retrieval"] is True
+    assert result["rewrite_plan"]["need_retrieval"] is False
     assert result["rewrite_plan"]["reason_codes"] == ["agentic_rag_disabled"]
-    assert len(result["rewrite_plan"]["subqueries"]) == 1
+    assert result["rewrite_plan"]["retrieval_decision"]["decision"] == "skip"
+    assert result["rewrite_plan"]["subqueries"] == []
 
 
 async def test_flag_evidence_loop_disabled_skips_evaluate() -> None:

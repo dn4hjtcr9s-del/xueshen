@@ -126,27 +126,19 @@ def merge_degraded_flags(current: list[str], update: list[str]) -> list[str]:
 
 
 def normalize_plan_mode(plan: RewritePlan, *, max_subqueries: int) -> RewritePlan:
-    """服务端规范化（§11.1）：need_retrieval=true ↔ answer_mode=rag 强制一致。"""
-    need_retrieval = plan.need_retrieval
-    answer_mode = plan.answer_mode
-    if need_retrieval:
-        answer_mode = "rag"
-    elif answer_mode == "rag":
-        need_retrieval = True
-    if not need_retrieval and answer_mode == "direct":
-        answer_mode = "memory_assisted" if plan.memory_trigger != "none" else "direct"
-    subqueries = plan.subqueries[:max_subqueries]
-    return RewritePlan(
-        schema_version=plan.schema_version,
-        plan_revision=plan.plan_revision,
-        standalone_question=plan.standalone_question,
-        answer_mode=answer_mode,
-        need_retrieval=need_retrieval,
-        memory_trigger=plan.memory_trigger,
-        topic_hints=plan.topic_hints,
-        subqueries=subqueries,
-        reason_codes=plan.reason_codes,
-    )
+    """服务端规范化（§11.1）：只做边界裁剪并复核检索裁决一致性。
+
+    检索是否发生由 ``retrieval_decision.decision`` 决定；这里不再把
+    ``answer_mode`` 或 ``need_retrieval`` 的矛盾静默改成 RAG，避免模型一次
+    错误输出被服务端放大成无条件检索。裁剪后仍不一致视为非法计划，由调用方
+    按保守降级处理。
+    """
+    subqueries = plan.subqueries[: max(max_subqueries, 0)]
+    if plan.retrieval_decision.decision == "retrieve" and not subqueries:
+        raise ValueError("retrieve 裁决在服务端裁剪后没有可执行的子问题")
+    if plan.retrieval_decision.decision != "retrieve" and subqueries:
+        raise ValueError("非 retrieve 裁决不得保留子问题")
+    return plan.model_copy(update={"subqueries": subqueries})
 
 
 # ---------------------------------------------------------------------------

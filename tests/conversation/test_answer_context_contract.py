@@ -62,6 +62,7 @@ def _item(
 def test_answer_contract_combines_question_history_memory_and_task_links() -> None:
     rewrite_plan = {
         "standalone_question": "比较根值判别法和比值判别法",
+        "need_retrieval": True,
         "subqueries": [
             {
                 "subquery_id": "sq-root",
@@ -118,6 +119,7 @@ def test_answer_contract_combines_question_history_memory_and_task_links() -> No
 def test_evidence_budget_reserves_space_for_each_task_and_role() -> None:
     rewrite_plan = {
         "standalone_question": "分别解释定义和例题",
+        "need_retrieval": True,
         "subqueries": [
             {
                 "subquery_id": "sq-definition",

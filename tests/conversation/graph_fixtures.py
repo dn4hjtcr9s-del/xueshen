@@ -178,12 +178,29 @@ def make_hit(
     return ref.__dict__
 
 
-def default_rewrite_plan(*, subqueries: int = 1, need_retrieval: bool = True) -> dict[str, Any]:
+def default_rewrite_plan(
+    *,
+    subqueries: int = 1,
+    need_retrieval: bool = True,
+    decision: str | None = None,
+) -> dict[str, Any]:
+    decision = decision or ("retrieve" if need_retrieval else "skip")
     plan = RewritePlan(
         plan_revision=0,
         standalone_question="勾股定理是什么？",
         answer_mode="rag" if need_retrieval else "direct",
         need_retrieval=need_retrieval,
+        retrieval_decision={
+            "decision": decision,
+            "basis_codes": (
+                ["TEXTBOOK_FACT_REQUIRED"]
+                if need_retrieval
+                else ["CONVERSATION_CONTEXT_SUFFICIENT"]
+            ),
+            "rationale": (
+                "需要教材事实证据后回答。" if need_retrieval else "当前上下文足以直接回答。"
+            ),
+        },
         subqueries=[
             {
                 "subquery_id": f"sq-{i}",

@@ -54,6 +54,7 @@ async def generate_answer(
         degraded_flags=degraded_flags,
         answer_contract=answer_contract.model_dump(mode="json"),
         evidence_assessment=state.get("evidence_assessment"),
+        retrieval_decision=rewrite_plan.get("retrieval_decision") or {},
     )
     request_id = str(state.get("request_id") or "")
     run_id = str(state.get("run_id") or "")

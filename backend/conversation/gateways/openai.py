@@ -39,7 +39,7 @@ ROLE_TIMEOUTS: dict[str, float] = {
 }
 
 ROLE_MAX_OUTPUT: dict[str, int] = {
-    "rewrite": 1500,
+    "rewrite": 2500,
     "evidence": 1000,
     "answer": 3000,
     "summary": 1200,

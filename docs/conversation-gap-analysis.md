@@ -122,7 +122,10 @@ Agent 委托认证、SourceBundle 上限，均与方案描述一致。方案可�
 | C3 | §15.5 | Follow-up：数量上限、生成方式（answer 同一调用内 or 额外调用）、失败降级 |
 | C4 | §11.1 | `semantic_filters` 值域：SearchFilters 的五个维度已存在，但 grade_levels /
  sections / content_roles 的**实际词汇表**需从 RAG 数据中确认枚举 |
-| C5 | §11.1 | `answer_mode`(direct/memory_assisted/rag) × `need_retrieval` 的合法组合矩阵 |
+| C5 | §11.1 | `answer_mode`(direct/memory_assisted/rag) × `need_retrieval` 的合法组合矩阵。
+ **已裁决**（codex/agent-strategy-rewrite-retrieval-answer）：该矩阵已被
+ `retrieval_decision` 契约取代（retrieve/skip/clarify + basis_codes + rationale），
+ 一致性由 RewritePlan 校验器与服务端裁剪复核强制，见 conversation-decision-items.md D11 更新 |
 | C6 | §9.2 / §20 | 快照四项 token 预算 + 全部无默认值配置项的默认数值（见待决项 D8 清单） |
 | C7 | §7.4 | answer.delta 聚合窗口（毫秒/字符数）默认值 |
 | C8 | §7.1 | 会话标题生成：模型、触发时机、失败兜底文案 |

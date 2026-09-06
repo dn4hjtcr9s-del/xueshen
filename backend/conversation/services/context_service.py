@@ -165,6 +165,8 @@ class ContextService:
                 "status": snapshot.memory.status,
                 "learner": snapshot.memory.learner,
                 "mastery": snapshot.memory.mastery,
+                "graph_states": snapshot.memory.graph_states,
+                "recommendations": snapshot.memory.recommendations,
                 "truncated": snapshot.memory.truncated,
             },
             "executed_queries": executed_queries or [],
@@ -189,6 +191,7 @@ class ContextService:
         degraded_flags: list[str],
         answer_contract: dict[str, Any] | None = None,
         evidence_assessment: dict[str, Any] | None = None,
+        retrieval_decision: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """AnswerContextView（§9.4）：注入回答合同和局部证据状态。"""
         return {
@@ -208,6 +211,7 @@ class ContextService:
             "evidence_refs": evidence_refs,
             "answer_contract": answer_contract or {},
             "evidence_assessment": evidence_assessment or {},
+            "retrieval_decision": retrieval_decision or {},
             "degraded_flags": degraded_flags,
             "answer_rules": {
                 "max_followups": 3,

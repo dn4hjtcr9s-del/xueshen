@@ -181,15 +181,22 @@ def build_conversation_graph(
         plan = result.get("rewrite_plan") or {}
         standalone = str(plan.get("standalone_question") or "").strip()
         subqueries = plan.get("subqueries") or []
+        retrieval_decision = plan.get("retrieval_decision") or {}
+        decision = str(retrieval_decision.get("decision") or "skip")
         await emit_progress(
             runtime_context,
             raw_state,
             stage="rewrite",
             status="completed",
-            title="已完成问题改写",
+            title="已完成问题改写与检索裁决",
             detail=standalone or "已生成本轮回答计划。",
             metadata={
                 "need_retrieval": bool(plan.get("need_retrieval")),
+                "retrieval_decision": decision,
+                "basis_codes": ",".join(
+                    str(code) for code in retrieval_decision.get("basis_codes") or []
+                ),
+                "rationale": str(retrieval_decision.get("rationale") or "")[:200],
                 "subquery_count": len(subqueries),
                 "plan_revision": int(plan.get("plan_revision") or 0),
             },
@@ -469,10 +476,17 @@ def build_conversation_graph(
 
 
 def _route_need_retrieval(state: dict[str, Any]) -> str:
-    """§5.2 ROUTE：need_retrieval? → retrieve / answer。"""
+    """§5.2 ROUTE：按已校验的 retrieval_decision 裁决进入检索或直接回答。
+
+    计划已由 RewritePlan 契约校验；这里再做状态边界检查，避免手工注入的
+    不一致 State 绕过契约后触发 embedding/retrieval。
+    """
     plan = state.get("rewrite_plan") or {}
-    if plan.get("need_retrieval"):
-        return "retrieve"
+    decision = (plan.get("retrieval_decision") or {}).get("decision")
+    if decision == "retrieve":
+        if plan.get("need_retrieval") is True and plan.get("answer_mode") == "rag":
+            if plan.get("subqueries"):
+                return "retrieve"
     return "answer"
 
 
