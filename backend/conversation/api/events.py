@@ -107,8 +107,8 @@ async def _event_stream(
         yield _format_sse(event, thread_id=thread_id)
         last_sequence = int(event["sequence"])
 
-    # 2. 实时轮询新事件（1s 间隔，与心跳无关）+ 心跳（15s）
-    poll_interval = 1.0
+    # 2. 实时轮询新事件（默认 200ms，越短流式延迟越低）+ 心跳（15s）
+    poll_interval = max(0.05, ctx.settings.conversation_sse_poll_interval_seconds)
     loop = asyncio.get_running_loop()
     last_heartbeat = loop.time()
     while True:

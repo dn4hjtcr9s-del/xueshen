@@ -146,6 +146,21 @@ EventSource 无法带 Authorization header。
   改判 skip/clarify 视为与上一轮证据缺口矛盾，服务端按 missing_aspects 强制 retrieve
   （reason_codes 记 `replan_forced_retrieve`，rationale 向用户说明强制原因）。
 
+**更新（真实流式回答，codex/agent-strategy-rewrite-retrieval-answer）**：
+- `CONVERSATION_ANSWER_STREAMING`（默认 false）开启后，answer 改为 token 级流式
+  （Responses API `stream=True`），SSE `answer.delta` 实时转发，不再"完整生成后切片"；
+- 流式 followups：正文末尾输出 `<followups>[...]</followups>` 收尾标记，服务端解析后
+  剥离，解析失败按空处理（沿用 D11"失败则省略，不单独重试"）；
+- 流式失败策略：零正文（异常/refusal/空输出）→ 回退非流式结构化路径；部分正文
+  的降级标记：`answer_stream_interrupted`（连接中断）、`answer_stream_truncated`
+  （completed=incomplete 截断）、`answer_stream_refused`（refusal 后仍有正文）；
+  citation 在流结束后由 validate 节点后验（非法引用清理并标 `citation_degraded`）；
+- 流式事件识别：优先接受 `response.output_text.delta`；兼容端点未知 type 但含
+  delta 的事件按正文兜底，refusal/reasoning/function_call 类事件一律拒绝；
+- 前端流式渲染 conceal 策略：未闭合代码块/公式（```、$$、\begin{、行内 $）尾部灰化显示，
+  闭合后正常渲染（`frontend/src/components/conceal.ts`），终态全量渲染；
+- SSE 实时轮询间隔 `CONVERSATION_SSE_POLL_INTERVAL_SECONDS`（默认 0.2s）。
+
 ### D12. SSE 各事件 data payload
 
 - **我的建议**：Phase 0 由我按 §7.4 事件列表逐一定义 Pydantic 模型并提交你审，

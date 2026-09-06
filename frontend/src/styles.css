@@ -2186,6 +2186,11 @@ body::before {
   color: #8f8c86;
 }
 
+/* 流式 conceal：未闭合 Markdown/公式尾部灰化，避免闪烁与半截公式裸奔 */
+.conceal-tail {
+  opacity: 0.45;
+}
+
 .thinking-step--started .thinking-step-mark {
   border-color: var(--cinnabar);
   color: var(--cinnabar);

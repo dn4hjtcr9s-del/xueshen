@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
+import StreamingMarkdown from "../components/StreamingMarkdown";
 import {
   ArrowUp,
   BookOpen,
@@ -289,9 +290,10 @@ export function ChatPage({
                     )}
                     {stream.answer && (
                       <div className="msg-text md">
-                        <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                          {stream.answer}
-                        </ReactMarkdown>
+                        <StreamingMarkdown
+                          text={stream.answer}
+                          streaming={stream.status === "streaming"}
+                        />
                       </div>
                     )}
                     {stream.citations.length > 0 && (

@@ -276,3 +276,174 @@ async def test_rewrite_and_evidence_force_reasoning_none() -> None:
 
     assert [call["reasoning"]["effort"] for call in calls] == ["none", "none"]
     assert [call["timeout"] for call in calls] == [30.0, 30.0]
+
+
+class _FakeAsyncStream:
+    """模拟 SDK 流式响应：事件迭代 + close。"""
+
+    def __init__(self, events: list[Any]) -> None:
+        self._events = list(events)
+        self.closed = False
+
+    def __aiter__(self) -> _FakeAsyncStream:
+        self._it = iter(self._events)
+        return self
+
+    async def __anext__(self) -> Any:
+        try:
+            return next(self._it)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _delta(text: str) -> Any:
+    """模拟 SDK 的 response.output_text.delta 事件。"""
+    return SimpleNamespace(type="response.output_text.delta", delta=text)
+
+
+def _stream_gateway(events: list[Any]) -> tuple[OpenAIGateway, _FakeAsyncStream]:
+    class FakeResponses:
+        async def create(self, **kwargs: Any) -> Any:
+            assert kwargs.get("stream") is True
+            return stream
+
+    class FakeClient:
+        responses = FakeResponses()
+
+    stream = _FakeAsyncStream(events)
+    gateway = object.__new__(OpenAIGateway)
+    gateway._client = FakeClient()
+    gateway._settings = SimpleNamespace(conversation_answer_streaming=True)
+    gateway._logger = gateway_module.logging.getLogger("test.openai.gateway")
+    return gateway, stream
+
+
+def _text_stream(gateway: OpenAIGateway, user_payload: str = "{}") -> Any:
+    from backend.conversation.gateways.openai import AnswerTextStream
+
+    return AnswerTextStream(
+        client=gateway._client,
+        model="answer-model",
+        user_payload=user_payload,
+        logger=gateway._logger,
+    )
+
+
+@pytest.mark.asyncio
+async def test_answer_text_stream_yields_body_and_parses_followups() -> None:
+    gateway, stream = _stream_gateway(
+        [
+            _delta("勾股定理："),
+            _delta("a²+b²=c²"),
+            _delta('<followups>["继续讲讲","证明"]</followups>'),
+        ]
+    )
+    parts = [part async for part in _text_stream(gateway)]
+    assert "".join(parts) == "勾股定理：a²+b²=c²"
+    assert stream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_answer_text_stream_splits_marker_across_delta_boundary() -> None:
+    gateway, _ = _stream_gateway(
+        [
+            _delta("正文甲"),
+            _delta("<follow"),
+            _delta('ups>["追问A"]</followups>'),
+        ]
+    )
+    answer_stream = _text_stream(gateway)
+    parts = [part async for part in answer_stream]
+    assert "".join(parts) == "正文甲"
+    assert answer_stream.followups == ["追问A"]
+
+
+@pytest.mark.asyncio
+async def test_answer_text_stream_malformed_marker_drops_followups() -> None:
+    gateway, _ = _stream_gateway([_delta("正文<followups>not-json</followups>")])
+    answer_stream = _text_stream(gateway)
+    parts = [part async for part in answer_stream]
+    assert "".join(parts) == "正文"
+    assert answer_stream.followups == []
+
+
+@pytest.mark.asyncio
+async def test_answer_text_stream_without_marker_yields_all_text() -> None:
+    gateway, _ = _stream_gateway([_delta("正常"), _delta("结束")])
+    answer_stream = _text_stream(gateway)
+    parts = [part async for part in answer_stream]
+    assert "".join(parts) == "正常结束"
+    assert answer_stream.followups == []
+
+
+@pytest.mark.asyncio
+async def test_answer_text_stream_marker_in_isolated_delta_does_not_leak() -> None:
+    """Critical 回归：<followups> 独占一个 delta（真实 tokenizer 最典型切分）。"""
+    gateway, _ = _stream_gateway(
+        [
+            _delta("正文"),
+            _delta("<followups>"),
+            _delta('["追问A"]'),
+            _delta("</followups>"),
+        ]
+    )
+    answer_stream = _text_stream(gateway)
+    parts = [part async for part in answer_stream]
+    assert "".join(parts) == "正文"
+    assert answer_stream.followups == ["追问A"]
+
+
+@pytest.mark.asyncio
+async def test_answer_text_stream_ignores_refusal_delta_and_marks_completed_status() -> None:
+    """refusal delta 不得混入正文；completed=incomplete 暴露为 truncated。"""
+    gateway, _ = _stream_gateway(
+        [
+            _delta("前半"),
+            SimpleNamespace(type="response.refusal.delta", delta="拒绝内容"),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="incomplete"),
+            ),
+        ]
+    )
+    answer_stream = _text_stream(gateway)
+    parts = [part async for part in answer_stream]
+    assert "".join(parts) == "前半"
+    assert answer_stream.refused is True
+    assert answer_stream.truncated is True
+
+
+@pytest.mark.asyncio
+async def test_answer_text_stream_fallback_for_compat_endpoint_unknown_type() -> None:
+    """兼容端点未带标准 type 但含 delta 的事件按正文兜底（评审 #1 方案 B）。"""
+    gateway, _ = _stream_gateway([SimpleNamespace(delta="兼容端点正文")])
+    answer_stream = _text_stream(gateway)
+    parts = [part async for part in answer_stream]
+    assert "".join(parts) == "兼容端点正文"
+
+
+@pytest.mark.asyncio
+async def test_answer_text_stream_ignores_reasoning_delta() -> None:
+    """reasoning 增量带 delta 字段，但不得混入回答正文。"""
+    gateway, _ = _stream_gateway(
+        [
+            SimpleNamespace(type="response.reasoning_summary_text.delta", delta="思考过程"),
+            _delta("正式正文"),
+        ]
+    )
+    answer_stream = _text_stream(gateway)
+    parts = [part async for part in answer_stream]
+    assert "".join(parts) == "正式正文"
+
+
+@pytest.mark.asyncio
+async def test_answer_text_stream_strips_incomplete_marker_prefix_at_end() -> None:
+    """自然结束于词中间（["正文", "<fol"]）：尾部标记前缀不得进入正文。"""
+    gateway, _ = _stream_gateway([_delta("正文"), _delta("<fol")])
+    answer_stream = _text_stream(gateway)
+    parts = [part async for part in answer_stream]
+    assert "".join(parts) == "正文"
+    assert answer_stream.followups == []

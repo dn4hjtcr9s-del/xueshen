@@ -225,6 +225,29 @@ class OpenAIGateway:
         ]
         return deltas, payload.model_dump(mode="json")
 
+    def supports_answer_streaming(self) -> bool:
+        """是否启用真实流式回答（默认关闭，由设置控制）。"""
+        return bool(self._settings.conversation_answer_streaming)
+
+    def open_answer_stream(self, *, answer_context: dict[str, Any]) -> AnswerTextStream:
+        """打开真实流式回答会话（§15.4 流式模式）。
+
+        由节点迭代消费；流结束或标记解析完成后通过 ``followups`` /
+        ``full_text`` 读取结果。不满足启用条件时抛出
+        ModelUnavailableError（节点应走非流式回退）。
+        """
+        import json as _json
+
+        if not self.supports_answer_streaming():
+            raise ModelUnavailableError("CONVERSATION_ANSWER_STREAMING 未启用")
+        return AnswerTextStream(
+            client=self._client,
+            model=self._model_for("answer"),
+            user_payload=_json.dumps(answer_context, ensure_ascii=False, default=str),
+            logger=self._logger,
+            reasoning_effort=self._settings.openai_reasoning_effort,
+        )
+
     async def summarize_conversation(
         self, *, messages: list[dict[str, Any]], previous_summary: str | None
     ) -> str:
@@ -390,3 +413,186 @@ def _map_conversation_openai_error(exc: Exception) -> Exception:
     if isinstance(exc, APIError):
         return ModelUnavailableError(f"模型调用失败: {str(exc)[:200]}")
     return exc
+
+
+# ---------------------------------------------------------------------------
+# 真实流式回答（§15.4 流式模式）
+# ---------------------------------------------------------------------------
+
+FOLLOWUPS_OPEN = "<followups>"
+FOLLOWUPS_CLOSE = "</followups>"
+
+
+def _parse_followups(raw: str) -> list[str]:
+    """解析 <followups> 收尾标记；任何失败按"无追问"降级（D11）。"""
+    import json as _json
+
+    text = raw.strip()
+    try:
+        parsed = _json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if isinstance(item, str)][:3]
+
+
+def _strip_incomplete_marker_prefix(text: str) -> str:
+    """剥离正文尾部不完整的 <followups> 标记前缀（最长匹配，仅一次）。"""
+    for cut in range(len(FOLLOWUPS_OPEN) - 1, 0, -1):
+        if text.endswith(FOLLOWUPS_OPEN[:cut]):
+            return text[:-cut]
+    return text
+
+
+class AnswerTextStream:
+    """真实流式回答会话（token 级）。
+
+    迭代产出回答正文（不含 followups 收尾标记）；流结束或标记解析完成后可通过
+    ``followups`` 读取追问建议、通过 ``full_text`` 读取完整正文。协议：
+
+    - 模型按流式 prompt 输出纯 markdown 正文，最后输出一行
+      ``<followups>[...]</followups>`` 收尾标记；
+    - 正文 token 实时转发；收尾标记从不进入正文；
+    - 标记跨事件边界拆分时，通过保守缓冲避免把半截标记发出去；
+    - 只转发 ``response.output_text.delta`` 增量，refusal delta 不会混入正文；
+      ``response.completed`` 的 incomplete 状态暴露为 ``truncated``；
+    - 全程异常统一映射为 ModelUnavailableError（节点据此决定回退非流式）。
+    """
+
+    def __init__(
+        self,
+        *,
+        client: Any,
+        model: str,
+        user_payload: str,
+        logger: logging.Logger,
+        reasoning_effort: str = "medium",
+    ) -> None:
+        from backend.conversation.graph.prompts import (
+            ANSWER_STREAMING_FOLLOWUPS_INSTRUCTION,
+            ANSWER_SYSTEM_PROMPT,
+        )
+
+        self._client = client
+        self._model = model
+        self._user_payload = user_payload
+        self._logger = logger
+        self._reasoning_effort = reasoning_effort
+        self._system_prompt = ANSWER_SYSTEM_PROMPT + ANSWER_STREAMING_FOLLOWUPS_INSTRUCTION
+        self._followups: list[str] = []
+        self._full_text = ""
+        self._truncated = False
+        self._refused = False
+
+    @property
+    def followups(self) -> list[str]:
+        return list(self._followups)
+
+    @property
+    def full_text(self) -> str:
+        return self._full_text
+
+    @property
+    def truncated(self) -> bool:
+        return self._truncated
+
+    @property
+    def refused(self) -> bool:
+        return self._refused
+
+    async def __aiter__(self) -> Any:
+        from openai import APIConnectionError, APIError, APITimeoutError
+        from openai.types.shared import ReasoningEffort
+        from openai.types.shared_params import Reasoning
+
+        stream: Any = None
+        try:
+            stream = await self._client.responses.create(
+                model=self._model,
+                input=[
+                    {"role": "system", "content": self._system_prompt},
+                    {"role": "user", "content": self._user_payload},
+                ],
+                max_output_tokens=ROLE_MAX_OUTPUT["answer"],
+                timeout=ROLE_TIMEOUTS["answer"],
+                reasoning=Reasoning(effort=cast(ReasoningEffort, self._reasoning_effort)),
+                stream=True,
+            )
+        except Exception as exc:
+            mapped = _map_conversation_openai_error(exc)
+            raise mapped from exc
+
+        pending = ""
+        in_tail = False
+        try:
+            async for event in stream:
+                event_type = getattr(event, "type", "") or ""
+                # 状态类事件：refusal 与 completed 先行处理，绝不进入正文。
+                if "refusal" in event_type:
+                    self._refused = True
+                    continue
+                if event_type == "response.completed":
+                    status = getattr(getattr(event, "response", None), "status", None)
+                    if status == "incomplete":
+                        self._truncated = True
+                    continue
+                # 兼容策略：优先接受官方 response.output_text.delta；
+                # 兼容端点（chat-completion-chunk 风格或自定 type 名）事件没有
+                # 标准 type，此时按 delta 字段兜底，但拒绝 reasoning 等非正文增量。
+                if event_type.startswith("response.reasoning") or event_type.startswith(
+                    "response.function_call"
+                ):
+                    continue
+                if event_type != "response.output_text.delta" and not (
+                    not event_type and hasattr(event, "delta")
+                ):
+                    continue
+                delta = str(getattr(event, "delta", "") or "")
+                if not delta:
+                    continue
+                pending += delta
+                if not in_tail:
+                    # 在完整 pending 上搜索标记（标记可能随任意 delta 完成）；
+                    # 保留区只用于未命中时的保守 flush，防止半截标记前缀泄漏。
+                    idx = pending.find(FOLLOWUPS_OPEN)
+                    if idx >= 0:
+                        body = pending[:idx]
+                        if body:
+                            self._full_text += body
+                            yield body
+                        pending = pending[idx:]
+                        in_tail = True
+                    else:
+                        reserve = len(FOLLOWUPS_OPEN) - 1
+                        flush_len = len(pending) - reserve
+                        if flush_len > 0:
+                            head = pending[:flush_len]
+                            self._full_text += head
+                            yield head
+                            pending = pending[flush_len:]
+                if in_tail:
+                    close_idx = pending.find(FOLLOWUPS_CLOSE)
+                    if close_idx >= 0:
+                        raw = pending[len(FOLLOWUPS_OPEN) : close_idx]
+                        self._followups = _parse_followups(raw)
+                        pending = ""
+                        return
+            # 流自然结束：尾部若残留不完整的标记前缀，剥离后再作为正文发出
+            # （连接中断常走异常路径，此处为低概率兜底）。
+            if not in_tail and pending:
+                stripped = _strip_incomplete_marker_prefix(pending)
+                if stripped != pending:
+                    self._logger.warning("answer 流式正文尾部残留标记前缀，已剥离")
+                if stripped:
+                    self._full_text += stripped
+                    yield stripped
+            elif in_tail:
+                # 标记未闭合：丢弃收尾残片，不进入正文。
+                self._logger.warning("answer 流式收尾标记未闭合，followups 按空处理")
+        except (APIError, APIConnectionError, APITimeoutError, TimeoutError) as exc:
+            mapped = _map_conversation_openai_error(exc)
+            raise mapped from exc
+        finally:
+            if stream is not None and hasattr(stream, "close"):
+                await stream.close()

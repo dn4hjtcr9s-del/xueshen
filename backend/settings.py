@@ -193,6 +193,11 @@ class Settings(BaseSettings):
     conversation_answer_token_budget: int = Field(
         default=2000, alias="CONVERSATION_ANSWER_TOKEN_BUDGET"
     )
+    # 真实流式回答开关（默认关闭：非流式结构化 + 应用层切片为既有行为；
+    # 开启后走 token 级流式，失败自动回退非流式路径）。
+    conversation_answer_streaming: bool = Field(
+        default=False, alias="CONVERSATION_ANSWER_STREAMING"
+    )
     conversation_summary_trigger_tokens: int = Field(
         default=8000, alias="CONVERSATION_SUMMARY_TRIGGER_TOKENS"
     )
@@ -261,6 +266,10 @@ class Settings(BaseSettings):
     # SSE（§20.4）
     conversation_sse_heartbeat_seconds: int = Field(
         default=15, alias="CONVERSATION_SSE_HEARTBEAT_SECONDS"
+    )
+    # 实时轮询新事件间隔（越小流式延迟越低，代价是 DB 查询频率）。
+    conversation_sse_poll_interval_seconds: float = Field(
+        default=0.2, alias="CONVERSATION_SSE_POLL_INTERVAL_SECONDS"
     )
     conversation_sse_event_retention_days: int = Field(
         default=30, alias="CONVERSATION_SSE_EVENT_RETENTION_DAYS"
