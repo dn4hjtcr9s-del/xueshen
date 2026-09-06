@@ -2174,6 +2174,18 @@ body::before {
   line-height: 1.4;
 }
 
+.thinking-step-copy .progress-metadata {
+  display: grid;
+  gap: 2px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.thinking-step-copy .progress-rationale {
+  color: #8f8c86;
+}
+
 .thinking-step--started .thinking-step-mark {
   border-color: var(--cinnabar);
   color: var(--cinnabar);

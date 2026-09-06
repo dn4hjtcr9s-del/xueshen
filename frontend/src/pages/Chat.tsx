@@ -499,7 +499,44 @@ function ProgressMetadata({
   if (metadata.assessment === "needs_more") parts.push("需要补检索");
   if (metadata.assessment === "insufficient") parts.push("资料有限");
   if (metadata.assessment === "sufficient") parts.push("检查通过");
-  return parts.length > 0 ? <em>{parts.join(" · ")}</em> : null;
+  const decisionParts: string[] = [];
+  if (typeof metadata.retrieval_decision === "string") {
+    const decisionLabels: Record<string, string> = {
+      retrieve: "决定检索教材",
+      skip: "决定不检索",
+      clarify: "需要先澄清",
+    };
+    decisionParts.push(decisionLabels[metadata.retrieval_decision] ?? metadata.retrieval_decision);
+  }
+  if (typeof metadata.basis_codes === "string" && metadata.basis_codes.length > 0) {
+    const basisLabels: Record<string, string> = {
+      TEXTBOOK_FACT_REQUIRED: "需教材事实",
+      EXPLICIT_SOURCE_REQUESTED: "用户指定查资料",
+      USER_STATE_TARGET: "个人掌握情况",
+      MEMORY_SOURCE_REQUIRED: "需学习记录",
+      MEMORY_CONTEXT_SUFFICIENT: "记忆充足",
+      CONVERSATION_CONTEXT_SUFFICIENT: "对话上下文充足",
+      TEXTBOOK_NOT_EVIDENCE_FOR_USER_STATE: "教材非状态证据",
+      CURRENT_CONTEXT_INSUFFICIENT: "上下文不足",
+      AMBIGUOUS_REQUEST: "指代含混",
+      PLANNER_UNAVAILABLE: "检索规划暂不可用",
+      PLANNER_DISABLED: "检索规划未启用",
+    };
+    const codes = metadata.basis_codes.split(",").map((code) => code.trim()).filter(Boolean);
+    decisionParts.push(...codes.map((code) => basisLabels[code] ?? code));
+  }
+  const rationale =
+    typeof metadata.rationale === "string" && metadata.rationale.length > 0
+      ? metadata.rationale
+      : null;
+  const chips = [...parts, ...decisionParts];
+  if (chips.length <= 0 && !rationale) return null;
+  return (
+    <span className="progress-metadata">
+      {chips.length > 0 && <em>{chips.join(" · ")}</em>}
+      {rationale && <span className="progress-rationale">{rationale}</span>}
+    </span>
+  );
 }
 
 function MessageRow({
