@@ -391,7 +391,68 @@ Phase 1 起才会出现真实的 flag 分支，届时该结论需要重新验证
 
 ## Phase 3：七牛云 Kodo 对象存储与生命周期
 
-（未开始）
+### DEV-008 thread 删除是**物理删除**，而 §1.8 说「移入 archived_threads/ 归档」
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §1.8「thread 删除（thread_deletion.py 链路挂接）→ 段对象移入 `archived_threads/` 前缀（对应 codex `archived_sessions/`）」；但 §5.4 又说"删除 thread 时先阻止新读写，再**删/标记** manifest、对象和索引" |
+| 实现 | Phase 2 起 `thread_deletion` 与 CLI 一律**物理删除**段对象 + 落 tombstone，**没有**实现归档前缀 |
+| 依据 | §1.8 与 §5.4 相互矛盾，取 §5.4 的删除语义。更重要的理由是合规：用户删除会话却把正文归档保留，等于删除没生效；删除合规的第一要务是数据物理消失（同 DEV-006 的取舍） |
+| 影响 | `archived_threads/` 前缀当前**完全未使用**。若确实需要"用户可见的归档（不删除）"能力，那是一个**独立功能**（应先有产品入口），不是删除链路的替代路径。已登记为 OPEN-006 |
+
+### ADD-030 Kodo 适配器把 SDK 收敛到可注入的 client 门面
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.5 只要求"所有 SDK 类型只出现在 adapter 内" |
+| 实现 | 再套一层 `_KodoClient` 协议（put/fetch/stat/list_prefix/delete/private_url 六个方法），默认实现 `_QiniuKodoClient` 是唯一 `import qiniu` 的地方；测试注入假门面 |
+| 依据 | 用户"暂时没有七牛账号"。没有这层门面，适配器的错误分类、幂等、range、612 语义全都无法在无账号时验证。有了它，26 个单测覆盖全部分支且不触网 |
+
+### ADD-031 对象存储按配置构造，收敛到 `rollout/factory.py`
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.5 只说业务层只依赖协议与 ObjectRef |
+| 实现 | `build_rollout_object_store(settings)` 一处决定 Local/Kodo；worker、app、CLI 三个装配点共用 |
+| 依据 | 三个装配点各写一遍 if-else 必然漏校验。工厂在 kodo 缺配置时**直接抛错**，不静默降级（§5.12） |
+
+### ADD-032 Kodo `health_check` 不写探测对象
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.5 只说"健康检查" |
+| 实现 | 只 `list_prefix("rollouts/", limit=1)`，不在真实 bucket 里创建任何对象 |
+| 依据 | 健康检查会周期性运行；每次写一个探测对象既产生垃圾又可能触发生命周期规则误判。Local 实现写的是本地临时文件，无此顾虑 |
+
+### ADD-033 Kodo 上无法区分"同 key 同内容"与"同 key 异内容"
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.5「同一 object key 重复 put 是幂等的；不同内容使用同一 key 时拒绝覆盖或报告 hash 冲突」 |
+| 实现 | 用服务端 `insertOnly` 策略：对象已存在即返回 614，适配器**一律**报 `ObjectHashMismatchError` |
+| 依据 | Kodo 的 ETag 是服务端语义（可能是分片 MD5），**不等于**内容 sha256，因此无法在不上传的前提下判断既有对象是否与本次字节相同。Local/Fake 能读到内容，所以它们可以真正幂等 |
+| 影响 | **同一段重放 put 在 Kodo 上会报冲突而不是幂等成功**。封存流程本身用 `(thread_id, ordinal_start)` 幂等键 + frozen manifest 避免了重复封存，因此正常路径不会触发；但若有人手工重放封存，需要先删对象。这条差异必须让运维知道 |
+
+### ADD-034 真实网络 smoke 的边界与跳过策略
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.5「获得账号后增加一组受控的真实环境 smoke，不把真实环境测试作为默认 CI」 |
+| 实现 | `tests/conversation/test_rollout_kodo_smoke.py`：四项 Kodo 配置齐备才运行，否则 3 个用例全部 skip；只在 `rollouts/_smoke/<uuid>/` 前缀下写入，finally 里清理自己写的 key；不请求任何 DB fixture，可脱离 PostgreSQL 单跑 |
+| 依据 | 用户决策（2026-09-13）：允许受控读写、测完自删 |
+| 现状 | **从未真实运行过**（当前工作区无七牛凭据，见下方 OPEN-006 旁的说明）。拿到账号后一条命令即可验证 |
+
+### OPEN-006 `archived_threads/` 归档前缀完全未实现
+
+现状：DEV-008 决定 thread 删除走物理删除，因此 `archived_threads/` 前缀没有任何代码使用，Kodo 侧的归档生命周期规则也无从配置。
+待决：是否存在"归档而不删除"的产品需求。若有，应先定义用户入口与语义（归档后是否仍可被 reader 读到？是否计入 retention？），再实现 key 前缀迁移与状态机。**Phase 3 不擅自实现**。
+
+---
+
+### 关于七牛凭据的说明（2026-09-13）
+
+用户提出"`.env` 里面有七牛账号"，但实际排查结果：主工作区与 worktree 的 `.env` 均只含 AI 服务凭据（MinerU / DeepSeek / DashScope / Embedding / Rerank），**没有任何 Kodo/Qiniu 键**；`deploy/env.production.example` 里的 `KODO_*` 全是占位符；shell 环境变量中也没有。
+因此 Kodo 适配器只完成了"无账号可验证"的部分（门面注入 + 26 个单元测试 + 配置校验 + 装配接线），真实网络 smoke 处于**已实现未执行**状态。
 
 ---
 

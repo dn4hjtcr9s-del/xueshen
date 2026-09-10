@@ -27,19 +27,22 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from backend.conversation.contracts.object_store import ObjectStoreError
+from backend.conversation.contracts.object_store import (
+    ObjectStoreError,
+    ObjectStoreNonRetryableError,
+)
 from backend.conversation.persistence import rollout_manifests as manifests_repo
 from backend.conversation.persistence.database import (
     create_conversation_engine,
     create_conversation_session_factory,
 )
 from backend.conversation.rollout.codec import sha256_hex
-from backend.conversation.rollout.object_store import LocalRolloutObjectStore
 from backend.conversation.rollout.reconcile import (
     FAILURE_PREFIX,
     ReconcileReport,
@@ -66,7 +69,7 @@ class _Runtime:
     settings: Settings
     engine: AsyncEngine
     session_factory: async_sessionmaker[AsyncSession]
-    object_store: LocalRolloutObjectStore
+    object_store: Any
 
 
 @asynccontextmanager
@@ -75,19 +78,20 @@ async def _open_runtime() -> AsyncIterator[_Runtime]:
     settings = get_settings()
     if not settings.conversation_database_url:
         raise SystemExit("未配置 CONVERSATION_DATABASE_URL，无法连接 conversation 库")
-    if settings.conversation_rollout_object_store != "local":
-        raise SystemExit(
-            "CONVERSATION_ROLLOUT_OBJECT_STORE="
-            f"{settings.conversation_rollout_object_store}，但当前只实现了 local 对象存储；"
-            "Kodo 适配器落地前请勿用本 CLI 操作云端对象"
-        )
+    from backend.conversation.rollout.factory import build_rollout_object_store
+
+    try:
+        object_store = build_rollout_object_store(settings)
+    except ObjectStoreNonRetryableError as exc:
+        # 配置不全时显式失败，不静默降级（§5.12）
+        raise SystemExit(f"rollout 对象存储配置不可用: {exc}") from exc
     engine = create_conversation_engine(settings)
     try:
         yield _Runtime(
             settings=settings,
             engine=engine,
             session_factory=create_conversation_session_factory(engine),
-            object_store=LocalRolloutObjectStore(root=settings.conversation_rollout_root),
+            object_store=object_store,
         )
     finally:
         await engine.dispose()
