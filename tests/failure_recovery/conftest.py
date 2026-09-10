@@ -1,6 +1,7 @@
 """失败恢复测试设施：复用 tests/integration 的真实 PostgreSQL 与存储 fixtures（§23.4）。"""
 
 from tests.integration.conftest import (
+    _cleanup_test_graph_nodes,  # noqa: F401  (pytest fixture, autouse)
     _migrate,  # noqa: F401  (pytest fixture, autouse)
     fake_activity_reader,  # noqa: F401
     fake_conversation_reader,  # noqa: F401

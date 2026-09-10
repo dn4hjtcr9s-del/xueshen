@@ -6,13 +6,29 @@ heartbeat seq 幂等/乱序/过快、finish 结算与 daily_stats 归账。
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 from httpx import AsyncClient
 
 from tests.study.conftest import USER_A, auth, manual_plan_body
 
-START = "2026-08-17"  # 周一（有任务）
+
+def _monday_of_current_week() -> date:
+    """本周一。计划起点取相对日期，避免测试随真实时间推移而失效。"""
+    today = date.today()
+    return today - timedelta(days=today.weekday())
+
+
+_WEEK_MONDAY = _monday_of_current_week()
+
+#: 计划起点 = 本周一（weekly_availability 为周一/三/五，故周一有任务）。
+START = _WEEK_MONDAY.isoformat()
+#: 下周二：未来休息日。必须落在未来，否则会先被"日期越界"分支拦截，
+#: 测不到真正的"休息日不可排任务"分支（service 中越界检查在前）。
+NEXT_TUESDAY = (_WEEK_MONDAY + timedelta(days=8)).isoformat()
+#: 两周后的周一：未来学习日，reschedule 成功分支的目标日期。
+LATER_MONDAY = (_WEEK_MONDAY + timedelta(days=14)).isoformat()
 
 
 async def _plan_with_task(client: AsyncClient) -> tuple[str, dict[str, Any]]:
@@ -100,7 +116,7 @@ class TestReschedule:
         _plan_id, task = await _plan_with_task(client)
         r = await client.post(
             f"/api/v1/study/tasks/{task['task_id']}/reschedule",
-            json={"scheduled_date": "2026-08-18", "expected_version": 1},  # 周二休息日
+            json={"scheduled_date": NEXT_TUESDAY, "expected_version": 1},  # 未来周二休息日
             headers={**auth(USER_A), "Idempotency-Key": "rs1"},
         )
         assert r.status_code == 409
@@ -110,11 +126,11 @@ class TestReschedule:
         _plan_id, task = await _plan_with_task(client)
         r = await client.post(
             f"/api/v1/study/tasks/{task['task_id']}/reschedule",
-            json={"scheduled_date": "2026-08-31", "expected_version": 1},  # 周一
+            json={"scheduled_date": LATER_MONDAY, "expected_version": 1},  # 未来周一学习日
             headers={**auth(USER_A), "Idempotency-Key": "rs1"},
         )
         assert r.status_code == 200, r.text
-        assert r.json()["scheduled_date"] == "2026-08-31"
+        assert r.json()["scheduled_date"] == LATER_MONDAY
         assert r.json()["version"] == 2
 
 

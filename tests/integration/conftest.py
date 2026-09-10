@@ -73,6 +73,22 @@ USER_TABLES = (
     "account_identity_mappings",
 )
 
+#: 测试自造图谱节点统一使用的 source_file 标记。
+#: 图谱注册表按设计跨测试保留，测试又需要可引用的节点，于是会插入假节点；
+#: 用固定标记便于会话结束时精确回收，避免残留污染下一次 sync。
+TEST_GRAPH_SOURCE_FILE = "test.md"
+
+#: knowledge_graph_nodes 的 NO ACTION 子表（删除节点前必须先清，否则 FK 报错）。
+#: knowledge_graph_node_aliases 是 ON DELETE CASCADE，无需手工清理。
+_GRAPH_NODE_CHILD_COLUMNS = (
+    ("knowledge_graph_edges", "from_node_id"),
+    ("knowledge_graph_edges", "to_node_id"),
+    ("memory_graph_links", "node_id"),
+    ("graph_user_states", "node_id"),
+    ("graph_user_node_activity", "node_id"),
+    ("graph_activity_seen_events", "node_id"),
+)
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _migrate() -> None:
@@ -84,6 +100,45 @@ def _migrate() -> None:
 
     require_test_database(get_settings().database_url, "memory")
     command.upgrade(Config("alembic.ini"), "head")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cleanup_test_graph_nodes() -> Iterator[None]:
+    """会话结束时回收测试自造的图谱节点及其依赖行。
+
+    图谱注册表（knowledge_graph_*）按 USER_TABLES 的设计跨测试保留，但测试需要
+    可引用的节点，会自行插入 source_file='test.md' 的假节点。若不清掉，下一次
+    `sync-knowledge-graph --apply` 会检测到注册表漂移并以退出码 3 拒绝执行
+    （"--allow-remove 才允许删除"），导致 CI 第二次运行在同步步骤中断。
+    """
+    yield
+    from sqlalchemy import create_engine as create_sync_engine
+
+    url = Settings(app_env="test").database_url
+    require_test_database(url, "memory")
+    engine = create_sync_engine(url)
+    try:
+        with engine.begin() as conn:
+            node_ids = [
+                row[0]
+                for row in conn.execute(
+                    text("SELECT node_id FROM knowledge_graph_nodes WHERE source_file = :sf"),
+                    {"sf": TEST_GRAPH_SOURCE_FILE},
+                )
+            ]
+            if not node_ids:
+                return
+            for table, column in _GRAPH_NODE_CHILD_COLUMNS:
+                conn.execute(
+                    text(f"DELETE FROM {table} WHERE {column} = ANY(:ids)"),
+                    {"ids": node_ids},
+                )
+            conn.execute(
+                text("DELETE FROM knowledge_graph_nodes WHERE node_id = ANY(:ids)"),
+                {"ids": node_ids},
+            )
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture()
