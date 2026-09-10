@@ -42,9 +42,7 @@ class KodoStorage(StorageBackend):
         # 导致上传报 'str' object has no attribute 'scheme'（P5 冒烟二次踩坑）。
         from qiniu import config
 
-        config.set_default(
-            connection_timeout=max(self.connect_timeout, self.read_timeout)
-        )
+        config.set_default(connection_timeout=max(self.connect_timeout, self.read_timeout))
 
     async def upload(
         self,

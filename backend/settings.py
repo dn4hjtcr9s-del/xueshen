@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -132,6 +133,22 @@ class Settings(BaseSettings):
     memory_notification_retention_days: int = Field(default=90)
     memory_orphan_version_cleanup_hours: int = Field(default=24)
     memory_context_token_budget: int = Field(default=3000)
+
+    # 证据池与 nightly 批量总结（memory-rebuild §2.6 D4：参数化配置，不写死）
+    memory_evidence_min_age_hours: int = Field(
+        default=6, ge=0, le=720, alias="MEMORY_EVIDENCE_MIN_AGE_HOURS"
+    )
+    # 每日批量触发时刻，解释为 memory_scheduler_timezone 的本地时间。
+    memory_summary_daily_time: time = Field(default=time(0, 0), alias="MEMORY_SUMMARY_DAILY_TIME")
+    memory_summary_batch_max_evidence: int = Field(
+        default=50, ge=1, le=1000, alias="MEMORY_SUMMARY_BATCH_MAX_EVIDENCE"
+    )
+    memory_summary_max_users_per_run: int = Field(
+        default=50, ge=1, le=10_000, alias="MEMORY_SUMMARY_MAX_USERS_PER_RUN"
+    )
+    memory_summary_llm_concurrency: int = Field(
+        default=8, ge=1, le=64, alias="MEMORY_SUMMARY_LLM_CONCURRENCY"
+    )
 
     # 限流（§18.5）
     rate_limit_write_per_minute: int = Field(default=30)
@@ -282,6 +299,39 @@ class Settings(BaseSettings):
     )
     conversation_sse_delta_batch_chars: int = Field(
         default=64, alias="CONVERSATION_SSE_DELTA_BATCH_CHARS"
+    )
+
+    # ------------------------------------------------------------------
+    # Conversation Rollout（memory-rebuild §1.5 / §5.2 Phase 0-B）
+    # ------------------------------------------------------------------
+    # 短期记忆的 JSONL 事实源。两个开关默认关闭且彼此独立：写入与读取分开灰度，
+    # 避免"读路径已切换但没有可回退数据"（§5.10）。
+    conversation_rollout_enabled: bool = Field(default=False, alias="CONVERSATION_ROLLOUT_ENABLED")
+    conversation_rollout_read_enabled: bool = Field(
+        default=False, alias="CONVERSATION_ROLLOUT_READ_ENABLED"
+    )
+    # local = 本地目录模拟对象存储（无七牛账号时唯一可用值，§5.0.2 不变项）；
+    # kodo = 复用 community 域既有的七牛配置（kodo_access_key / kodo_secret_key /
+    # kodo_bucket / kodo_region / kodo_cdn_domain），不新增第二套凭据。
+    # 值域与 community_storage_backend 对齐；rollout 与社区图片共用 bucket，
+    # 以 key 前缀隔离（§5.5 的 rollouts/ 前缀），生命周期按前缀分别配置。
+    conversation_rollout_object_store: Literal["local", "kodo"] = Field(
+        default="local", alias="CONVERSATION_ROLLOUT_OBJECT_STORE"
+    )
+    conversation_rollout_root: str = Field(
+        default=".local/rollouts", alias="CONVERSATION_ROLLOUT_ROOT"
+    )
+    conversation_rollout_queue_size: int = Field(
+        default=256, ge=1, le=100_000, alias="CONVERSATION_ROLLOUT_QUEUE_SIZE"
+    )
+    # 默认粒度是"每 turn 一段"；本阈值只作防爆兜底（§4.5-① 决议 B 组），
+    # 达到阈值需记录 segment_size_guard_triggered，不得静默丢行。
+    conversation_rollout_segment_max_bytes: int = Field(
+        default=16_777_216, ge=1024, alias="CONVERSATION_ROLLOUT_SEGMENT_MAX_BYTES"
+    )
+    # 继承现有 conversation retention 窗口（SSE 事件 / checkpoint 均为 30 天）。
+    conversation_rollout_retention_days: int = Field(
+        default=30, ge=1, alias="CONVERSATION_ROLLOUT_RETENTION_DAYS"
     )
 
     # 模型角色（§19.1：不写死模型名，按角色配置）
@@ -630,6 +680,20 @@ class Settings(BaseSettings):
         default=True, alias="CONVERSATION_STREAMING_ENABLED"
     )
 
+    # Memory 框架重构 Feature Flags（memory-rebuild §5.2 Phase 0-B / §5.10）
+    # 全部默认关闭；开启顺序见 §5.10，不得跳过依赖。"实现不等批准，启用必须等批准"。
+    memory_schema_v2_read_enabled: bool = Field(
+        default=False, alias="MEMORY_SCHEMA_V2_READ_ENABLED"
+    )
+    memory_schema_v2_migration_enabled: bool = Field(
+        default=False, alias="MEMORY_SCHEMA_V2_MIGRATION_ENABLED"
+    )
+    memory_prime_enabled: bool = Field(default=False, alias="MEMORY_PRIME_ENABLED")
+    memory_tools_enabled: bool = Field(default=False, alias="MEMORY_TOOLS_ENABLED")
+    memory_batch_enabled: bool = Field(default=False, alias="MEMORY_BATCH_ENABLED")
+    memory_consolidation_enabled: bool = Field(default=False, alias="MEMORY_CONSOLIDATION_ENABLED")
+    memory_kg_dual_write_enabled: bool = Field(default=False, alias="MEMORY_KG_DUAL_WRITE_ENABLED")
+
     @property
     def embedding_api_key_resolved(self) -> str | None:
         """§20.2 / D15：EMBEDDING_API_KEY 缺失时回退 DASHSCOPE_API_KEY。"""
@@ -781,6 +845,18 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CONVERSATION_KNOWLEDGE_SUMMARY_MANUAL_RESERVED_SLOTS 不得超过 Worker 并发数"
             )
+        # memory-rebuild §5.2 Phase 0-B：rollout 对象存储分两层校验。
+        # local 模式（默认）只要求根目录可用，不校验凭据；
+        # kodo 模式复用 community 的七牛配置，启动时要求配置齐备，
+        # 且不把凭据缺失静默降级成 local（§5.12"不把 production credentials
+        # 失败静默降级成 local"）。
+        if self.conversation_rollout_object_store == "kodo":
+            for field in ("kodo_access_key", "kodo_secret_key", "kodo_bucket", "kodo_region"):
+                if not getattr(self, field):
+                    raise ValueError(
+                        "CONVERSATION_ROLLOUT_OBJECT_STORE=kodo 必须配置 "
+                        f"{self.model_fields[field].alias}"
+                    )
         if self.app_env == "production":
             if self.dev_auth_enabled or self.dev_auth_allow_scope_override:
                 raise ValueError("生产环境禁止 DEV_AUTH_ENABLED / DEV_AUTH_ALLOW_SCOPE_OVERRIDE")

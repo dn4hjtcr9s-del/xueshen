@@ -378,7 +378,10 @@ async def request_cancel(session: AsyncSession, *, operation_id: UUID) -> dict[s
     if row is None:
         return None
     status = row["status"]
-    if status in ("queued", "retry_wait"):
+    if status in ("queued", "retry_wait", "pending_batch"):
+        # pending_batch 与 queued/retry_wait 同属"尚未开始执行"的在途态
+        # （memory-rebuild §2.6）：账号删除必须能取消它，否则待批量证据
+        # 会逃过删除合规（§21.3）。
         await session.execute(
             text(
                 """

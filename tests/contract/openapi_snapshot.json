@@ -3655,7 +3655,8 @@
               "purge_tombstones",
               "cleanup_orphan_versions",
               "cleanup_checkpoints",
-              "purge_account_memory"
+              "purge_account_memory",
+              "summarize_user_memory_batch"
             ],
             "title": "Operation Type",
             "type": "string"
@@ -3676,7 +3677,8 @@
               "succeeded",
               "needs_review",
               "dead_letter",
-              "cancelled"
+              "cancelled",
+              "pending_batch"
             ],
             "title": "Status",
             "type": "string"

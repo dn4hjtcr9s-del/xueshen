@@ -65,6 +65,8 @@ OperationType = Literal[
     "cleanup_orphan_versions",
     "cleanup_checkpoints",
     "purge_account_memory",
+    # memory-rebuild §2.6： nightly 批量总结（每用户一个批量 operation）。
+    "summarize_user_memory_batch",
 ]
 
 OperationStatus = Literal[
@@ -75,6 +77,9 @@ OperationStatus = Literal[
     "needs_review",
     "dead_letter",
     "cancelled",
+    # memory-rebuild §2.6：证据已提交但未到最短沉淀时长，等待 0 点批量入批。
+    # 非终态；共享认领查询只认 ('queued', 'retry_wait')，故对本状态天然不可见。
+    "pending_batch",
 ]
 
 TERMINAL_STATUSES: frozenset[str] = frozenset(
@@ -110,6 +115,9 @@ OPERATION_ROUTING: dict[str, tuple[InputKind, int]] = {
     "cleanup_orphan_versions": ("maintenance", PRIORITY_P4),
     "cleanup_checkpoints": ("maintenance", PRIORITY_P4),
     "purge_account_memory": ("maintenance", PRIORITY_P4),
+    # 批量总结是"对话总结"的批量形态（§2.6），故与 conversation_evidence 同为
+    # evidence + P2：max_attempts=4，claim 排序在 P0/P1 之后、P3/P4 之前。
+    "summarize_user_memory_batch": ("evidence", PRIORITY_P2),
 }
 
 #: 任务级 max_attempts（§11.2）

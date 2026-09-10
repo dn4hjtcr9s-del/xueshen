@@ -119,7 +119,11 @@ def test_validate_manifest_rejects_invalid_migration_revision(revision: object) 
 
 @pytest.mark.parametrize(
     "revision",
-    ["0004_account_deletion_ledger", "0006_global_maintenance_gate"],
+    [
+        "0004_account_deletion_ledger",
+        "0006_global_maintenance_gate",
+        "0007_memory_batch_operations",
+    ],
 )
 def test_validate_manifest_accepts_current_head_and_ancestor(revision: str) -> None:
     """当前 head 与同一升级链上的祖先 revision 都可用于兼容性升级。"""

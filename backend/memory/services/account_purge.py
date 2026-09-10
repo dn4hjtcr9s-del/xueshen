@@ -70,7 +70,8 @@ async def drain_user_operations(
         text(
             "SELECT operation_id, status FROM memory_operations "
             "WHERE user_id = :user_id AND operation_id != :exclude "
-            "AND status IN ('queued', 'retry_wait', 'needs_review', 'running')"
+            "AND status IN ('queued', 'retry_wait', 'needs_review', 'running', "
+            "'pending_batch')"
         ),
         {"user_id": user_id, "exclude": exclude_operation_id},
     )

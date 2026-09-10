@@ -312,7 +312,9 @@ async def test_restore_upgrades_ancestor_revision_before_replay(
             version = (
                 await session.execute(text("SELECT version_num FROM alembic_version"))
             ).scalar_one()
-        assert version == "0006_global_maintenance_gate"
+        # 与 backup.py 的 _validate_migration_revision 同源：动态取当前唯一 head。
+        # 原先硬编码 "0006_global_maintenance_gate"，每新增一条链迁移就会失效。
+        assert version == backup_module._current_migration_head()
 
         engine = session_factory.kw.get("bind")
         assert engine is not None
