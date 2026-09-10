@@ -11,6 +11,9 @@ __pycache__/
 .coverage
 htmlcov/
 
+# 浏览器自动化 CLI 产物（console 日志 / 页面快照 / 截图）
+.playwright-cli/
+
 .local/
 tmp/
 
