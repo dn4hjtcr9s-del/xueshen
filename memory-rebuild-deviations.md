@@ -284,7 +284,108 @@ Phase 1 起才会出现真实的 flag 分支，届时该结论需要重新验证
 
 ## Phase 2：Manifest、Reader、恢复与删除
 
-（未开始）
+### DEV-006 删除链路改为"先删对象、再落 tombstone"（与 §1.8 字面顺序相反）
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §1.8「超过 retention → 物理删除段对象 + manifest 行 + messages 索引行」；§5.5「retention 执行必须先写删除审计/状态，再删除对象」 |
+| 实现 | `thread_deletion`、CLI 的 `delete-thread-rollouts` / `retention-scan` **一律先物理删除对象、全部成功后才落 tombstone**；任一对象删除失败则整段不标 tombstone（保持原状态可重跑），删除命令返回非 0 |
+| 依据 | 若按字面顺序，对象删除失败会留下"manifest 已是 deleted、对象仍在"的残留。而 reconcile 的孤儿判定只把**非 deleted** 行的 object_key 当作有效引用，这种残留既不会被报成孤儿、retention 又只扫 `sealed`，于是**永久泄漏且无人可见**（子代理在实现 reconcile 时发现的缺口 A） |
+| 影响 | 若 tombstone 事务回滚，会留下"manifest 指向已删对象"——由 reconcile 的 `sealed_object_missing` 检出并收敛。这是刻意选择的 fail-safe 方向：删除合规的第一要务是数据**物理**消失 |
+
+### DEV-007 Phase 2 的对象存储只实现 Local + Fake
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.5 要求实现 `LocalRolloutObjectStore` 与 `QiniuKodoRolloutObjectStore` |
+| 实现 | Phase 2 只做 `LocalRolloutObjectStore`（目录模拟 bucket）与 `FakeRolloutObjectStore`（内存，测试故障注入）；**没有** Kodo 适配器 |
+| 依据 | 用户决策（2026-09-10）：Kodo 属 Phase 3，Phase 2 先用 Phase 0 定好的 `RolloutObjectStore` 协议跑通全链路，不阻塞 |
+| 影响 | 配置为 `CONVERSATION_ROLLOUT_OBJECT_STORE=kodo` 时 CLI 显式失败（退出 2），不静默切回本地（§5.5 要求）。Phase 3 只需新增一个 adapter，recorder/sealer/reader/reconcile 都不改 |
+
+### ADD-022 `open` manifest 行懒创建
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §1.7 步骤 2 要求"以 thread_id + manifest 定位本地热段"，但没说 `open` 行何时创建 |
+| 实现 | 与本地段文件**同一时机**创建：首次真正写入（文件物化）时才 `insert_open` |
+| 依据 | 用户决策（2026-09-10）。与 Phase 1「空 turn 不建文件」语义一致——否则空 turn 会在 manifest 留下无对象的 open 行，reconcile 还得额外清理 |
+
+### ADD-023 崩溃恢复策略与迁移 0008
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §1.7 步骤 2 提到"未命中且存在未封存段 → 从对象存储拉回续写"，但未规定"本地文件不在"时怎么办；§5.2 C 的 `uq_rollout_segment_turn UNIQUE (turn_id)` 也不允许一个 turn 有两个段 |
+| 实现 | 重新 claim 同一 turn 时查 `open` 行：本地文件仍在 → 复用 `segment_id`/`ordinal_start` 追加续写（并抑制重复写 `thread_meta`）；本地文件不在（换节点）→ 把旧 `open` 行标 `deleted` 并新建段。为此新增迁移 `0008_rollout_segment_turn_uq`，把 turn 唯一约束改为**部分唯一索引**（`WHERE status <> 'deleted'`） |
+| 依据 | 用户决策（2026-09-10）：同节点续写、跨节点标废重建 |
+| 影响 | Phase 2 仍未实现"从对象存储拉回未封存段"（未封存段不上传，拉不回来）；跨节点会丢失该 turn 崩溃前已写入的段内容，但新段会重写本 turn 的完整记录（消息正文以 DB/后续记录为准） |
+
+### ADD-024 本地热缓存路径由对象 key 反查
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | 无。文档只给了本地路径规则与对象 key 规则，没说封存后如何由 manifest 找回本地文件 |
+| 实现 | `local_path_for_object_key()`：本地段路径与对象 key **同构**（只差 `rollouts/` 前缀与根目录），因此直接映射 |
+| 依据 | manifest 只记**段**创建时间，而日期目录取自 **thread** 创建时间（§1.5），跨零点时两者不同日，无法由 manifest 反推目录。用 key 反查既精确又 O(1) |
+| 备注 | 这解释了子代理报告的"open 段本地路径无法从 manifest 算出"：`open` 行还没有 object_key，确实只能用 `find_segment_dir` 反查目录（reconcile 即如此），已封存段则不受影响 |
+
+### ADD-025 Reader 必须显式检查段 `status`
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.4 验收要求"删除后的 message 永不从 rollout 回读"，但没说实现方式 |
+| 实现 | `RolloutReader` 在 `read_message_content` / `read_segment` / `read_thread_records` 三处都先判 `status <> 'deleted'`，否则返回 None 走回退 |
+| 依据 | 迁移 0007 的清指针触发器只在**硬删除** manifest 行时触发，而 thread 删除与 retention 走 `mark_deleted` **软删**——软删不会清 `conversation_messages` 的四个指针列。若不显式判 status，"删除后不可回读"就只能寄希望于对象恰好已被物理删除，存在"已 tombstone 但对象未删"的窗口会泄漏已删数据（子代理发现的缺口 B，已由新增测试固定） |
+
+### ADD-026 指针读取做区间与 ordinal **双重**校验
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.4 只说"按 `(segment_id, ordinal, byte range)` 读取并校验 hash" |
+| 实现 | 取出的字节区间必须①落在文件内、②以换行结尾、③恰好一条记录、④记录 ordinal 等于指针 ordinal |
+| 依据 | 只校验区间时，"指针被写错但仍落在文件内"会静默返回**别的消息的正文**——比读不到危险得多 |
+
+### ADD-027 封存加 turn fencing
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.4 说"所有更新带 thread/turn fencing 校验"，未给具体形式 |
+| 实现 | `seal()` 在 UPDATE 里加 `EXISTS (SELECT 1 FROM conversation_turns WHERE turn_id = ... AND lease_owner = :owner AND lease_generation = :gen)`；runner 从 turn 行取出 `(worker_id, lease_generation)` 传入 |
+| 依据 | 与 finalize 的 fencing 同源。失租 worker 不得写 manifest——否则被回收的 turn 会与新执行者产生两条逻辑冲突的钟 |
+| 影响 | fencing 不通过时对象已上传（顺序铁律决定），成为孤儿对象，由 reconcile 检出 |
+
+### ADD-028 reconcile 的"有效引用集合"排除 tombstone
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.4 只说扫描"已上传未登记"等状态 |
+| 实现 | 孤儿对象判定时，manifest 侧的有效引用只取 `status <> 'deleted'` 的行 |
+| 依据 | tombstone 的语义是"这个对象本应已被物理删除"，把它算作有效引用会让 DEV-006 描述的那类残留永远不可见 |
+
+### ADD-029 运维 CLI 的五个子命令
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.4 只说"增加 `backend/conversation/cli/rollout.py` 或等价运维入口：reconcile、verify、export、delete/retry"；§5.5 列了 5 个具体命令名 |
+| 实现 | `verify-manifest`（只读，非空退出 1）、`reconcile-orphans`、`export-thread`、`delete-thread-rollouts`、`retention-scan`，全部支持 `--dry-run`，破坏性命令必须显式 `--apply` |
+| 测试状况 | **只有手工端到端冒烟，没有仓库内集成测试**；假会话工厂不校验 SQL 语义。已登记为 OPEN-005 |
+
+### OPEN-003 tombstone 之后对象残留的可见性（已收敛）
+
+原缺口：tombstone 先落、对象后删，若对象删除失败，残留对象永不被报为孤儿（孤儿只查"无任何 manifest 引用"）。
+处置：**DEV-006 改顺序 + ADD-028 改引用集合**，两处一起把该残留变成可观测的 `orphan_object`。已关闭。
+
+### OPEN-004 软删不清 `conversation_messages` 指针（根本修法待定）
+
+现状：迁移 0007 的清指针触发器只在硬删除 manifest 行时触发；`mark_deleted` 软删后，消息行的四个指针列仍指向已删除段。
+兜底：reader 显式判 `status`（ADD-025），因此不会回读已删数据。
+待决：是否在 `mark_deleted` / `mark_thread_deleted` 里一并清空指针列。**不清的理由**是保留"这条消息曾属于哪个段"的审计线索；**要清的理由**是避免悬垂指针在降级路径上被误用。Phase 3 决定 retention 物理清理策略时一并定。
+
+### OPEN-005 reconcile / CLI 缺少仓库内集成测试
+
+现状：`backend/conversation/rollout/reconcile.py` 与 `backend/conversation/cli/rollout.py` 只有单元测试（reconcile 6 例，用假会话工厂）+ 手工冒烟，**没有**真实 PostgreSQL 的集成测试。假会话工厂按 SQL 文本分发，JOIN/WHERE 写错它发现不了。
+待决：Phase 3 补 `tests/integration/test_rollout_reconcile.py`，覆盖五类 finding 的真实 SQL 路径与 CLI 五个子命令。
+
+---
 
 ---
 

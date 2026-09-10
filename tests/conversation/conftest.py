@@ -60,6 +60,8 @@ CONVERSATION_TABLES = (
     "conversation.conversation_outbox",
     "conversation.conversation_turn_events",
     "conversation.conversation_turns",
+    # rollout 段没有指向 thread 的外键，CASCADE 不会带走它，必须显式列出
+    "conversation.conversation_rollout_segments",
     "conversation.conversation_messages",
     "conversation.conversation_threads",
 )

@@ -37,9 +37,16 @@ class ConversationSourceReadService:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         logger: logging.Logger | None = None,
+        rollout_reader: Any = None,
+        rollout_read_enabled: bool = False,
     ) -> None:
         self._session_factory = session_factory
         self._logger = logger or logging.getLogger("conversation.reader")
+        # memory-rebuild §5.10：读路径与写路径是**独立** flag。未开启时一律走
+        # conversation_messages.content —— 这让"写已开启、读未开启"的 shadow write
+        # 阶段完全不改变现有行为。
+        self._rollout_reader = rollout_reader
+        self._rollout_read_enabled = bool(rollout_read_enabled)
 
     async def read_source_bundle(
         self,
@@ -93,11 +100,12 @@ class ConversationSourceReadService:
                     raise SourceNotFoundError("来源不存在或无权访问")
                 if not row["eligible_for_memory"]:
                     raise SourceNotFoundError("来源不存在或无权访问")
+                content = await self._resolve_content(row)
                 items.append(
                     SourceItem(
                         source_ref=f"conversation:{thread_id}:message:{message_id}",
                         role="assistant" if row["role"] == "assistant" else "user",
-                        content=row["content"],
+                        content=content,
                         occurred_at=row["occurred_at"],
                         metadata={
                             "source_version": row["content_hash"],
@@ -127,6 +135,25 @@ class ConversationSourceReadService:
         except ValueError as exc:
             raise SourceTooLargeError(str(exc)) from exc
 
+    async def _resolve_content(self, row: dict[str, Any]) -> str:
+        """取消息正文：rollout 指针优先，任何不可用情形回退到 DB 正文并计数。
+
+        §5.4 的读取顺序是 rollout pointer → 本地 segment → 对象存储 → 兼容 HTTP；
+        前三级由 RolloutReader 内部完成，本方法负责最后一级回退与 read-repair 计数。
+        """
+        if self._rollout_read_enabled and self._rollout_reader is not None:
+            try:
+                content = await self._rollout_reader.read_message_content(message_row=row)
+            except Exception:
+                self._logger.warning("rollout 读取异常，回退 DB 正文", exc_info=True)
+                content = None
+            if content is not None:
+                _inc_counter("rollout_read_source_total", source="rollout")
+                return str(content)
+            _inc_counter("rollout_read_repair_total")
+        _inc_counter("rollout_read_source_total", source="db_fallback")
+        return str(row["content"])
+
     def _checkpoint_matches(
         self,
         *,
@@ -154,3 +181,19 @@ class ConversationSourceReadService:
             except ValueError as exc:
                 raise SourceNotFoundError("来源不存在或无权访问") from exc
         return parsed
+
+
+def _inc_counter(name: str, **labels: str) -> None:
+    """指标失败不影响读取链路。"""
+    try:
+        from backend.conversation import metrics
+
+        metric = getattr(metrics, name, None)
+        if metric is None:
+            return
+        if labels:
+            metric.labels(**labels).inc()
+        else:
+            metric.inc()
+    except Exception:
+        pass

@@ -117,3 +117,18 @@ rollout_flush_latency_seconds = Histogram(
     "rollout flush ack 等待耗时",
     buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5),
 )
+
+rollout_read_source_total = Counter(
+    "conversation_rollout_read_source_total",
+    "rollout 正文读取的来源（local / object / db_fallback）",
+    ["source"],
+)
+rollout_read_repair_total = Counter(
+    "conversation_rollout_read_repair_total",
+    "rollout 指针不可用而回退到 conversation_messages.content 的次数",
+)
+rollout_sealed_total = Counter(
+    "conversation_rollout_sealed_total",
+    "rollout 段封存成功/失败次数",
+    ["result"],
+)

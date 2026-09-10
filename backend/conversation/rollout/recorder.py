@@ -21,9 +21,10 @@ turn 关键路径；队列把"节点产出"与"落盘"解耦，同时用有界�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -40,6 +41,7 @@ from backend.conversation.rollout.file_naming import (
     segment_path,
 )
 from backend.conversation.rollout.policy import ensure_persistable
+from backend.conversation.rollout.sealer import MessagePointer
 
 #: 队列写满后的等待上限；超时即丢弃该条并计入降级指标。
 #: 理由（§1.5「降级不拖垮 turn」）：磁盘挂起时不能把图执行一起挂住。
@@ -74,6 +76,7 @@ class RolloutSegmentHandle:
     turn_id: UUID
     path: Path
     ordinal_start: int
+    thread_created_at: datetime
     next_ordinal: int = 0
     lines_written: int = 0
     bytes_written: int = 0
@@ -81,6 +84,10 @@ class RolloutSegmentHandle:
     guard_triggered: bool = False
     meta_ordinal: int | None = None
     turn_completed_recorded: bool = False
+    #: 消息记录在段内的字节坐标（Phase 2 封存时写进 conversation_messages 指针列）。
+    message_pointers: list[Any] = field(default_factory=list)
+    #: 段是否已成功封存（对象已上传 + manifest 已登记）。
+    sealed: bool = False
 
     def allocate_ordinal(self) -> int:
         """分配下一个 ordinal（同段内由调用方串行保证）。"""
@@ -96,6 +103,8 @@ class _Envelope:
     kind: Literal["line", "flush", "close"]
     line: bytes | None = None
     record_type: str | None = None
+    ordinal: int | None = None
+    message_id: UUID | None = None
     ack: asyncio.Future[None] | None = None
 
 
@@ -144,11 +153,16 @@ class RolloutRecorder:
         logger: logging.Logger,
         queue_size: int = 256,
         segment_max_bytes: int = 16_777_216,
+        sealer: Any = None,
     ) -> None:
         self._root = Path(root)
         self._clock = clock
         self._ids = id_generator
         self._logger = logger
+        #: Phase 2 封存器；为 None 时退化为 Phase 1 的"只写本地段"行为。
+        self._sealer = sealer
+        #: 封存时的 turn fencing（lease_owner, lease_generation），失租者不得改 manifest。
+        self._fence: tuple[str, int] | None = None
         self._queue: asyncio.Queue[_Envelope] = asyncio.Queue(maxsize=queue_size)
         self._segment_max_bytes = segment_max_bytes
         self._writer_task: asyncio.Task[None] | None = None
@@ -225,6 +239,7 @@ class RolloutRecorder:
         turn_id: UUID,
         user_id: UUID,
         thread_created_at: datetime,
+        fence: tuple[str, int] | None = None,
     ) -> RolloutSegmentHandle | None:
         """开启本 turn 的段；降级/已关闭/已有活动段时返回 None。
 
@@ -242,9 +257,47 @@ class RolloutRecorder:
             )
             return None
         self.start()
+        self._fence = fence
         directory = segment_dir(
             root=self._root, thread_created_at=thread_created_at, thread_id=thread_id
         )
+
+        def _path_for(ordinal_start: int, segment_id: UUID) -> Path:
+            return segment_path(
+                root=self._root,
+                thread_created_at=thread_created_at,
+                thread_id=thread_id,
+                ordinal_start=ordinal_start,
+                segment_id=segment_id,
+            )
+
+        # §5.4 恢复：本 turn 若已有未封存段且本地文件仍在，直接续写，
+        # 保证一个 turn 只有一个段、ordinal 不重叠。
+        if self._sealer is not None:
+            resume = await self._sealer.resolve_resume(
+                turn_id=turn_id,
+                thread_id=thread_id,
+                thread_created_at=thread_created_at,
+                segment_path_for=_path_for,
+            )
+            if resume is not None:
+                handle = RolloutSegmentHandle(
+                    segment_id=resume.segment_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    path=resume.path,
+                    ordinal_start=resume.ordinal_start,
+                    next_ordinal=resume.last_ordinal + 1,
+                    thread_created_at=thread_created_at,
+                    materialized=True,
+                    # 续写段已有 thread_meta（就是段内首行），置非 None 抑制重复写入
+                    meta_ordinal=resume.ordinal_start,
+                )
+                self._active = handle
+                self._committed_bytes = 0
+                return handle
+
         ordinal_start = self._next_ordinal_start(directory)
         segment_id = self._ids.new_uuid()
         handle = RolloutSegmentHandle(
@@ -252,15 +305,10 @@ class RolloutRecorder:
             thread_id=thread_id,
             user_id=user_id,
             turn_id=turn_id,
-            path=segment_path(
-                root=self._root,
-                thread_created_at=thread_created_at,
-                thread_id=thread_id,
-                ordinal_start=ordinal_start,
-                segment_id=segment_id,
-            ),
+            path=_path_for(ordinal_start, segment_id),
             ordinal_start=ordinal_start,
             next_ordinal=ordinal_start,
+            thread_created_at=thread_created_at,
         )
         self._active = handle
         self._committed_bytes = 0
@@ -337,7 +385,20 @@ class RolloutRecorder:
             return False
         if meta_line is not None and not await self._enqueue_line(meta_line, "thread_meta"):
             return False
-        enqueued = await self._enqueue_line(encode_record(record), record_type)
+        # user_message / assistant_message 需要字节坐标供 Phase 2 写指针列
+        pointer_message_id: UUID | None = None
+        if record_type in ("user_message", "assistant_message"):
+            raw_message_id = normalized.get("message_id")
+            try:
+                pointer_message_id = UUID(str(raw_message_id))
+            except (TypeError, ValueError):
+                pointer_message_id = None
+        enqueued = await self._enqueue_line(
+            encode_record(record),
+            record_type,
+            ordinal=ordinal,
+            message_id=pointer_message_id,
+        )
         if enqueued and record_type == "turn_completed":
             handle.turn_completed_recorded = True
         return enqueued
@@ -381,20 +442,84 @@ class RolloutRecorder:
             self._pending_acks.discard(ack)
 
     async def close_turn(self) -> None:
-        """结束本 turn 的段：等 ack → 释放句柄（此后不再写入）。"""
+        """结束本 turn 的段：等 ack → 释放句柄 → （Phase 2）按顺序铁律封存。"""
         await self.flush()
         await self._close_file()
+        handle = self._active
+        if handle is not None and self._sealer is not None:
+            await self._seal_segment(handle)
         self._active = None
         self._committed_bytes = 0
+
+    async def _seal_segment(self, handle: RolloutSegmentHandle) -> None:
+        """按 §5.4 顺序封存：先上传对象，再在 PG 事务内写 manifest 与指针。
+
+        封存失败一律降级（记日志、段保持 open 待 reconcile），不把异常抛给 turn——
+        与 §1.5「写 IO 失败降级不拖垮 turn」同一原则。
+        """
+        if not handle.materialized:
+            # 空 turn：从未物化，没有对象可封存，也不该在 manifest 留下痕迹
+            return
+        try:
+            data = await asyncio.to_thread(handle.path.read_bytes)
+        except OSError as exc:
+            self._logger.warning("rollout 封存读取段失败，保持 open: %s", exc)
+            return
+        from backend.conversation.rollout.sealer import MessagePointer, SealRequest
+
+        request = SealRequest(
+            segment_id=handle.segment_id,
+            thread_id=handle.thread_id,
+            turn_id=handle.turn_id,
+            thread_created_at=handle.thread_created_at,
+            path=handle.path,
+            ordinal_start=handle.ordinal_start,
+            ordinal_end=max(handle.next_ordinal - 1, handle.ordinal_start),
+            byte_size=len(data),
+            sha256=hashlib.sha256(data).hexdigest(),
+            message_pointers=[
+                MessagePointer(
+                    message_id=pointer.message_id,
+                    ordinal=pointer.ordinal,
+                    byte_offset_start=pointer.byte_offset_start,
+                    byte_offset_end=pointer.byte_offset_end,
+                )
+                for pointer in handle.message_pointers
+            ],
+            fence=self._fence,
+        )
+        result = await self._sealer.seal(request)
+        handle.sealed = bool(getattr(result, "sealed", False))
+        if not handle.sealed:
+            self._logger.warning(
+                "rollout 段未封存: turn=%s reason=%s",
+                handle.turn_id,
+                getattr(result, "reason", "unknown"),
+            )
 
     # ------------------------------------------------------------------
     # 入队与 writer
     # ------------------------------------------------------------------
 
-    async def _enqueue_line(self, line: bytes, record_type: str) -> bool:
+    async def _enqueue_line(
+        self,
+        line: bytes,
+        record_type: str,
+        *,
+        ordinal: int | None = None,
+        message_id: UUID | None = None,
+    ) -> bool:
         try:
             await asyncio.wait_for(
-                self._queue.put(_Envelope(kind="line", line=line, record_type=record_type)),
+                self._queue.put(
+                    _Envelope(
+                        kind="line",
+                        line=line,
+                        record_type=record_type,
+                        ordinal=ordinal,
+                        message_id=message_id,
+                    )
+                ),
                 timeout=QUEUE_PUT_TIMEOUT_SECONDS,
             )
         except TimeoutError:
@@ -420,7 +545,7 @@ class RolloutRecorder:
                         self._resolve_ack(envelope)
                         continue
                     if envelope.line is not None:
-                        await self._write_with_retry(envelope.line)
+                        await self._write_with_retry(envelope)
                 except Exception:
                     self._logger.warning(
                         "rollout writer 处理异常，该条已丢弃: type=%s",
@@ -443,10 +568,10 @@ class RolloutRecorder:
                 envelope.ack.set_result(None)
             self._pending_acks.discard(envelope.ack)
 
-    async def _write_with_retry(self, line: bytes) -> None:
+    async def _write_with_retry(self, envelope: _Envelope) -> None:
         """写一行（含 flush）；失败则截断重开重试一次，仍失败则降级。"""
         try:
-            await self._write_once(line)
+            await self._write_once(envelope)
             return
         except OSError as first_error:
             self._logger.warning("rollout 写入失败，截断后重开重试: %s", first_error)
@@ -454,7 +579,7 @@ class RolloutRecorder:
         try:
             await self._close_file()
             await self._reopen_and_truncate()
-            await self._write_once(line)
+            await self._write_once(envelope)
         except Exception as second_error:
             self._degraded = True
             self._logger.error(
@@ -464,17 +589,30 @@ class RolloutRecorder:
             await self._close_file()
             raise
 
-    async def _write_once(self, line: bytes) -> None:
-        """真正落盘：延迟建文件 → write → flush。"""
+    async def _write_once(self, envelope: _Envelope) -> None:
+        """真正落盘：延迟建文件 → write → flush；随后登记字节坐标与段事实。"""
+        line = envelope.line
+        if line is None:
+            return
         handle = self._active
         if handle is None:
             return
         if self._file is None:
+            first_materialization = not handle.materialized
             await asyncio.to_thread(handle.path.parent.mkdir, parents=True, exist_ok=True)
             self._file = await asyncio.to_thread(handle.path.open, "ab")
             handle.materialized = True
             self._committed_bytes = await asyncio.to_thread(lambda: handle.path.stat().st_size)
+            if first_materialization and self._sealer is not None:
+                # §1.7 步骤 2 依赖"用 manifest 定位热段"，因此首次物化时懒创建 open 行
+                await self._sealer.register_open(
+                    segment_id=handle.segment_id,
+                    thread_id=handle.thread_id,
+                    turn_id=handle.turn_id,
+                    ordinal_start=handle.ordinal_start,
+                )
         file_handle = self._file
+        offset_start = self._committed_bytes
 
         def _do_write() -> None:
             file_handle.write(line)
@@ -484,6 +622,15 @@ class RolloutRecorder:
         self._committed_bytes += len(line)
         handle.lines_written += 1
         handle.bytes_written += len(line)
+        if envelope.message_id is not None and envelope.ordinal is not None:
+            handle.message_pointers.append(
+                MessagePointer(
+                    message_id=envelope.message_id,
+                    ordinal=envelope.ordinal,
+                    byte_offset_start=offset_start,
+                    byte_offset_end=self._committed_bytes,
+                )
+            )
         _inc_counter("rollout_records_written_total")
         self._check_size_guard(handle)
 

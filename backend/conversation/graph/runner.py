@@ -53,7 +53,7 @@ class ConversationGraphRunner:
         # memory-rebuild §5.3：turn 边界即段边界。open 失败/降级时 recorder 返回 None，
         # 后续 record_rollout 一律 no-op，不影响本 turn 执行。
         if recorder is not None:
-            await self._open_rollout_segment(recorder, turn)
+            await self._open_rollout_segment(recorder, turn, worker_id=worker_id)
         try:
             has_checkpoint = await self._has_checkpoint(graph_thread_id)
             graph_input: dict[str, Any] | None = None
@@ -83,7 +83,9 @@ class ConversationGraphRunner:
                 # close_turn 内部先等 flush ack 再释放句柄。
                 await recorder.close_turn()
 
-    async def _open_rollout_segment(self, recorder: Any, turn: dict[str, Any]) -> None:
+    async def _open_rollout_segment(
+        self, recorder: Any, turn: dict[str, Any], *, worker_id: str
+    ) -> None:
         """开启本 turn 的 rollout 段。
 
         ``thread_created_at`` 用于段目录分片（§1.5 时间戳① = thread 创建时间），它属于
@@ -97,11 +99,16 @@ class ConversationGraphRunner:
                 created_at = created_at.replace(tzinfo=UTC)
         else:
             created_at = self._runtime.clock.now()
+        # fencing：封存写 manifest 时要复核 (lease_owner, lease_generation)，
+        # 失租的 worker 不得改 manifest（与 finalize 的 fencing 同源）。
+        lease_generation = turn.get("lease_generation")
+        fence = (worker_id, int(lease_generation)) if lease_generation is not None else None
         await recorder.open_turn(
             thread_id=turn["thread_id"],
             turn_id=turn["turn_id"],
             user_id=turn["user_id"],
             thread_created_at=created_at,
+            fence=fence,
         )
 
     async def _record_turn_failed(self, turn: dict[str, Any]) -> None:

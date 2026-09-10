@@ -801,7 +801,23 @@ def create_app(
             ConversationSourceReadService,
         )
 
-        reader_service = ConversationSourceReadService(session_factory=reader_db.session_factory)
+        # memory-rebuild §5.10：读路径独立 flag。开启时按 §5.4 顺序优先读 rollout
+        # （本地段 → 对象存储），任何不可用均回退 conversation_messages.content。
+        rollout_reader = None
+        if get_settings().conversation_rollout_read_enabled:
+            from backend.conversation.rollout.object_store import LocalRolloutObjectStore
+            from backend.conversation.rollout.reader import RolloutReader
+
+            rollout_reader = RolloutReader(
+                session_factory=reader_db.session_factory,
+                object_store=LocalRolloutObjectStore(root=get_settings().conversation_rollout_root),
+                rollout_root=get_settings().conversation_rollout_root,
+            )
+        reader_service = ConversationSourceReadService(
+            session_factory=reader_db.session_factory,
+            rollout_reader=rollout_reader,
+            rollout_read_enabled=get_settings().conversation_rollout_read_enabled,
+        )
         app.include_router(build_reader_router(reader_service))
     # Study Router（方案 §21：STUDY_DOMAIN_ENABLED=false 或未配置
     # STUDY_DATABASE_URL 时不挂载；readiness 对"开启但缺库" fail-closed）

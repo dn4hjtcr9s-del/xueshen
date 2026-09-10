@@ -43,6 +43,7 @@ async def _run() -> None:
     db = ConversationDatabase(settings)
     # memory-rebuild §1.5：rollout recorder 是 worker 级旁路对象；flag 关闭时保持 None。
     rollout_recorder: Any = None
+    rollout_object_store: Any = None
     try:
         # Gateways
         from backend.auth.context import SCOPE_MEMORY_CONTEXT
@@ -113,7 +114,12 @@ async def _run() -> None:
         # runtime.rollout_recorder 保持 None，节点侧 record_rollout 直接 no-op）。
         if settings.conversation_rollout_enabled:
             from backend.conversation.rollout import RolloutRecorder
+            from backend.conversation.rollout.object_store import LocalRolloutObjectStore
+            from backend.conversation.rollout.sealer import RolloutSegmentSealer
 
+            # Phase 2 只接 Local（目录模拟 bucket）；Kodo 适配器属 Phase 3，
+            # 届时只替换这一处构造函数，recorder/sealer/reader 都不用改。
+            rollout_object_store = LocalRolloutObjectStore(root=settings.conversation_rollout_root)
             rollout_recorder = RolloutRecorder(
                 root=settings.conversation_rollout_root,
                 clock=SystemClock(),
@@ -121,6 +127,11 @@ async def _run() -> None:
                 logger=logger,
                 queue_size=settings.conversation_rollout_queue_size,
                 segment_max_bytes=settings.conversation_rollout_segment_max_bytes,
+                sealer=RolloutSegmentSealer(
+                    session_factory=db.session_factory,
+                    object_store=rollout_object_store,
+                    logger=logger,
+                ),
             )
             runtime.rollout_recorder = rollout_recorder
             logger.info(
@@ -171,6 +182,8 @@ async def _run() -> None:
                 token_counter=token_counter,
                 worker_id=f"job-worker-{uuid4()}",
             )
+            # delete_thread 需要对象存储来物理删除 rollout 段对象（§1.8）
+            job_worker.rollout_object_store = rollout_object_store
             graph_worker.install_signal_handlers()
             job_worker.install_signal_handlers()
             from backend.conversation.worker.knowledge_summary_maintenance import (

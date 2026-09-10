@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,7 @@ from backend.conversation.persistence import jobs as jobs_repo
 from backend.conversation.persistence import knowledge_summaries as knowledge_summaries_repo
 from backend.conversation.persistence import messages as messages_repo
 from backend.conversation.persistence import outbox as outbox_repo
+from backend.conversation.persistence import rollout_manifests as rollout_manifests_repo
 from backend.conversation.persistence import threads as threads_repo
 from backend.conversation.persistence import turns as turns_repo
 
@@ -38,6 +40,7 @@ async def execute_delete_thread(
     thread_id: UUID,
     deletion_generation: int,
     worker_id: str,
+    object_store: Any = None,
 ) -> str:
     """执行 delete_thread Job 一个周期；返回结果分支（done / wait / needs_review）。"""
     # 1. 确认无活动 Turn（R4）；仍有活动 Turn 时不清理任何数据，只等待重试
@@ -64,6 +67,43 @@ async def execute_delete_thread(
     await messages_repo.mark_messages_deleted_for_thread(session, thread_id)
     await events_repo.delete_events_for_thread(session, thread_id)
     await _delete_summaries_for_thread(session, thread_id)
+
+    # memory-rebuild §1.8：rollout 段对象与 manifest 一并清理。
+    # 顺序刻意是"先删对象、再落 tombstone"：删除合规的第一要务是数据**物理**消失。
+    # 反过来的话，对象删除失败会留下"manifest 已删但对象还在"的静默残留；
+    # 而这个顺序下若 tombstone 事务回滚，只会留下"manifest 指向已删对象"，
+    # 由 reconcile 检出并收敛（fail-safe）。
+    # 任何对象删除失败都不返回 done，让 Job 下轮重试。
+    rollout_keys = [
+        str(row["object_key"])
+        for row in await rollout_manifests_repo.list_by_thread(session, thread_id)
+        if row.get("object_key")
+    ]
+    if rollout_keys:
+        if object_store is None:
+            logging.getLogger("conversation.worker").warning(
+                "delete_thread 未装配对象存储，跳过 rollout 对象删除: thread_id=%s keys=%d",
+                thread_id,
+                len(rollout_keys),
+            )
+        else:
+            try:
+                for key in rollout_keys:
+                    await object_store.delete(key=key)
+            except Exception:
+                logging.getLogger("conversation.worker").exception(
+                    "delete_thread 删除 rollout 对象失败，保持 deleting 待重试: thread_id=%s",
+                    thread_id,
+                )
+                await jobs_repo.wait_job(
+                    session,
+                    job_id,
+                    worker_id=worker_id,
+                    wait_seconds=DELETION_WAIT_SECONDS,
+                    error_code="ROLLOUT_OBJECT_DELETE_FAILED",
+                )
+                return "wait"
+        await rollout_manifests_repo.mark_thread_deleted(session, thread_id=thread_id)
 
     # 3. 检查本 generation 全部 deletion Outbox（R3/S3）
     deletions = await outbox_repo.list_outbox_by_thread(
