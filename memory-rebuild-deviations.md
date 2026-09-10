@@ -169,9 +169,118 @@ Phase 1 起才会出现真实的 flag 分支，届时该结论需要重新验证
 
 ## Phase 1：Conversation Rollout 本地链路
 
-（实施中，条目随开发追加）
+### DEV-004 §5.3 的"六节点接入"清单与 §1.5 白名单对不上
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.3 要求"在 `snapshot.py`、`memory.py`、`rewrite.py`、`evidence.py`、`answer.py`、`finalize.py` 的关键成功/降级路径调用 recorder"；但 §1.5 的记录白名单只有 9 类，**没有** memory 活动对应的类型 |
+| 实现 | `memory.py` 与 `answer.py` **不产生独立记录**。memory 的产出（`memory_status`）内含在 `turn_context_snapshot`；answer 的产出（回答正文）由 `finalize` 统一落 `assistant_message` |
+| 依据 | 用户决策（2026-09-10）：以 §1.5 白名单为准，不新增第 13 种记录类型 |
+| 影响 | §5.3 的字面节点清单未完全满足；若将来确实需要独立的 memory 活动记录（例如记录检索耗时与命中数），需要新增记录类型并改契约快照 |
+
+### DEV-005 "writer 按 thread_id 分桶持有句柄"未实现为桶式句柄
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §1.5「并发：同一 thread 的 turn 已被 DB lease 串行化；writer 按 thread_id 分桶持有句柄」 |
+| 实现 | recorder 只维护**一个活动段**；并发 `open_turn` 直接返回 `None` 并告警，不覆盖、不排队 |
+| 依据 | 代码事实：`graph_worker._poll_once` 注释明确"先单并发，简单可靠"，worker 串行执行 turn，同时最多一个段。且 §1.7 已否定"跨 turn 持有句柄"，桶式句柄与之矛盾 |
+| 影响 | **若将来提高 worker 并发**，必须先把 recorder 改成按 thread_id 分桶（含 ordinal 分配的并发保护），否则第二个 turn 的段会被拒绝记录。用户决策（2026-09-10）已确认按单活动段实现 |
+
+### ADD-011 Phase 1 本地段路径文档未给
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §1.5 只给 thread 级"逻辑文件名"，§5.5 只给对象存储 key，**都没有**本地热段的物理路径 |
+| 实现 | `{root}/threads/YYYY/MM/DD/<thread_id>/<ordinal_start>-<segment_id>.jsonl`；日期取 thread 创建时间（UTC），`ordinal_start` 前导补零使字典序与数值序一致 |
+| 依据 | 用户决策（2026-09-10）：对齐 §5.5 的对象 key 结构，Phase 2 上传时几乎不用改路径逻辑 |
+
+### ADD-012 新段 `ordinal_start` 的确定方式文档未给
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §1.5 只说 ordinal"文件级单调递增"，§1.7 说用 manifest 定位热段；但 Phase 1 还没有 manifest |
+| 实现 | 扫描该 thread 的段目录，取最后一个段的最后一个**完整**行的 ordinal + 1（`read_last_ordinal` 只读文件尾部 64KB）；末尾半行不参与计算 |
+| 依据 | 用户决策（2026-09-10）：thread 级连续，Phase 1 靠扫描，Phase 2 接 manifest 后改走索引 |
+| 影响 | Phase 2 引入 manifest 后，此扫描逻辑应作为"manifest 缺失时的回落"，不能直接删除 |
+
+### ADD-013 `thread_meta` 由 recorder 自动写入，且"首次物化时才写"
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.3 写入顺序第 1 条写"`thread_meta`（第一次物化文件时写入）"，但没说由谁写 |
+| 实现 | recorder 在**首次真正记录**时自动补 `thread_meta` 行（占用段内最小 ordinal），并拒绝调用方显式记录该类型 |
+| 依据 | "空 turn 不创建空文件"是 §5.3 验收第一条。若由调用方在 `open_turn` 后立即记录 thread_meta，则每个 turn 都会物化文件（因为 thread_meta 总是第一条），该验收不可能满足 |
+| 影响 | 每个段都自带 `thread_meta`（段自包含，便于独立重放）；代价是同一 thread 的多个段会重复首行元数据 |
+
+### ADD-014 `thread_created_at` 的来源文档未给
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §1.5 说段目录按 thread 创建时间分片，但没说写路径如何拿到它 |
+| 实现 | `graph_worker._claim_next_turn` 的 claim 查询改为 `conversation_turns JOIN conversation_threads`，附带 `thread_created_at` 列；`FOR UPDATE OF t` 限定只锁 turn 行（避免与 finalize 的 thread 行锁产生额外争用）。缺失时（单测直接构造 turn dict）退化为 `clock.now()` |
+| 依据 | 代码事实：原 claim 查询是 `SELECT * FROM conversation_turns`，不含 thread 的创建时间 |
+| 影响 | 退化路径只影响分片目录的选择，不影响 ordinal 单调性与记录内容 |
+
+### ADD-015 `embedded_queries` 的接入点在 `retrieval.py`
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §1.5 白名单包含 `embedded_queries`，但 §5.3 的接入点清单**没有** `retrieval.py` |
+| 实现 | 在 `retrieval.py::embed_subqueries` 落盘，只记 `model` + `dimensions`（向量本身不落） |
+| 依据 | 代码事实：`embedded_queries` 只有该节点生产；不接在这里就没有任何地方能落这个白名单类型 |
+
+### ADD-016 队列写满的等待上限文档未给
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §1.5 只说"有界 `asyncio.Queue(256)`"，未规定写满后等多久 |
+| 实现 | `QUEUE_PUT_TIMEOUT_SECONDS = 5.0`：超时即丢弃该条并计 `rollout_dropped_total`，不无限期阻塞图执行 |
+| 依据 | §1.5「写 IO 失败…降级不拖垮 turn」：磁盘挂起时不能把 turn 一起挂住 |
+
+### ADD-017 `graph_version` 取值来源文档未给
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §1.2 首行元数据含 `graph 版本`，未规定取值 |
+| 实现 | 模块常量 `CONVERSATION_GRAPH_VERSION = "conversation-graph-v1"` |
+| 影响 | 图拓扑变更时需要人工升版；未与任何代码常量联动 |
+
+### ADD-018 "每段最多一条 `turn_completed`"不变式文档未给
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | 无 |
+| 实现 | recorder 保证一个段内 `turn_completed` 只落一条：重复记录被拒 |
+| 依据 | 正常路径由 finalize 写 completed，异常路径由 runner 补写 failed。若 finalize 成功之后图仍抛错（例如 checkpoint 收尾失败），没有该不变式就会写出"先 completed 再 failed"的矛盾终态 |
+
+### ADD-019 段大小防爆阈值的处理方式
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.3「达到阈值时记录可观测的 `segment_size_guard_triggered`，不得在一个 turn 中静默丢行。若阈值处理需要拆段，必须显式增加 segment 边界记录并在 Phase 2 验收前补充重放测试」 |
+| 实现 | Phase 1 **只告警并计数**，继续写入、不丢行、不拆段（每段触发一次告警，避免刷屏） |
+| 依据 | 拆段需要新的段边界记录类型与重放测试，属 Phase 2 范围；"不静默丢行"是硬要求，继续写入即满足 |
+
+### ADD-020 新增指标超出 §5.12 列举
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.12 列出 `rollout_records_total`、`rollout_write_failed_total`、`rollout_flush_latency`、`rollout_queue_depth`、`rollout_segment_bytes` |
+| 实现 | 落到 `backend/conversation/metrics.py`：`rollout_records_total{record_type}`、`rollout_records_written_total`、`rollout_records_rejected_total{record_type}`、`rollout_write_retry_total`、`rollout_write_failed_total`、`rollout_dropped_total{reason}`、`rollout_segment_guard_triggered_total`、`rollout_queue_depth`、`rollout_flush_latency_seconds` |
+| 差异 | 把"写入量"拆成 `records_total`（入队）与 `records_written_total`（落盘）两个计数，便于区分"入队成功但落盘失败"；新增 rejected/dropped/retry/guard 四个计数。`rollout_segment_bytes` 未做成指标（每段字节数基数随 turn 增长），改为在段达到阈值时告警 |
+| 依据 | §5.3「如需统计，统一落到现有 metrics.py，不在节点内散落指标实现」 |
+
+### ADD-021 rollout 记录在数据库事务**提交之后**落盘
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.3 只规定"finalize 后等待 flush ack"，未规定与 DB 事务的先后 |
+| 实现 | finalize 在事务内读用户消息行，事务提交成功后才记录 `user_message` / `assistant_message` / `turn_completed` |
+| 依据 | rollout 是"事实源"，不应记录未提交的事实；fencing 失败等早退路径不回滚 rollout。已加测试固定该行为 |
 
 ---
+
 
 ## Phase 2：Manifest、Reader、恢复与删除
 

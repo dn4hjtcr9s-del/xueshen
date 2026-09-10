@@ -201,6 +201,9 @@ class ConversationRuntimeContext:
         self.context_service: Any = None
         self.settings: Any = None
         self.token_counter: Any = None
+        # memory-rebuild §1.5：rollout recorder 是运行期旁路对象，**不进入 Checkpoint**。
+        # flag `conversation_rollout_enabled` 关闭时为 None，节点侧 record_rollout 直接 no-op。
+        self.rollout_recorder: Any = None
 
 
 def serialize_snapshot(snapshot: TurnContextSnapshot) -> dict[str, Any]:

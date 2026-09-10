@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from backend.conversation.contracts.graph import ConversationGraphInput
 from backend.conversation.graph.state import ConversationRuntimeContext
+from backend.conversation.rollout.recorder import record_rollout
 
 
 class ConversationGraphRunner:
@@ -47,27 +49,79 @@ class ConversationGraphRunner:
         恢复时传 None 由 checkpointer 自取最新 checkpoint（附录 A.3）。
         """
         graph_thread_id = self.graph_thread_id(turn["turn_id"])
-        has_checkpoint = await self._has_checkpoint(graph_thread_id)
-        graph_input: dict[str, Any] | None = None
-        if not has_checkpoint:
-            graph_input = ConversationGraphInput(
-                user_id=turn["user_id"],
-                thread_id=turn["thread_id"],
-                turn_id=turn["turn_id"],
-                user_message_id=turn["user_message_id"],
-                request_id=turn["request_id"],
-                run_id=turn["run_id"],
-                expected_thread_version=turn["expected_thread_version"],
-            ).model_dump(mode="json")
-        # runtime 通过注入器传入 graph（LangGraph 的 config 传递）
-        config: dict[str, Any] = {
-            "configurable": {"thread_id": graph_thread_id, "runtime": self._runtime}
-        }
+        recorder = getattr(self._runtime, "rollout_recorder", None)
+        # memory-rebuild §5.3：turn 边界即段边界。open 失败/降级时 recorder 返回 None，
+        # 后续 record_rollout 一律 no-op，不影响本 turn 执行。
+        if recorder is not None:
+            await self._open_rollout_segment(recorder, turn)
         try:
+            has_checkpoint = await self._has_checkpoint(graph_thread_id)
+            graph_input: dict[str, Any] | None = None
+            if not has_checkpoint:
+                graph_input = ConversationGraphInput(
+                    user_id=turn["user_id"],
+                    thread_id=turn["thread_id"],
+                    turn_id=turn["turn_id"],
+                    user_message_id=turn["user_message_id"],
+                    request_id=turn["request_id"],
+                    run_id=turn["run_id"],
+                    expected_thread_version=turn["expected_thread_version"],
+                ).model_dump(mode="json")
+            # runtime 通过注入器传入 graph（LangGraph 的 config 传递）
+            config: dict[str, Any] = {
+                "configurable": {"thread_id": graph_thread_id, "runtime": self._runtime}
+            }
             await self._compiled.ainvoke(graph_input, config=config)
         except Exception:
             self._logger.exception("Graph 执行失败: turn_id=%s", turn["turn_id"])
+            if recorder is not None:
+                await self._record_turn_failed(turn)
             raise
+        finally:
+            if recorder is not None:
+                # §1.5："finalize 后 flush() 等 ack"，再结束本轮 recorder 生命周期。
+                # close_turn 内部先等 flush ack 再释放句柄。
+                await recorder.close_turn()
+
+    async def _open_rollout_segment(self, recorder: Any, turn: dict[str, Any]) -> None:
+        """开启本 turn 的 rollout 段。
+
+        ``thread_created_at`` 用于段目录分片（§1.5 时间戳① = thread 创建时间），它属于
+        thread 行而非 turn 行。claim 查询已 JOIN 出 ``thread_created_at``；缺失时
+        （单测或其它入口直接构造 turn dict）退化为当前时间——只影响分片目录的选择，
+        不影响 ordinal 单调性与记录内容。
+        """
+        created_at = turn.get("thread_created_at")
+        if isinstance(created_at, datetime):
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+        else:
+            created_at = self._runtime.clock.now()
+        await recorder.open_turn(
+            thread_id=turn["thread_id"],
+            turn_id=turn["turn_id"],
+            user_id=turn["user_id"],
+            thread_created_at=created_at,
+        )
+
+    async def _record_turn_failed(self, turn: dict[str, Any]) -> None:
+        """异常路径补写 turn_completed(status=failed)。
+
+        §5.3 要求 turn_completed 必须带 status 与 degraded flags；正常路径由 finalize
+        节点写入，图在 finalize 之前失败时若不补写，段里就没有终态记录。
+        recorder 侧保证一个段最多一条 turn_completed，因此 finalize 已成功后再异常
+        不会被写成"完成又失败"。
+        """
+        await record_rollout(
+            self._runtime,
+            "turn_completed",
+            {
+                "turn_id": str(turn["turn_id"]),
+                "status": "failed",
+                "degraded_flags": ["graph_failed"],
+                "completed_at": self._runtime.clock.now().isoformat(),
+            },
+        )
 
     async def _has_checkpoint(self, graph_thread_id: str) -> bool:
         """附录 A.3 决策树 ①/②：该 thread 是否存在 checkpoint。"""

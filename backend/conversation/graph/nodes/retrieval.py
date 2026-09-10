@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from backend.conversation.graph.state import ConversationRuntimeContext, worker_key
+from backend.conversation.rollout.recorder import record_rollout
 
 
 async def retrieve_subquery(
@@ -55,6 +56,22 @@ async def embed_subqueries(
         return {"embedded_queries": {}}
     texts = [str(s["query_text"]) for s in subqueries]
     vectors = await runtime.embedding_gateway.embed(texts=texts)
+    # memory-rebuild §1.5 白名单：embedded_queries 只记**模型标识 + 维度**，
+    # 向量本身是 MB 级体积且可由 text 重算，落盘只会让 rollout 膨胀。
+    #
+    # 注：§5.3 的接入点清单没有列出 retrieval.py，但它列出的 embedded_queries
+    # 类型只有本节点生产；这里按白名单落盘并登记为偏差补充。
+    dimensions = len(vectors[0]) if vectors else 0
+    if dimensions:
+        settings = getattr(runtime, "settings", None)
+        await record_rollout(
+            runtime,
+            "embedded_queries",
+            {
+                "model": str(getattr(settings, "embedding_model", "") or "unknown"),
+                "dimensions": dimensions,
+            },
+        )
     return {
         "embedded_queries": {str(s["subquery_id"]): vectors[i] for i, s in enumerate(subqueries)}
     }

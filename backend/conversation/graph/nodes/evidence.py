@@ -24,6 +24,7 @@ from backend.conversation.contracts.retrieval import (
     SearchHitRef,
 )
 from backend.conversation.graph.state import ConversationRuntimeContext
+from backend.conversation.rollout.recorder import record_rollout
 from backend.conversation.services.token_counter import TokenCounter
 
 
@@ -104,6 +105,14 @@ async def deduplicate_and_rerank(
         await _emit_citation_available(runtime, state, kept)
         citations_emitted = True
 
+    # memory-rebuild §5.3 写入顺序第 4 条：evidence_set 只落**引用 + 顺序**
+    # （§1.5「大对象放引用」）——chunk 正文在 rag 库，体积大且不属于短期记忆。
+    # 列表顺序即证据顺序，重放时据此还原排列。
+    await record_rollout(
+        runtime,
+        "evidence_set",
+        {"references": [str(item.evidence_id) for item in evidence_set.items]},
+    )
     return {
         "evidence_set": {
             "items": [_item_dict(item) for item in evidence_set.items],

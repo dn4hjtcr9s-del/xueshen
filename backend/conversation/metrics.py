@@ -69,3 +69,51 @@ knowledge_summary_retention_operations_total = Counter(
     "知识总结 retention 操作总数",
     ["operation", "result"],
 )
+
+# ---------------------------------------------------------------------------
+# Conversation Rollout（memory-rebuild §1.5 / §5.12）
+#
+# 标签同样只允许稳定枚举：record_type 取自契约的封闭类型集合，reason 是固定的
+# 丢弃原因枚举。禁止把 thread_id / turn_id / 正文放进标签（基数与隐私双重原因）。
+# ---------------------------------------------------------------------------
+
+rollout_records_total = Counter(
+    "conversation_rollout_records_total",
+    "rollout 记录成功入队总数",
+    ["record_type"],
+)
+rollout_records_written_total = Counter(
+    "conversation_rollout_records_written_total",
+    "rollout 记录实际写入并 flush 的总数",
+)
+rollout_records_rejected_total = Counter(
+    "conversation_rollout_records_rejected_total",
+    "rollout 记录被白名单/脱敏/契约拒绝总数",
+    ["record_type"],
+)
+rollout_write_retry_total = Counter(
+    "conversation_rollout_write_retry_total",
+    "rollout 写入失败后截断重开的次数",
+)
+rollout_write_failed_total = Counter(
+    "conversation_rollout_write_failed_total",
+    "rollout 写入二次失败并进入降级的次数",
+)
+rollout_dropped_total = Counter(
+    "conversation_rollout_dropped_total",
+    "rollout 记录被丢弃总数",
+    ["reason"],
+)
+rollout_segment_guard_triggered_total = Counter(
+    "conversation_rollout_segment_guard_triggered_total",
+    "rollout 段达到防爆阈值（segment_size_guard_triggered）的次数",
+)
+rollout_queue_depth = Gauge(
+    "conversation_rollout_queue_depth",
+    "rollout 写入队列当前深度",
+)
+rollout_flush_latency_seconds = Histogram(
+    "conversation_rollout_flush_latency_seconds",
+    "rollout flush ack 等待耗时",
+    buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5),
+)

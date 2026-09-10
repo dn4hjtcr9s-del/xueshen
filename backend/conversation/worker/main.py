@@ -41,6 +41,8 @@ async def _run() -> None:
     logging.basicConfig(level=settings.log_level)
     logger = logging.getLogger("conversation.worker")
     db = ConversationDatabase(settings)
+    # memory-rebuild §1.5：rollout recorder 是 worker 级旁路对象；flag 关闭时保持 None。
+    rollout_recorder: Any = None
     try:
         # Gateways
         from backend.auth.context import SCOPE_MEMORY_CONTEXT
@@ -107,6 +109,26 @@ async def _run() -> None:
         runtime.context_service = context_service
         runtime.settings = settings
         runtime.token_counter = token_counter
+        # memory-rebuild §1.5 / §5.3：装配 rollout recorder（默认关闭 → 不装配，
+        # runtime.rollout_recorder 保持 None，节点侧 record_rollout 直接 no-op）。
+        if settings.conversation_rollout_enabled:
+            from backend.conversation.rollout import RolloutRecorder
+
+            rollout_recorder = RolloutRecorder(
+                root=settings.conversation_rollout_root,
+                clock=SystemClock(),
+                id_generator=SystemIdGenerator(),
+                logger=logger,
+                queue_size=settings.conversation_rollout_queue_size,
+                segment_max_bytes=settings.conversation_rollout_segment_max_bytes,
+            )
+            runtime.rollout_recorder = rollout_recorder
+            logger.info(
+                "Conversation Rollout 已启用: root=%s queue_size=%s segment_max_bytes=%s",
+                settings.conversation_rollout_root,
+                settings.conversation_rollout_queue_size,
+                settings.conversation_rollout_segment_max_bytes,
+            )
         # P1-10（评审）：active corpus 词表从 RAG 库加载并注入 graph（Q9/D15）
         from backend.conversation.services.corpus_vocabulary import (
             ActiveCorpusVocabularyLoader,
@@ -186,6 +208,10 @@ async def _run() -> None:
                 worker_tasks.append(knowledge_summary_worker.run_forever())
             await asyncio.gather(*worker_tasks)
     finally:
+        # §5.3：worker 停止前必须 drain/flush recorder，否则队列中尚未落盘的记录会随
+        # 进程一起丢失（已 flush ack 的行在 ack 返回前就已落盘）。
+        if rollout_recorder is not None:
+            await rollout_recorder.aclose()
         await db.close()
 
 

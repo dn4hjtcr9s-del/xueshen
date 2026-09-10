@@ -21,6 +21,7 @@ from backend.conversation.contracts.graph import (
     RewritePlan,
 )
 from backend.conversation.graph.state import ConversationRuntimeContext, normalize_plan_mode
+from backend.conversation.rollout.recorder import record_rollout
 
 
 async def rewrite_and_plan(
@@ -119,6 +120,13 @@ async def rewrite_and_plan(
     next_revision = plan_revision + 1
     plan = plan.model_copy(update={"plan_revision": next_revision})
     new_fingerprints = _query_fingerprints(plan)
+    # memory-rebuild §5.3 写入顺序第 4 条：rewrite_plan 每个 revision 落一条
+    # （每 revision，而不是每轮一条——补检索会再改写一次）。
+    await record_rollout(
+        runtime,
+        "rewrite_plan",
+        {"revision": next_revision, "plan": plan.model_dump(mode="json")},
+    )
     return {
         "rewrite_plan": plan.model_dump(mode="json"),
         "plan_revision": next_revision,

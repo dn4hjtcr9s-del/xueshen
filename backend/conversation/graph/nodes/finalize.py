@@ -29,6 +29,7 @@ from backend.conversation.persistence import messages as messages_repo
 from backend.conversation.persistence import outbox as outbox_repo
 from backend.conversation.persistence import threads as threads_repo
 from backend.conversation.persistence import turns as turns_repo
+from backend.conversation.rollout.recorder import record_rollout
 
 
 async def persist_turn(
@@ -197,11 +198,61 @@ async def persist_turn(
                 user_id=user_id,
                 source_checkpoint_id=source_checkpoint_id,
             )
+            # 9. 抓取本轮用户消息行（rollout 记录用）：事务内读，事务提交后再落盘。
+            user_message_row = await messages_repo.get_message(
+                session, UUID(str(state["user_message_id"]))
+            )
+    # memory-rebuild §5.3 写入顺序第 5-6 条：两条消息全文 + turn_completed。
+    # 都放在事务**提交之后**：rollout 记录的是"已提交的事实"，事务回滚时不应留下
+    # 一条声称完成的记录（fencing 失败等早退路径也不会走到这里）。
+    if user_message_row is not None:
+        await record_rollout(
+            runtime,
+            "user_message",
+            {
+                "message_id": str(user_message_row["message_id"]),
+                "sequence": int(user_message_row["sequence"]),
+                "role": "user",
+                "content": str(user_message_row["content"]),
+                "content_hash": str(user_message_row["content_hash"]),
+                "occurred_at": _iso_utc(user_message_row.get("occurred_at")),
+            },
+        )
+    await record_rollout(
+        runtime,
+        "assistant_message",
+        {
+            "message_id": str(assistant_message_id),
+            "sequence": int(sequence),
+            "role": "assistant",
+            "content": answer,
+            "content_hash": sha256(answer.encode("utf-8")).hexdigest(),
+            "occurred_at": _iso_utc(None),
+        },
+    )
+    await record_rollout(
+        runtime,
+        "turn_completed",
+        {
+            "turn_id": str(turn_id),
+            "status": "completed",
+            "degraded_flags": [str(flag) for flag in degraded_flags],
+            "completed_at": _iso_utc(None),
+        },
+    )
     return {
         "assistant_message_id": str(assistant_message_id),
         "outbox_event_id": outbox_event_id,
         "source_checkpoint_id": source_checkpoint_id,
     }
+
+
+def _iso_utc(value: Any) -> str:
+    """DB 时间戳 → 带时区的 ISO 串（契约要求 tz-aware，naive 值一律按 UTC 解释）。"""
+    if isinstance(value, datetime):
+        resolved = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return resolved.astimezone(UTC).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class LeaseFencedError(Exception):

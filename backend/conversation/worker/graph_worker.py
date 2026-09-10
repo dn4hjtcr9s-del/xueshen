@@ -158,17 +158,20 @@ class ConversationGraphWorker:
                 result = await session.execute(
                     text(
                         """
-                        SELECT * FROM conversation.conversation_turns
+                        SELECT t.*, th.created_at AS thread_created_at
+                        FROM conversation.conversation_turns AS t
+                        JOIN conversation.conversation_threads AS th
+                          ON th.thread_id = t.thread_id
                         WHERE (
-                            status = 'accepted' AND next_attempt_at <= :now
+                            t.status = 'accepted' AND t.next_attempt_at <= :now
                         ) OR (
-                            status IN ('running', 'cancelling')
-                            AND lease_expires_at IS NOT NULL
-                            AND lease_expires_at < :now
+                            t.status IN ('running', 'cancelling')
+                            AND t.lease_expires_at IS NOT NULL
+                            AND t.lease_expires_at < :now
                         )
-                        ORDER BY next_attempt_at
+                        ORDER BY t.next_attempt_at
                         LIMIT 1
-                        FOR UPDATE SKIP LOCKED
+                        FOR UPDATE OF t SKIP LOCKED
                         """
                     ),
                     {"now": datetime.now(UTC)},
