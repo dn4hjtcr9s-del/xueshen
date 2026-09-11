@@ -274,6 +274,59 @@ class MemoryClient:
         )
         return LearningContext.model_validate(data)
 
+    async def memory_tool_search(
+        self,
+        *,
+        queries: list[str],
+        match_mode: str = "any",
+        max_results: int = 10,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """`memory.search` 工具后端（memory-rebuild §2.4 D3）。
+
+        **纯关键词、不引入向量**：服务端只对 index 注册表的
+        name/description/aliases/keywords 四列做子串匹配，返回条目**不含正文**。
+        """
+        data = await self._request(
+            "POST",
+            "/api/v1/internal/memory/tool/search",
+            json_body={
+                "queries": queries,
+                "match_mode": match_mode,
+                "max_results": max_results,
+            },
+            user_id=user_id,
+        )
+        return dict(data)
+
+    async def memory_tool_read(
+        self,
+        *,
+        memory_id: str,
+        line_offset: int = 0,
+        max_lines: int = 200,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """`memory.read` 工具后端（§2.4 D3）：分段读 + 版本/checksum 溯源。"""
+        data = await self._request(
+            "POST",
+            "/api/v1/internal/memory/tool/read",
+            json_body={
+                "memory_id": memory_id,
+                "line_offset": line_offset,
+                "max_lines": max_lines,
+            },
+            user_id=user_id,
+        )
+        return dict(data)
+
+    async def memory_tool_prime(self, *, user_id: str | None = None) -> dict[str, Any]:
+        """首轮 prime 输入：`memory_summary.md` 摘要 + index 注册表目录（§2.4 D1）。"""
+        data = await self._request(
+            "POST", "/api/v1/internal/memory/tool/prime", json_body={}, user_id=user_id
+        )
+        return dict(data)
+
     async def get_graph_recommendations(
         self, *, cursor: str | None = None, limit: int = 20
     ) -> list[GraphRecommendation]:

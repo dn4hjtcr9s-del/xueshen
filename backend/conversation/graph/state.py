@@ -72,6 +72,21 @@ class ConversationGraphState(TypedDict, total=False):
     degraded_flags: Annotated[list[str], merge_degraded_flags]
     errors: list[dict[str, Any]]
 
+    # Memory Prime 与记忆工具（memory-rebuild §2.4 D1/D2/D3，Phase 5）
+    #
+    # 注意：graph thread 是 `conv-turn:{turn_id}` **per-turn**，所以"是不是首轮"
+    # 不能靠 Graph State 记忆，必须每轮从 messages 索引表重算（§2.4 D1 明确要求）。
+    # 这里存的是**本轮**的 prime 与工具活动，用于提示词组装、rollout 记录与引用回填。
+    memory_prime: dict[str, Any]
+    #: 工具调用计数（上限 6，§2.7-③ 决议 B 组：与检索预算独立，不共享）。
+    memory_tool_calls: int
+    #: 本轮工具调用/结果记录（供 rollout 与 finalize 的引用回填）。
+    memory_tool_records: list[dict[str, Any]]
+    #: 本轮真正被模型读过的记忆文档引用（document_version / checksum / section）。
+    memory_citations: list[dict[str, Any]]
+    #: 是否有工具结果被截断（超限必须显式告知模型，不能静默丢内容）。
+    memory_truncated: bool
+
     # Persistence（§10.2）
     assistant_message_id: str | None
     source_checkpoint_id: str | None

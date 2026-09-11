@@ -711,6 +711,10 @@ class Settings(BaseSettings):
             "memory_read": self.conversation_memory_read_enabled,
             "memory_submit": self.conversation_memory_submit_enabled,
             "streaming": self.conversation_streaming_enabled,
+            # memory-rebuild §2.4 D1/D3（Phase 5）：首轮 prime 与记忆工具两个独立开关，
+            # 默认均为 false——关闭时 recall_memory 与 answer/SSE 契约保持原样。
+            "memory_prime": self.memory_prime_enabled,
+            "memory_tools": self.memory_tools_enabled,
         }
 
     @property

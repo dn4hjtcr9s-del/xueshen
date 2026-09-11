@@ -1,20 +1,34 @@
-"""recall_memory 节点（方案 §5.2 / §9.3 #2 / §16）。
+"""recall_memory 节点（方案 §5.2 / §9.3 #2 / §16；memory-rebuild §2.4 D1/D2）。
 
-本轮唯一一次 Memory 读取；query seed = 当前问题 + 最近用户消息摘要。
-Memory 成功结果与失败状态都写入快照；补检索循环不得再次调用（§9.3 #6）。
+两种模式，由 `memory_prime` flag 切换，**关闭时行为与改造前逐字一致**：
 
-失败分类（§16.2 / 评审 P1-5）：
-- 认证/权限（401/403）→ 抛错使 Turn 失败，不静默降级；
-- 超时/5xx/网络 → unavailable 快照继续本轮对话；
-- 4xx 契约错误 → 抛错使 Turn 失败并告警，禁止当普通降级处理。
+- **关闭（默认）**：本轮唯一一次 Memory 读取，query seed = 当前问题 + 最近用户消息摘要。
+  这是既有路径，SSE/answer 契约完全不变。
+- **开启**：不再按 query 猜测该注入什么，改为
+  **首轮 prime 注入（摘要 + 注册表目录）→ 之后原样复用同一份固定提示词**。
+  机制检索交给 `memory.search` / `memory.read` 工具（§2.4 D3）。
+
+**首轮判定**：`conversation_context.recent_messages` 为空即首轮。context 节点在组装时
+已把**当前**用户消息排除在外（附录 A.5），所以"空"精确等于"该 thread 没有历史消息"，
+不需要新增标记位（§2.4 D1）。
+
+**pin（§2.4 D2）**：首轮把 prime 快照落成 rollout 的 `memory_prime` 记录；后续轮次从
+rollout 读回同一份。记忆更新不回溯旧提示词——旧 thread 继续用旧快照，新 thread 自然
+用最新 summary。这是刻意语义（对应 codex 会话启动时一次性读取 memory_summary）。
+
+失败分类（§16.2 / 评审 P1-5）：认证/权限与 4xx 契约错误 → 抛错使 Turn 失败；
+5xx/超时/网络 → unavailable 快照继续本轮对话。
 """
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
+from uuid import UUID
 
 from backend.conversation.contracts.errors import MemoryUnavailableError
 from backend.conversation.graph.state import ConversationRuntimeContext
+from backend.conversation.rollout.recorder import record_rollout
 
 
 async def recall_memory(
@@ -22,12 +36,12 @@ async def recall_memory(
     *,
     runtime: ConversationRuntimeContext,
 ) -> dict[str, Any]:
-    """读取长期记忆（§16.1）。
-
-    返回 {"memory_context": {...}} 供 build_turn_snapshot 使用；
-    MEMORY_READ_ENABLED=false 时短路为 unavailable（附录 A.10）。
-    """
+    """读取长期记忆（§16.1）。"""
     flags = runtime.flags
+    if flags.get("memory_prime"):
+        return await _recall_via_prime(state, runtime=runtime)
+
+    # ---- 既有路径（flag 关闭时逐字不变）----
     if not flags.get("memory_read", True):
         return {"memory_context": {"status": "unavailable"}}
     query_seed = _build_query_seed(state)
@@ -56,6 +70,144 @@ async def recall_memory(
         await _emit_degraded(runtime, state, "memory_degraded")
     context["status"] = memory_status
     return {"memory_context": context}
+
+
+# ---------------------------------------------------------------------------
+# prime 模式（§2.4 D1/D2）
+# ---------------------------------------------------------------------------
+
+
+def is_first_turn(state: dict[str, Any]) -> bool:
+    """该 conversation thread 是否还没有历史消息。
+
+    context 节点组装 recent_messages 时已排除当前用户消息，因此"空列表"就是
+    "首轮"的精确判据（§2.4 D1：不新增标记位）。
+    """
+    conversation_context = state.get("conversation_context") or {}
+    return not (conversation_context.get("recent_messages") or [])
+
+
+async def _recall_via_prime(
+    state: dict[str, Any], *, runtime: ConversationRuntimeContext
+) -> dict[str, Any]:
+    """prime 模式：首轮构建并 pin，后续轮次原样复用。"""
+    prime: dict[str, Any]
+    if is_first_turn(state):
+        prime = await _build_prime(runtime, state)
+        await _pin_prime(runtime, state, prime)
+    else:
+        pinned = await _load_pinned_prime(runtime, state)
+        if pinned is None:
+            # pin 取不到（rollout 未启用或记录缺失）：本轮重新构建并记降级标记。
+            # 代价是这一轮可能用到比首轮更新的 summary —— 属可接受的降级，
+            # 但必须可观测，否则"旧 thread 用旧快照"的语义会被静默破坏。
+            await _emit_degraded(runtime, state, "memory_prime_pin_missing")
+            prime = await _build_prime(runtime, state)
+        else:
+            prime = pinned
+    if prime.get("degraded"):
+        await _emit_degraded(runtime, state, "memory_prime_degraded")
+    return {
+        "memory_prime": prime,
+        "memory_context": {
+            "status": "available",
+            "prime": prime,
+            # prime 模式下不做 query 检索，recommendations 保持为空，
+            # 由工具按需下沉（§2.4 D3）
+            "recommendations": [],
+        },
+    }
+
+
+async def _build_prime(
+    runtime: ConversationRuntimeContext, state: dict[str, Any]
+) -> dict[str, Any]:
+    """向 memory 侧取 prime（摘要 + 注册表目录）。"""
+    try:
+        prime = await runtime.memory_gateway.build_memory_prime(user_id=str(state["user_id"]))
+    except MemoryUnavailableError as exc:
+        source_status = exc.source_http_status
+        if source_status is not None and source_status < 500:
+            runtime.logger.warning("Memory prime 被拒绝（不可降级）: http=%s", source_status)
+            raise
+        await _emit_degraded(runtime, state, "memory_prime_unavailable")
+        return {"summary": "", "index_entries": [], "degraded": True}
+    return dict(prime)
+
+
+async def _pin_prime(
+    runtime: ConversationRuntimeContext, state: dict[str, Any], prime: dict[str, Any]
+) -> None:
+    """把首轮 prime 固化为该 thread 的固定提示词（§2.4 D2）。
+
+    rollout 未启用时 `record_rollout` 直接 no-op，因此这里不需要分支判断。
+    """
+    await record_rollout(
+        runtime,
+        "memory_prime",
+        {
+            "summary_hash": str(prime.get("summary_hash") or _summary_hash(prime)),
+            "schema_version": str(prime.get("schema_version") or "v1"),
+            "generated_at": prime.get("generated_at"),
+            "truncated": bool(prime.get("summary_truncated")),
+            "index_entry_count": len(prime.get("index_entries") or []),
+        },
+    )
+
+
+def _summary_hash(prime: dict[str, Any]) -> str:
+    """summary 无哈希时用其内容现算，保证 pin 记录有稳定的比对键。"""
+    return hashlib.sha256(str(prime.get("summary") or "").encode("utf-8")).hexdigest()
+
+
+async def _load_pinned_prime(
+    runtime: ConversationRuntimeContext, state: dict[str, Any]
+) -> dict[str, Any] | None:
+    """从 rollout 读回首轮 pin 的 prime 快照。
+
+    §2.4 D2 要求"旧 thread 保持旧快照继续用"，因此这里**不能**简单地重新构建——
+    必须优先取回 pinned 的那一份。rollout 是 pin 的持久载体（第一章的 `memory_prime`
+    记录类型即为此设计）。
+
+    当前返回 None 的情形：rollout 未启用、首轮段已被 retention 清理、或读回失败。
+    调用方按"重新构建 + 记 `memory_prime_pin_missing` 降级标记"处理。
+
+    **已知限制（已登记偏差）**：rollout 的 `memory_prime` 记录按 §1.5「大对象放引用」
+    只存摘要级信息（hash + 条目数），摘要**正文**不在其中。因此本函数只还原出
+    "pin 的指纹"，正文仍需按 hash 取回——完整实现需要 memory 侧支持按 hash 取指定
+    版本的 summary。当前返回 `summary=""` 并保留 hash，调用方可据此判断"pin 存在但
+    正文未还原"。
+    """
+    reader = getattr(runtime, "rollout_reader", None)
+    if reader is None:
+        return None
+    thread_id = state.get("thread_id")
+    if thread_id is None:
+        return None
+    try:
+        records = await reader.read_thread_records(UUID(str(thread_id)))
+    except Exception:
+        runtime.logger.warning("rollout prime 读回失败，本次按重建处理", exc_info=True)
+        return None
+    for record in records:
+        if record.type == "memory_prime":
+            return {
+                "pinned": True,
+                "summary_hash": record.payload.get("summary_hash"),
+                "schema_version": record.payload.get("schema_version"),
+                "generated_at": record.payload.get("generated_at"),
+                "summary_truncated": bool(record.payload.get("truncated")),
+                "index_entry_count": int(record.payload.get("index_entry_count") or 0),
+                "summary": "",
+                "index_entries": [],
+                "degraded": False,
+            }
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 既有辅助
+# ---------------------------------------------------------------------------
 
 
 async def _emit_degraded(

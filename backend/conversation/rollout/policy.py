@@ -18,7 +18,7 @@ from backend.conversation.contracts.rollout import (
     validate_rollout_payload,
 )
 
-#: Phase 1 实际写入的记录类型（§1.5 白名单表的 9 类）。
+#: Phase 1 写入的记录类型（§1.5 白名单表的 9 类）。
 #:
 #: 注意 §5.3 要求在 snapshot/memory/rewrite/evidence/answer/finalize 六个节点接入
 #: recorder，但 §1.5 白名单**没有** memory 活动对应的类型——memory_status 已经内含在
@@ -35,13 +35,20 @@ PERSISTED_RECORD_TYPES: frozenset[str] = frozenset(
         "embedded_queries",
         "user_message",
         "assistant_message",
+        # memory-rebuild §2.4（Phase 5）：prime 快照与记忆工具活动。
+        # 这三种在 Phase 0 就已定型契约，Phase 5 起真正写入。
+        "memory_prime",
+        "memory_tool_call",
+        "memory_tool_result",
     }
 )
 
-#: Phase 5 才会写入、但契约在 Phase 0 已定型的记录类型（§2.4 D2 / §5.7）。
-RESERVED_RECORD_TYPES: frozenset[str] = frozenset(
-    {"memory_prime", "memory_tool_call", "memory_tool_result"}
-)
+#: 仍然保留、尚未有任何写入方的记录类型（当前为空）。
+#:
+#: Phase 0 曾把 memory_prime / memory_tool_call / memory_tool_result 放在这里；
+#: Phase 5 实现后它们已进入 PERSISTED_RECORD_TYPES。保留本集合是为了让
+#: "契约已定型但实现未落地"的类型有统一的登记处，避免散落在注释里。
+RESERVED_RECORD_TYPES: frozenset[str] = frozenset()
 
 #: 明确**不落盘**的瞬态物（§1.5 白名单表第三列）。
 #:
@@ -100,7 +107,7 @@ def ensure_persistable(record_type: str, payload: dict[str, Any]) -> dict[str, A
     if record_type in TRANSIENT_ITEM_NAMES:
         raise RolloutPolicyError(f"{record_type} 是瞬态传输态，按 §1.5 不落盘")
     if record_type in RESERVED_RECORD_TYPES:
-        raise RolloutPolicyError(f"{record_type} 保留给 Phase 5，Phase 1 不写入")
+        raise RolloutPolicyError(f"{record_type} 契约已定型但尚无实现，暂不写入")
     if record_type not in ROLLOUT_RECORD_TYPES:
         raise RolloutPolicyError(f"未知持久化记录类型: {record_type}")
     if not should_persist(record_type):

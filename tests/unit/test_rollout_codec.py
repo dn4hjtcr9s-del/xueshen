@@ -222,7 +222,8 @@ def test_segment_path_composes_dir_and_name(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_phase1_whitelist_is_the_nine_documented_types() -> None:
+def test_whitelist_covers_phase1_and_phase5_types() -> None:
+    """Phase 1 的 9 类 + Phase 5 的 3 类记忆工具记录。"""
     assert PERSISTED_RECORD_TYPES == {
         "thread_meta",
         "turn_started",
@@ -233,17 +234,20 @@ def test_phase1_whitelist_is_the_nine_documented_types() -> None:
         "embedded_queries",
         "user_message",
         "assistant_message",
-    }
-
-
-def test_reserved_types_are_phase5_only() -> None:
-    assert RESERVED_RECORD_TYPES == {
         "memory_prime",
         "memory_tool_call",
         "memory_tool_result",
     }
-    for record_type in RESERVED_RECORD_TYPES:
-        assert should_persist(record_type) is False
+
+
+def test_reserved_types_are_empty_after_phase5() -> None:
+    """Phase 5 落地后不再有"契约已定型但无实现"的记录类型。"""
+    assert RESERVED_RECORD_TYPES == frozenset()
+
+
+def test_phase5_tool_records_are_now_persistable() -> None:
+    for record_type in ("memory_prime", "memory_tool_call", "memory_tool_result"):
+        assert should_persist(record_type) is True
 
 
 @pytest.mark.parametrize("name", ["answer_delta", "cancel_token", "lease", "gateway_http"])
@@ -252,9 +256,20 @@ def test_transient_items_are_rejected(name: str) -> None:
         ensure_persistable(name, {})
 
 
-def test_reserved_type_rejected_with_readable_reason() -> None:
-    with pytest.raises(RolloutPolicyError, match="Phase 5"):
+def test_tool_call_still_validated_against_contract() -> None:
+    """放开白名单不等于放松契约：payload 仍按 memory_tool_call 模型严格校验。"""
+    with pytest.raises(RolloutPolicyError, match="不符合契约"):
         ensure_persistable("memory_tool_call", {})
+    normalized = ensure_persistable(
+        "memory_tool_call",
+        {
+            "call_id": "call-1",
+            "tool": "memory.search",
+            "call_index": 1,
+            "arguments": {"queries": ["椭圆"]},
+        },
+    )
+    assert normalized["tool"] == "memory.search"
 
 
 def test_unknown_type_rejected() -> None:
