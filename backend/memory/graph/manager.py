@@ -114,6 +114,8 @@ async def route_operation(
         "purge_account_memory": "maintenance",
         # memory-rebuild §5.6 Phase 4：文档 schema 迁移走维护分支
         "migrate_markdown_schema_v2": "maintenance",
+        # memory-rebuild §5.8 Phase 6：nightly 批量总结走批量分支（每用户一个 operation）
+        "summarize_user_memory_batch": "batch",
     }
     route: str | None
     if operation.operation_type == "activity_evidence":

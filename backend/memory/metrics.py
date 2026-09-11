@@ -29,6 +29,13 @@ memory_operation_oldest_queued_seconds = Gauge(
     "memory_operation_oldest_queued_seconds",
     "最老 queued operation 的等待秒数",
 )
+#: memory-rebuild §2.6：证据池在途量。state="pending" = 全部待入批证据；
+#: state="due" = 已过最短沉淀门控、等 0 点批次认领的证据。
+memory_pending_batch_depth = Gauge(
+    "memory_pending_batch_depth",
+    "待批量入批的证据条数",
+    ["state"],
+)
 memory_operation_retry_total = Counter(
     "memory_operation_retry_total",
     "任务级重试次数",

@@ -35,7 +35,14 @@ class InMemoryOperationStore:
         self.rows: dict[UUID, dict[str, Any]] = {}
         self.manifests: dict[str, dict[str, Any]] = {}
 
-    def _row_from_operation(self, operation: MemoryOperation, payload_hash: str) -> dict[str, Any]:
+    def _row_from_operation(
+        self,
+        operation: MemoryOperation,
+        payload_hash: str,
+        *,
+        status: str = "queued",
+        next_run_at: datetime | None = None,
+    ) -> dict[str, Any]:
         now = datetime.now(UTC)
         return {
             "operation_id": operation.operation_id,
@@ -46,7 +53,7 @@ class InMemoryOperationStore:
             "idempotency_key": operation.idempotency_key,
             "idempotency_payload_hash": payload_hash,
             "priority": operation.priority,
-            "status": "queued",
+            "status": status,
             "payload": operation.payload.model_dump(mode="json"),
             "result": None,
             "public_error": None,
@@ -56,7 +63,7 @@ class InMemoryOperationStore:
             "created_at": now,
             "updated_at": now,
             "completed_at": None,
-            "next_run_at": now,
+            "next_run_at": next_run_at or now,
             "attempt_count": 0,
             "max_attempts": 6,
             "locked_by": None,
@@ -76,15 +83,25 @@ class InMemoryOperationStore:
         return None
 
     async def insert_operation(
-        self, session: Any, operation: MemoryOperation, *, idempotency_payload_hash: str
+        self,
+        session: Any,
+        operation: MemoryOperation,
+        *,
+        idempotency_payload_hash: str,
+        status: str = "queued",
+        next_run_at: datetime | None = None,
     ) -> bool:
+        """与真实仓储同签名（memory-rebuild §2.6 新增 status/next_run_at 两个可选参数）。"""
         if (
             self._find_by_key(operation.user_id, operation.actor_type, operation.idempotency_key)
             is not None
         ):
             return False
         self.rows[operation.operation_id] = self._row_from_operation(
-            operation, idempotency_payload_hash
+            operation,
+            idempotency_payload_hash,
+            status=status,
+            next_run_at=next_run_at,
         )
         return True
 

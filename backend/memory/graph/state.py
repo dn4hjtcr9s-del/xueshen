@@ -45,6 +45,25 @@ class MemoryManagerState(TypedDict, total=False):
     errors: list[dict[str, Any]]
     llm_call_count: int
     replan_count: int
+    # 批量总结分支（memory-rebuild §4.2 / §5.8 Phase 6）
+    #
+    # 批量 operation 一次运行处理该用户本批 ≤50 条证据：`batch_members` 是成员 operation
+    # 的契约字段子集，循环中 `begin_batch_member` 会把 `operation` 临时投影成**成员**
+    # operation，从而零改动复用既有 summary 节点链；`batch_operation` 保存批次自身的
+    # operation，收尾时还原（结果必须归到批次，不是最后一条成员）。
+    batch_active: bool
+    batch_operation: dict[str, Any]
+    batch_members: list[dict[str, Any]]
+    batch_index: int
+    batch_selected: dict[str, Any]
+    batch_processed: list[dict[str, Any]]
+    batch_failed: list[dict[str, Any]]
+    batch_warnings: list[str]
+    batch_llm_call_count: int
+    batch_consolidation: dict[str, Any]
+    #: 本批使用的提示词版本（§5.8 要求批量 state 保存 prompt version，便于回查"这批是
+    #: 哪版提示词产出的"；与 memory_commits.prompt_version 同源）。
+    batch_prompt_version: str
 
 
 class Clock(Protocol):

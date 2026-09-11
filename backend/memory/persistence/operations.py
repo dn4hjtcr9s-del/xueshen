@@ -1,6 +1,17 @@
 """memory_operations 仓储（规格 §13.2 / §11 / §14.2）。
 
 Gateway 与 Worker 复用同一个 claim_operation（FOR UPDATE SKIP LOCKED）。
+
+memory-rebuild §2.6 / §5.8 追加证据池批次（复用本表，不建新表）：
+
+- 证据提交时落 ``pending_batch``，``next_run_at`` 承担最短沉淀门控；
+  :func:`claim_operation` 只认 ``('queued','retry_wait')``，因此该状态对
+  Worker / Gateway 快速路径**天然不可见**，认领查询与索引都不需要改。
+- ``batch_operation_id`` 建立"成员证据 → 批次 operation"归属，**一个证据只进一个批**：
+  扫描只取 ``batch_operation_id IS NULL`` 的行，失败重试期间成员归属不变，不会被第二个
+  批次重复领走。
+- 批次终态在同一事务内回写成员状态（:func:`settle_batch_members`），保证"成员状态与
+  父批次状态一致"这一验收项不需要额外对账。
 """
 
 from __future__ import annotations
@@ -24,12 +35,12 @@ INSERT_SQL = text(
         operation_id, user_id, actor_type, input_kind, operation_type,
         idempotency_key, idempotency_payload_hash, priority, status,
         payload, result, public_error, trace_id, graph_thread_id,
-        occurred_at, max_attempts
+        occurred_at, max_attempts, next_run_at
     ) VALUES (
         :operation_id, :user_id, :actor_type, :input_kind, :operation_type,
-        :idempotency_key, :idempotency_payload_hash, :priority, 'queued',
+        :idempotency_key, :idempotency_payload_hash, :priority, :status,
         CAST(:payload AS jsonb), NULL, NULL, :trace_id, :graph_thread_id,
-        :occurred_at, :max_attempts
+        :occurred_at, :max_attempts, COALESCE(:next_run_at, now())
     )
     ON CONFLICT ON CONSTRAINT uq_memory_operation_idempotency DO NOTHING
     """
@@ -37,9 +48,19 @@ INSERT_SQL = text(
 
 
 async def insert_operation(
-    session: AsyncSession, operation: MemoryOperation, *, idempotency_payload_hash: str
+    session: AsyncSession,
+    operation: MemoryOperation,
+    *,
+    idempotency_payload_hash: str,
+    status: str = "queued",
+    next_run_at: datetime | None = None,
 ) -> bool:
-    """插入 operation；幂等冲突时返回 False（调用方应读取原 operation）。"""
+    """插入 operation；幂等冲突时返回 False（调用方应读取原 operation）。
+
+    ``status`` / ``next_run_at`` 供证据池使用（§2.6）：证据落 ``pending_batch`` 并把
+    ``next_run_at`` 设为"最短沉淀到点时刻"。两者都有与 DDL 默认值一致的缺省值，
+    既有调用方不传时行为逐字不变。
+    """
     rowcount = await exec_rowcount(
         session,
         INSERT_SQL,
@@ -57,6 +78,8 @@ async def insert_operation(
             "graph_thread_id": operation.graph_thread_id,
             "occurred_at": operation.occurred_at,
             "max_attempts": max_attempts_for_priority(operation.priority),
+            "status": status,
+            "next_run_at": next_run_at,
         },
     )
     return rowcount == 1
@@ -315,7 +338,14 @@ async def complete_operation(
             "expected_generation": expected_generation,
         },
     )
-    return rowcount == 1
+    if rowcount != 1:
+        return False
+    # memory-rebuild §2.6 状态机第 3/4 步：批次终态在同一事务内回写成员状态
+    # （succeeded→成员 succeeded；dead_letter/needs_review→成员 dead_letter；
+    # cancelled→释放成员回证据池）。非批次 operation 走这里恒为 0 行，代价是一次
+    # 命中 ix_memory_operations_batch_operation 的空扫描。
+    await settle_batch_members(session, batch_operation_id=operation_id, status=status)
+    return True
 
 
 async def reschedule_operation(
@@ -447,3 +477,220 @@ async def list_user_operations(
     )
     row = result.mappings().first()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# 证据池批次（memory-rebuild §2.6 / §5.8）
+# ---------------------------------------------------------------------------
+
+#: 证据沉淀态（§2.6 D4）：已提交但未到最短沉淀时长，等待 0 点批量入批。
+PENDING_BATCH_STATUS = "pending_batch"
+
+#: 批量 operation 类型（与 contracts/batch.py 的 BATCH_OPERATION_TYPE 同值）。
+BATCH_OPERATION_TYPE = "summarize_user_memory_batch"
+
+
+async def list_pending_batch_user_ids(
+    session: AsyncSession, *, now: datetime, limit: int
+) -> list[UUID]:
+    """列出有可入批证据的用户（按最早到点时间排序，保证多副本/续跑下顺序稳定）。
+
+    只取 ``batch_operation_id IS NULL`` 的行：已归属某个存活批次的证据不会被第二个批次
+    领走（§5.8「每条成员 evidence 只关联一个批次」）。排序键与批次内成员排序一致，
+    因此"先到点的用户先处理"是确定性的，不依赖应用内存集合。
+    """
+    result = await session.execute(
+        text(
+            """
+            SELECT user_id
+            FROM memory_operations
+            WHERE status = :status
+              AND next_run_at <= :now
+              AND batch_operation_id IS NULL
+            GROUP BY user_id
+            ORDER BY MIN(next_run_at) ASC, user_id ASC
+            LIMIT :limit
+            """
+        ),
+        {"status": PENDING_BATCH_STATUS, "now": now, "limit": limit},
+    )
+    return [UUID(str(row[0])) for row in result.all()]
+
+
+async def list_pending_batch_members(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    now: datetime,
+    limit: int,
+    after: tuple[datetime, datetime, UUID] | None = None,
+) -> list[dict[str, Any]]:
+    """按稳定序取该用户可入批的证据行（§5.8：排序键 eligible/created/operation_id）。
+
+    ``after`` 是该用户上一次批次消费到的位置（三元组），用于续跑时**严格**跳过已入批
+    的行——不用 OFFSET，避免并发插入导致的漂移。
+    """
+    params: dict[str, Any] = {
+        "status": PENDING_BATCH_STATUS,
+        "now": now,
+        "user_id": user_id,
+        "limit": limit,
+    }
+    cursor_clause = ""
+    if after is not None:
+        eligible_at, created_at, operation_id = after
+        params.update(
+            {
+                "after_eligible": eligible_at,
+                "after_created": created_at,
+                "after_operation": operation_id,
+            }
+        )
+        # 行值比较：三级排序键整体大于游标（SQL 标准行构造器，PostgreSQL 原生支持）
+        cursor_clause = (
+            "AND (next_run_at, created_at, operation_id) > "
+            "(:after_eligible, :after_created, :after_operation)"
+        )
+    result = await session.execute(
+        text(
+            f"""
+            SELECT operation_id, user_id, next_run_at, created_at
+            FROM memory_operations
+            WHERE status = :status
+              AND next_run_at <= :now
+              AND batch_operation_id IS NULL
+              AND user_id = :user_id
+              {cursor_clause}
+            ORDER BY next_run_at ASC, created_at ASC, operation_id ASC
+            LIMIT :limit
+            """
+        ),
+        params,
+    )
+    return [dict(row) for row in result.mappings().all()]
+
+
+async def assign_batch_members(
+    session: AsyncSession, *, batch_operation_id: UUID, member_operation_ids: list[UUID]
+) -> int:
+    """把成员证据归属到批次（状态保持 ``pending_batch``，§2.6 状态机第 2 步）。
+
+    带 ``batch_operation_id IS NULL AND status='pending_batch'`` 守卫：并发下另一个
+    Scheduler 实例已领走同一批证据时，这里只会写回更少的行，调用方按 rowcount 判定
+    是否真的拿到了这批（拿到 0 行说明整批被抢，应当作废刚建的批次 operation）。
+    """
+    if not member_operation_ids:
+        return 0
+    rowcount = await exec_rowcount(
+        session,
+        text(
+            """
+            UPDATE memory_operations
+            SET batch_operation_id = :batch_operation_id, updated_at = now()
+            WHERE operation_id = ANY(:ids)
+              AND status = :status
+              AND batch_operation_id IS NULL
+            """
+        ),
+        {
+            "batch_operation_id": batch_operation_id,
+            "ids": list(member_operation_ids),
+            "status": PENDING_BATCH_STATUS,
+        },
+    )
+    return rowcount
+
+
+async def settle_batch_members(
+    session: AsyncSession, *, batch_operation_id: UUID, status: str
+) -> int:
+    """批次终态回写成员（§2.6 状态机第 3/4 步），返回受影响成员数。
+
+    语义（与 ``contracts/batch.py::BATCH_MEMBER_TRANSITIONS`` 一致）：
+
+    - ``succeeded`` → 成员 ``succeeded``（同一事务，成功即成员完成）；
+    - ``dead_letter`` / ``needs_review`` → 成员 ``dead_letter``（批次进人工审，
+      成员不能再被自动重排，避免与人工结论冲突）；
+    - ``cancelled`` → **释放**成员（``status`` 仍为 ``pending_batch``、
+      ``batch_operation_id`` 置 NULL），让它回到证据池等待下一个批次；
+    - 其它（``running``/``retry_wait`` 等非终态）不动成员：批次会自行重试。
+
+    非批次 operation 调用本函数恒为 0 行（WHERE 命中不到任何成员）。
+    """
+    if status == "cancelled":
+        return await exec_rowcount(
+            session,
+            text(
+                """
+                UPDATE memory_operations
+                SET batch_operation_id = NULL, updated_at = now()
+                WHERE batch_operation_id = :batch_operation_id
+                  AND status = :status
+                """
+            ),
+            {"batch_operation_id": batch_operation_id, "status": PENDING_BATCH_STATUS},
+        )
+    member_status = {
+        "succeeded": "succeeded",
+        "dead_letter": "dead_letter",
+        "needs_review": "dead_letter",
+    }.get(status)
+    if member_status is None:
+        return 0
+    return await exec_rowcount(
+        session,
+        text(
+            """
+            UPDATE memory_operations
+            SET status = :member_status, updated_at = now()
+            WHERE batch_operation_id = :batch_operation_id
+              AND status = :status
+            """
+        ),
+        {
+            "batch_operation_id": batch_operation_id,
+            "member_status": member_status,
+            "status": PENDING_BATCH_STATUS,
+        },
+    )
+
+
+async def list_batch_member_operations(
+    session: AsyncSession, *, batch_operation_id: UUID
+) -> list[dict[str, Any]]:
+    """读取批次成员（供批量图逐条处理）；按稳定序返回，保证可重放。"""
+    result = await session.execute(
+        text(
+            """
+            SELECT *
+            FROM memory_operations
+            WHERE batch_operation_id = :batch_operation_id
+            ORDER BY next_run_at ASC, created_at ASC, operation_id ASC
+            """
+        ),
+        {"batch_operation_id": batch_operation_id},
+    )
+    return [dict(row) for row in result.mappings().all()]
+
+
+async def count_pending_batch_evidence(session: AsyncSession, *, now: datetime) -> tuple[int, int]:
+    """返回 (待入批总数, 已到点待入批数)，供 gauge 使用（§2.6）。
+
+    "已到点"= ``next_run_at <= now`` 且尚未归属任何批次——即下一次 0 点扫描真正会认领的
+    量；两者之差就是仍在沉淀窗口里的量。
+    """
+    result = await session.execute(
+        text(
+            """
+            SELECT
+                count(*) AS total,
+                count(*) FILTER (WHERE next_run_at <= :now) AS due
+            FROM memory_operations
+            WHERE status = :status
+              AND batch_operation_id IS NULL
+            """
+        ),
+        {"status": PENDING_BATCH_STATUS, "now": now},
+    )
+    row = result.mappings().one()
+    return int(row["total"]), int(row["due"])

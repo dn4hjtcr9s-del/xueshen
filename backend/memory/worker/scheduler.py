@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import signal
 from collections.abc import Callable
@@ -26,7 +27,13 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from backend.memory.contracts.commands import MaintenanceCommand
+from backend.memory import metrics
+from backend.memory.contracts.batch import (
+    BATCH_IDEMPOTENCY_KEY_TEMPLATE,
+    BATCH_OPERATION_TYPE,
+    BatchCursor,
+)
+from backend.memory.contracts.commands import MaintenanceCommand, SummarizeUserMemoryBatchCommand
 from backend.memory.contracts.common import (
     OPERATION_ROUTING,
     SYSTEM_MAINTENANCE_USER_ID,
@@ -54,6 +61,38 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _batch_cursor_tuple(value: str | None) -> tuple[datetime, datetime, UUID] | None:
+    """``memory_maintenance_runs.cursor`` → ``list_pending_batch_members`` 的 after 三元组。
+
+    游标为空表示该用户本日还没有批次（从头开始扫）。损坏的游标按契约错误上抛
+    （由 ``run_task`` 记日志），**不做静默降级**：静默从头扫会把已入批的证据重复入批。
+    """
+    if not value:
+        return None
+    cursor = BatchCursor.decode(value)
+    return (cursor.eligible_at, cursor.created_at, cursor.operation_id)
+
+
+#: 批次 operation 幂等键里的游标摘要长度（十六进制字符）。
+_BATCH_CURSOR_DIGEST_CHARS = 16
+
+
+def _batch_operation_key(*, run_key: str, cursor: str | None) -> str:
+    """批次 operation 的幂等键：同一 (run, cursor) 恒得同一键，且长度可控。
+
+    ``_ensure_graph_batch`` 的规则是 ``{run 幂等键}:{cursor or 'initial'}``，但证据池的
+    cursor 是 :class:`BatchCursor` 的 canonical JSON（150+ 字符），拼上
+    ``summarize:{user_id}:{date}`` 会超过 ``memory_operations.idempotency_key``
+    （Pydantic 与 DB 列同为 200 字符）的上限。因此这里改用游标字符串的 SHA-256 前 16 位
+    十六进制：仍是 cursor 的确定性函数（幂等语义不变），长度固定且加上 ``retry-``
+    后缀也不会越界。
+    """
+    if not cursor:
+        return f"{run_key}:initial"
+    digest = hashlib.sha256(cursor.encode("utf-8")).hexdigest()[:_BATCH_CURSOR_DIGEST_CHARS]
+    return f"{run_key}:{digest}"
+
+
 @dataclass(frozen=True)
 class SchedulerConfig:
     """§14.3 时间表与有界 batch 配置。"""
@@ -67,6 +106,15 @@ class SchedulerConfig:
     #: memory-rebuild §5.6：v1→v2 文档迁移任务的门控（默认关闭）。
     #: "实现不等批准，启用必须等批准"——关闭时任务不建 run、不产生任何调度。
     schema_v2_migration_enabled: bool = False
+    #: memory-rebuild §2.6：证据池 nightly 批量的门控与有界认领参数。
+    #: 门控关闭时 `summarize_pending_evidence` 不建 run、不查询、无任何调度副作用。
+    evidence_batch_enabled: bool = False
+    #: §2.6 D4：每日批量触发时刻（config.timezone 本地时间，是配置项而非固定 0 点）。
+    summary_daily_time: time = time(0, 0)
+    #: §2.6 D4：单批证据上限（有界认领三件套之一）。
+    batch_max_evidence: int = 50
+    #: §2.6 D4：单 run 最多处理的用户数（有界认领三件套之一）。
+    batch_max_users_per_run: int = 50
 
 
 @dataclass(frozen=True)
@@ -95,6 +143,10 @@ TASKS: tuple[ScheduledTask, ...] = (
     # 认证会话清理（方案 §4.4 / 附录 A.2 #8）：过期超过 30 天的 refresh family
     ScheduledTask("cleanup_expired_refresh_families", daily_at=time(4, 30)),
     ScheduledTask("check_backup_runs", daily_at=time(5, 0)),
+    # memory-rebuild §2.6 Phase 6：0 点把门控到点的 pending_batch 证据按用户聚合成
+    # 批量 operation。门控 memory_batch_enabled（默认 false）；这里的 daily_at 只是
+    # **声明式默认值**，真实触发时刻取 config.summary_daily_time（见 _daily_at_for）。
+    ScheduledTask("summarize_pending_evidence", daily_at=time(0, 0)),
 )
 
 
@@ -173,8 +225,7 @@ class Scheduler:
                     seconds=self.config.continuation_seconds
                 )
             else:
-                assert task.daily_at is not None
-                self._next_due[task.name] = self._next_daily(now, task.daily_at)
+                self._next_due[task.name] = self._next_daily(now, self._daily_at_for(task))
             ran.append(task.name)
         return ran
 
@@ -185,8 +236,20 @@ class Scheduler:
             if task.interval_seconds is not None:
                 self._next_due[task.name] = now  # 间隔任务启动即到期
             else:
-                assert task.daily_at is not None
-                self._next_due[task.name] = self._next_daily(now, task.daily_at)
+                self._next_due[task.name] = self._next_daily(now, self._daily_at_for(task))
+
+    def _daily_at_for(self, task: ScheduledTask) -> time:
+        """日任务的真实触发时刻。
+
+        ``TASKS`` 只是声明表：``summarize_pending_evidence`` 的触发时刻是**配置项**
+        （``memory_summary_daily_time``，§2.6 D4 参数化），TASKS 里的 ``time(0, 0)``
+        只是声明式默认值。因此这里按任务名收敛到 config，避免"配置改了但调度仍按
+        静态时间触发"。
+        """
+        if task.name == "summarize_pending_evidence":
+            return self.config.summary_daily_time
+        assert task.daily_at is not None
+        return task.daily_at
 
     def _next_daily(self, now: datetime, at: time) -> datetime:
         tz = ZoneInfo(self.config.timezone)
@@ -263,6 +326,11 @@ class Scheduler:
     async def _task_check_dead_letters(self, now: datetime) -> bool:
         async with self.session_factory() as session:
             counts = await maintenance_repo.count_dead_letters(session)
+            # memory-rebuild §2.6「metrics 增加 pending_batch 在途 gauge」：搭在既有的
+            # 5 分钟监控 tick 上刷新，**不新增 TASKS 项**（§14.3 的任务表保持不变）。
+            total, due = await ops_repo.count_pending_batch_evidence(session, now=now)
+        metrics.memory_pending_batch_depth.labels(state="pending").set(total)
+        metrics.memory_pending_batch_depth.labels(state="due").set(due)
         if counts["operations"] or counts["outbox"]:
             self.logger.error(
                 "告警：dead letter 指标非零：operations=%d, outbox=%d",
@@ -469,6 +537,179 @@ class Scheduler:
                 )
         return outcome != "done"
 
+    async def _task_summarize_pending_evidence(self, now: datetime) -> bool:
+        """0 点把门控到点的证据按用户聚合成批量 operation（memory-rebuild §2.6 / §5.8）。
+
+        状态机第 2 步：扫 ``status='pending_batch' AND next_run_at <= now()`` 的证据，
+        按 user_id 分组，每用户生成一个 ``summarize_user_memory_batch`` 批量 operation，
+        成员行写 ``batch_operation_id`` 建立归属。幂等键 ``summarize:{user_id}:{date}``
+        落在 memory_maintenance_runs 上——同一用户当天只有一个 run，跑不完的批次靠
+        run.cursor 续跑（``list_pending_batch_members(after=...)`` 行值比较，不用 OFFSET）。
+
+        **门控**：``memory_batch_enabled`` 关闭时立即返回，不建 run、不查询、不产生任何
+        调度副作用（与 ``_task_migrate_markdown_schema_v2`` 同构）。
+
+        返回值沿用日任务约定：True 表示 run 还有待续批次，按 continuation 间隔继续调度。
+        """
+        if not self.config.evidence_batch_enabled:
+            return False
+        date = self._local_date(now)
+        has_more = False
+        async with self.session_factory() as session:
+            async with session.begin():
+                user_ids = await ops_repo.list_pending_batch_user_ids(
+                    session, now=now, limit=self.config.batch_max_users_per_run
+                )
+                for user_id in user_ids:
+                    user_has_more = await self._summarize_user_batch(
+                        session, user_id=user_id, date=date, now=now
+                    )
+                    has_more = has_more or user_has_more
+        return has_more
+
+    async def _summarize_user_batch(
+        self, session: AsyncSession, *, user_id: UUID, date: str, now: datetime
+    ) -> bool:
+        """单个用户的一轮入批；返回该用户的 run 是否还有待续批次。
+
+        判定复用 ``_resolve_run_batch_state``（与 ``_ensure_graph_batch`` 同源）：
+        run 已终结 → 无待续；在途批次 → 待续；上一批已成功 → 用 run.cursor 续排下一批。
+        """
+        run, _created = await maintenance_repo.create_or_reuse_run(
+            session,
+            run_id=uuid4(),
+            maintenance_type="summarize_pending_evidence",
+            idempotency_key=BATCH_IDEMPOTENCY_KEY_TEMPLATE.format(user_id=user_id, date=date),
+        )
+        state = await self._resolve_run_batch_state(session, run)
+        if state == "done":
+            return False
+        if state == "waiting":
+            return True
+        members = await ops_repo.list_pending_batch_members(
+            session,
+            user_id=user_id,
+            now=now,
+            limit=self.config.batch_max_evidence,
+            after=_batch_cursor_tuple(run["cursor"]),
+        )
+        if not members:
+            # 并发实例可能在本事务读到 run 之后刚建批次并领走成员（advisory lock 之外的
+            # 防御，§5.8"多副本下同一 evidence 只被一个批次 claim"）：重读一次 run，
+            # 确认确实没有在途 operation 才把 run 收尾，避免把别人的在途批次判成"无证据"。
+            refreshed = await maintenance_repo.get_run_by_key(
+                session, idempotency_key=run["idempotency_key"]
+            )
+            if refreshed is not None and refreshed["operation_id"] is not None:
+                op = await ops_repo.get_operation(session, refreshed["operation_id"])
+                if op is not None and op["status"] not in TERMINAL_STATUSES:
+                    return True
+            await maintenance_repo.complete_run(
+                session,
+                run_id=run["run_id"],
+                status="succeeded",
+                cursor=run["cursor"],
+                result={"reason": "no_pending_evidence"},
+            )
+            return False
+        member_ids = [UUID(str(row["operation_id"])) for row in members]
+        batch_operation_id = await self._create_batch_operation(
+            session, run=run, user_id=user_id, member_ids=member_ids
+        )
+        if batch_operation_id is None:
+            # 没有真正落地新批次（并发实例抢先建了同 cursor 批次，或整批成员被抢走）：
+            # 不推进 cursor、不挂 run——证据归属已由对方批次负责，下一轮再续。
+            return False
+        last = members[-1]
+        cursor = BatchCursor(
+            eligible_at=last["next_run_at"],
+            created_at=last["created_at"],
+            operation_id=UUID(str(last["operation_id"])),
+        ).encode()
+        # run 的状态与游标由本任务独占维护：批量图不回写 memory_maintenance_runs
+        # （成员归属与批次结果都在 operation 上），因此这里用维护任务的既有语义把 run
+        # 置 running + cursor 待续；下一轮若该 operation 已成功即据此排下一批。
+        await maintenance_repo.update_run_by_operation(
+            session,
+            operation_id=batch_operation_id,
+            status="running",
+            cursor=cursor,
+            result={"scheduled_members": len(member_ids)},
+        )
+        return True
+
+    async def _create_batch_operation(
+        self,
+        session: AsyncSession,
+        *,
+        run: dict[str, Any],
+        user_id: UUID,
+        member_ids: list[UUID],
+    ) -> UUID | None:
+        """建批次 operation 并把成员证据归属到它（§2.6 状态机第 2 步）。
+
+        幂等键沿用 ``_ensure_graph_batch`` 的形状（``{run 幂等键}:{游标判别式}``，见
+        :func:`_batch_operation_key`）：同一 run 的同一 cursor 只对应一个批次；该键上的
+        上一批已终结时换 ``retry-`` 后缀，避免复用已终结的 operation。
+
+        批次自身是 ``queued``（可被 Worker 正常认领的任务），``pending_batch`` 只是成员
+        证据的沉淀态。返回 None 表示没有新批次落地：已有在途批次，或成员被并发批次整批
+        抢走（此时把刚建的 operation 取消，且**不**挂到 run 上——挂上去会让
+        ``_resolve_run_batch_state`` 把 run 误判为 failed，断掉该用户当天的续跑）。
+        """
+        base_key = _batch_operation_key(run_key=run["idempotency_key"], cursor=run["cursor"])
+        existing = await ops_repo.get_by_idempotency(
+            session, user_id=user_id, actor_type="system", idempotency_key=base_key
+        )
+        if existing is not None and existing["status"] not in TERMINAL_STATUSES:
+            if run["operation_id"] is None:
+                # 与 _ensure_graph_batch 一致：并发实例已建批次，这里只补挂 run 关联
+                await maintenance_repo.attach_operation(
+                    session, run_id=run["run_id"], operation_id=existing["operation_id"]
+                )
+            return None
+        key = base_key if existing is None else f"{base_key}:retry-{uuid4().hex[:8]}"
+        batch_operation_id = uuid4()
+        payload = SummarizeUserMemoryBatchCommand(
+            target_user_id=user_id,
+            batch_operation_id=batch_operation_id,
+            member_operation_ids=member_ids,
+            max_evidence=self.config.batch_max_evidence,
+        )
+        input_kind, priority = OPERATION_ROUTING[BATCH_OPERATION_TYPE]
+        operation = MemoryOperation(
+            operation_id=batch_operation_id,
+            idempotency_key=key,
+            user_id=user_id,
+            actor_type="system",
+            input_kind=input_kind,
+            operation_type=payload.kind,
+            priority=priority,
+            occurred_at=self.clock(),
+            payload=payload,
+            trace_id=new_trace_id(),
+            graph_thread_id=thread_id_for_operation(batch_operation_id),
+        )
+        inserted = await ops_repo.insert_operation(
+            session,
+            operation,
+            idempotency_payload_hash=idempotency_payload_hash(payload.model_dump(mode="json")),
+        )
+        if not inserted:
+            # 并发实例抢先用同一幂等键建了批次：本实例让位，成员归属由它负责
+            return None
+        assigned = await ops_repo.assign_batch_members(
+            session, batch_operation_id=batch_operation_id, member_operation_ids=member_ids
+        )
+        if assigned == 0:
+            # 整批成员已被并发批次的其它幂等键领走：作废刚建的 operation
+            await ops_repo.request_cancel(session, operation_id=batch_operation_id)
+            return None
+        await maintenance_repo.attach_operation(
+            session, run_id=run["run_id"], operation_id=batch_operation_id
+        )
+        return batch_operation_id
+
     async def _task_purge_notifications(self, now: datetime) -> bool:
         """清理超过 90 天的用户通知（§13.13）；不进入 Graph，run 由 Scheduler 直接收尾。"""
         date = self._local_date(now)
@@ -556,6 +797,48 @@ class Scheduler:
     # Graph batch 调度（§14.3）
     # ------------------------------------------------------------------
 
+    async def _resolve_run_batch_state(
+        self, session: AsyncSession, run: dict[str, Any]
+    ) -> Literal["continue", "waiting", "done"]:
+        """判断 run 当前能否再调度一个 Graph batch（§14.3）。
+
+        ``_ensure_graph_batch`` 与证据池批量任务共用这段判定，避免两处语义漂移：
+
+        - run 已 ``succeeded``/``failed`` → ``done``；
+        - 关联 operation 在途 → ``waiting``；
+        - operation 已终结但不是成功（含行丢失）→ 把 run 收尾为 ``failed`` → ``done``；
+        - operation 成功但 run 仍 ``queued``（graph 未回写，异常路径）→ 同样按失败收尾；
+        - 上一批成功且 cursor 待续 → ``continue``。
+        """
+        if run["status"] in ("succeeded", "failed"):
+            return "done"
+        if run["operation_id"] is None:
+            return "continue"
+        op = await ops_repo.get_operation(session, run["operation_id"])
+        if op is not None and op["status"] not in TERMINAL_STATUSES:
+            return "waiting"
+        if op is None or op["status"] != "succeeded":
+            await maintenance_repo.complete_run(
+                session,
+                run_id=run["run_id"],
+                status="failed",
+                cursor=run["cursor"],
+                result={"operation_status": op["status"] if op else "missing"},
+            )
+            return "done"
+        if run["status"] == "queued":
+            # operation 成功但 graph 未回写 run（异常路径）：按失败收尾，避免静默卡住
+            await maintenance_repo.complete_run(
+                session,
+                run_id=run["run_id"],
+                status="failed",
+                cursor=run["cursor"],
+                result={"reason": "operation_succeeded_without_run_update"},
+            )
+            return "done"
+        # run['status'] == 'running'：上一批完成且 cursor 待续，落到下方调度下一批
+        return "continue"
+
     async def _ensure_graph_batch(
         self,
         session: AsyncSession,
@@ -566,32 +849,11 @@ class Scheduler:
         payload_factory: Callable[[str | None], MaintenanceCommand],
     ) -> Literal["scheduled", "waiting", "done"]:
         """推进 run 的一个 Graph batch；只有进入 Graph 的 batch 才创建 operation。"""
-        if run["status"] in ("succeeded", "failed"):
+        state = await self._resolve_run_batch_state(session, run)
+        if state == "done":
             return "done"
-        if run["operation_id"] is not None:
-            op = await ops_repo.get_operation(session, run["operation_id"])
-            if op is not None and op["status"] not in TERMINAL_STATUSES:
-                return "waiting"
-            if op is None or op["status"] != "succeeded":
-                await maintenance_repo.complete_run(
-                    session,
-                    run_id=run["run_id"],
-                    status="failed",
-                    cursor=run["cursor"],
-                    result={"operation_status": op["status"] if op else "missing"},
-                )
-                return "done"
-            if run["status"] == "queued":
-                # operation 成功但 graph 未回写 run（异常路径）：按失败收尾，避免静默卡住
-                await maintenance_repo.complete_run(
-                    session,
-                    run_id=run["run_id"],
-                    status="failed",
-                    cursor=run["cursor"],
-                    result={"reason": "operation_succeeded_without_run_update"},
-                )
-                return "done"
-            # run['status'] == 'running'：上一批完成且 cursor 待续，落到下方调度下一批
+        if state == "waiting":
+            return "waiting"
         cursor = run["cursor"]
         payload = payload_factory(cursor)
         base_key = f"{run['idempotency_key']}:{cursor or 'initial'}"
@@ -632,6 +894,27 @@ class Scheduler:
         return "scheduled"
 
 
+def _config_from_settings() -> SchedulerConfig:
+    """从 Settings（环境变量 / .env）构造 SchedulerConfig。
+
+    §2.6 D4 的批量参数与门控是配置项，不能写死在代码里；未在 settings 暴露的调度细项
+    （tick_seconds / batch_size / continuation_seconds）沿用 dataclass 默认值。
+    """
+    from backend.settings import get_settings
+
+    settings = get_settings()
+    return SchedulerConfig(
+        timezone=settings.memory_scheduler_timezone,
+        notification_retention_days=settings.memory_notification_retention_days,
+        schema_v2_migration_enabled=settings.memory_schema_v2_migration_enabled,
+        # memory-rebuild §2.6 / §5.8：证据池 nightly 批量的门控与有界认领参数
+        evidence_batch_enabled=settings.memory_batch_enabled,
+        summary_daily_time=settings.memory_summary_daily_time,
+        batch_max_evidence=settings.memory_summary_batch_max_evidence,
+        batch_max_users_per_run=settings.memory_summary_max_users_per_run,
+    )
+
+
 async def _run() -> None:
     from backend.memory.persistence.database import Database
     from backend.settings import get_settings
@@ -647,11 +930,7 @@ async def _run() -> None:
     try:
         scheduler = Scheduler(
             session_factory=db.session_factory,
-            config=SchedulerConfig(
-                timezone=settings.memory_scheduler_timezone,
-                notification_retention_days=settings.memory_notification_retention_days,
-                schema_v2_migration_enabled=settings.memory_schema_v2_migration_enabled,
-            ),
+            config=_config_from_settings(),
             maintenance_gate=maintenance_gate,
             auth_session_factory=auth_db.session_factory,
         )

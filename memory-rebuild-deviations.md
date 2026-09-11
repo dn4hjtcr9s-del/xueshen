@@ -824,7 +824,192 @@ graph thread 是 `conv-turn:{turn_id}`（**每轮一个 thread**），checkpoint
 
 ## Phase 6：`pending_batch` 与 nightly batch
 
-（未开始）
+### ADD-063 批量 operation 的 payload 形状（文档未给）
+
+§2.6 只说"payload 携带该用户本批全部证据引用"，没给字段名。实现为
+`contracts/commands.py::SummarizeUserMemoryBatchCommand`：
+
+```python
+kind: Literal["summarize_user_memory_batch"]
+target_user_id: UUID
+batch_operation_id: UUID
+member_operation_ids: list[UUID]   # 本次入批的成员（1..1000）
+max_evidence: int = 50
+```
+
+**不放证据正文**：正文由 Reader 按成员 operation 读回，避免把对话原文塞进队列行
+（与 §1.5「大对象放引用」同一条纪律）。`member_operation_ids` 与 DB 的
+`batch_operation_id` 归属**互为交叉校验**：图以 DB 归属为准加载成员，payload 声明用于
+发现"归属被外部改过"，不一致时记警告而不是静默少处理。
+
+### ADD-064 批量图复用 summary 链的机制：临时把 `state["operation"]` 投影成成员
+
+§4.2 要求"节点复用现有实现"，但没说怎么复用。实现方式是 `batch.begin_batch_member`
+把 `state["operation"]` **临时替换成成员自己的 operation**，于是
+`load_source_refs → … → commit_summary_memories` 一行不改地按成员粒度工作：
+
+- `Reader` 读的是成员 payload 的 `thread_id/message_ids`；
+- `commit_plans(operation_id=成员)` 让 mutation 重放键与 `memory_commits.operation_id`
+  **天然绑定到该条证据**；
+- 循环结束由 `finalize_batch_result` 把 `operation` 还原成批次自身，结果归到批次。
+
+这是"不改既有节点"与"成员级幂等绑定"两个要求的唯一交点，因此刻意选择它而不是给每个
+summary 节点加"当前成员"参数。
+
+### DEV-017 成员状态回写放在 `complete_operation`，不在图的 finalize
+
+§2.6 状态机第 3 步要求"批量 op `succeeded` → **同一事务**把成员 evidence 置 succeeded"。
+图节点无法保证与 operation 终态写回同事务（图结束后 Worker 才写终态），因此实现放在
+`persistence/operations.py::complete_operation`：终态 CAS 成功后立即调用
+`settle_batch_members()`。非批次 operation 走这条路径恒为 0 行（命中
+`ix_memory_operations_batch_operation` 的空扫描），既有语义与性能不变。
+
+### ADD-065 成员重跑幂等靠 `memory_commits.operation_id` 探测（既有 mutation_id 是随机 UUID）
+
+§5.8 要求"每个 evidence commit 必须幂等；重复运行时通过 operation/evidence/version 绑定
+避免重复写同一事实"。但既有实现的 `mutation_id` 是
+`ctx.id_generator.new_uuid()`（**随机**，见 `graph/summary.py::prepare_commit_mutation_plans`），
+真正的绑定关系由 `memory_commits.operation_id` 提供（表上已有
+`ix_memory_commits_operation`）。
+
+因此批量循环在进入成员前先查"该成员 operation 是否已有提交记录"，有则记
+`skipped_already_committed` 并跳过。**只认"写过东西"的成员**：零提交的成员（无候选 /
+全是审核候选）重跑代价只是再抽取一次，而误判为"已处理"会永久丢掉这条证据的信息。
+
+**残留风险（已知）**：零提交但产出审核候选的成员，在 checkpoint 被清理后整批重跑时
+可能重复插入审核候选。checkpoint 正常恢复（§4.1 的主路径）不会走到这里。
+
+### ADD-066 成员终态映射：`needs_review → dead_letter`、`cancelled → 释放`
+
+§2.6 只规定了两条：批次 succeeded → 成员 succeeded；批次 dead_letter → 成员 dead_letter。
+另外两个终态需要补语义，否则成员会被永久卡住：
+
+| 批次终态 | 成员处理 | 理由 |
+|---|---|---|
+| `needs_review` | 成员 `dead_letter` | 批次进人工审，成员不能再被自动重排（否则会与人工结论冲突）；`contracts/batch.py::BatchMemberStatus` 也只允许 pending_batch/succeeded/dead_letter 三态 |
+| `cancelled` | **释放**（状态仍 `pending_batch`、归属置 NULL） | 取消不是"处理完了"，证据应当回到池子里等下一个批次；不释放就永远沉底 |
+
+### ADD-067 批次诊断信息只能以 `warnings` 文本承载
+
+`MemoryOperationResult` 是 `extra="forbid"` 的公开契约，没有自由字段；批次的结构化诊断
+（成员 outcome、失败成员、LLM 调用数、consolidation 状态、prompt version）放在图的
+`commit_result["batch"]` 里，但 `manager.normalize_result` 不会把它带进公开 result。
+因此**运维可见的部分**通过 `warnings` 承载（去重 + 上限 50 条，超限折叠成一行），
+per-member 真相由成员自己的 operation 状态（succeeded/dead_letter）承担。
+
+若要让批次诊断成为结构化回执，需要扩展 `MemoryOperationResult`（公开契约 + OpenAPI
+快照），属独立决策。
+
+### ADD-068 consolidation 入口在 Phase 6 只交付**入口**
+
+§5.8 的批量图结构末尾是"consolidation 入口"，末段三件事（重写 `memory_summary.md`、
+悬空链接/aliases/近义主题治理、批内冲突裁决）属 §5.9 Phase 7。实现：
+`batch.enter_batch_consolidation` —— flag 关闭时记 `{"status": "disabled"}`；flag **开启**
+但实现未落地时记 `{"status": "not_implemented", "deferred_to": "Phase 7"}` + 警告 +
+`consolidation_not_implemented` 标记，**不静默假装做过**。
+
+### ADD-069 批量循环的递归上限核算（结论：无需调高）
+
+LangGraph 的 `recursion_limit` 默认 **10007**（实测
+`langgraph._internal._config.DEFAULT_RECURSION_LIMIT`）。单成员走
+`begin_batch_member → 12 个 summary 节点 → finalize → record_batch_member` 约 14 个
+superstep，50 成员 ≈ 700，远低于默认上限，因此不需要为批量 operation 调高
+`recursion_limit`，也不需要在图内分批 commit（与 §4.5-① 的决议一致）。
+
+### ADD-070 `insert_operation` 新增两个可选参数，默认值与 DDL 一致
+
+`status`（默认 `'queued'`）与 `next_run_at`（默认 `now()`）——与 0001 迁移里
+`status` 的 CHECK 默认和 `next_run_at DEFAULT now()` 一致，因此既有调用方不传时行为
+逐字不变。测试侧的 `InMemoryOperationStore` 同步扩展了签名（否则 16 个 API 单测会因
+`unexpected keyword argument` 全红）。
+
+### ADD-071 门控时间逻辑收敛到 `contracts/batch.py`，提交侧与调度侧共用
+
+§2.6 D4 的"最短沉淀时长"与"每日 0 点"分别落在
+`evidence_gate(submitted_at, trigger, min_age_hours, daily_time, timezone)` 与
+`next_daily_gate(now, daily_time, timezone)`。放在**契约模块**（纯函数、无 IO）而不是
+Scheduler 里，理由是提交侧（`api/dependencies.py`）也要算同一个门控：两处各写一套时间
+逻辑必然漂移。Scheduler 的 `_next_daily` 与本函数同源。
+
+### DEV-018 批次 operation 的幂等键**放不下游标**（200 字符硬上限）
+
+§5.8 没规定批次 operation 的幂等键形状。照既有 `_ensure_graph_batch` 的惯例
+（`{run 幂等键}:{cursor or 'initial'}`）实现时，集成测试真实报错：
+
+```
+pydantic_core.ValidationError: 1 validation error for MemoryOperation
+idempotency_key: String should have at most 200 characters
+```
+
+原因是两侧都太长：`BatchCursor.encode()` 是 canonical JSON ≈160 字符，
+`summarize:{user_id}:{date}` ≈56 字符，拼起来 ≈230 > 200（Pydantic 与 DB 列
+`varchar(200)` 同为 200）。**这是 Phase 0 定型 `BatchCursor` 时没有发现的约束冲突。**
+
+处置：幂等键改用游标字符串的 **SHA-256 前 16 位十六进制**：
+首批 `summarize:{user_id}:{date}:initial`，后续 `...:{digest}`，重排再加
+`:retry-xxxxxxxx`。仍然是游标的确定性函数（幂等语义不变），长度固定且留有余量。
+
+### DEV-019 批次 run 必须由 Scheduler 置 `running`，否则下一 tick 会把 run 误判失败
+
+`memory_maintenance_runs` 的既有判定（`_ensure_graph_batch` 的 `operation_succeeded_
+without_run_update` 分支）要求"operation 成功时 run 必须已是 running"。批量图不回写
+maintenance_runs（成员归属与批次结果都在 operation 上），因此如果入批时只推进 cursor、
+把 run 留在 `queued`，那么**第一批成功后的下一个 tick 会把该 run 标成 failed**，该用户
+当天剩余证据全部作废。
+
+处置：入批成功后用既有 `maintenance_repo.update_run_by_operation(status="running",
+cursor=BatchCursor(最后一条成员))`。
+
+### OPEN-011 正常路径下批次 run 不会走到 `succeeded`（残留 running 行）
+
+`complete_run(status="succeeded", reason="no_pending_evidence")` 只在"用户出现在
+`list_pending_batch_user_ids` 但 `list_pending_batch_members` 为空"时可达，而两个查询
+的谓词相同（`status='pending_batch' AND next_run_at<=now AND batch_operation_id IS NULL`）
+——证据被消费完后用户就不再出现在扫描结果里，因此该分支现实中只在并发窗口/取消释放时
+发生。后果：
+
+- `memory_maintenance_runs` 按天累积 `running` 残留行（每用户每天一行，上限即
+  `memory_summary_max_users_per_run`），监控上"running run 数"会失真；
+- `_resolve_run_batch_state` 的"run succeeded → done"分支在生产中近似死代码。
+
+**未擅自扩大范围修**。可选修法（待用户裁决）：加一个**收尾 sweep**——把当天
+`summarize_pending_evidence` 且批次 operation 已 succeeded、该用户已无未归属且到点证据的
+run 置 succeeded（需要在 `persistence/maintenance.py` 加一个按
+`maintenance_type + 日期前缀 + status` 列 run 的查询）。注意**不能**在批次 operation
+完成时直接关 run：>50 条积压的用户需要靠 run.cursor 续跑第二批，提前关 run 会让剩余证据
+等到第二天。
+
+### ADD-073 批次指标搭在既有 5 分钟监控 tick 上，不新增 TASKS 项
+
+§2.6「实施影响面」要求"metrics 增加 pending_batch 在途 gauge"。实现为
+`metrics.memory_pending_batch_depth{state="pending"|"due"}`，并在既有
+`_task_check_dead_letters`（每 300s）里刷新——**没有**为此新增 `TASKS` 项，理由是
+§14.3 的任务表是文档化契约，为一个 gauge 加一行会改变运维视角下的调度表；搭在监控 tick
+上语义也自洽（该 tick 本来就是指标/告警用途）。
+
+### ADD-074 `_config_from_settings()` 是本次新建的（文档与本 brief 都假设它已存在）
+
+Scheduler 的 `_run()` 原本内联构造 `SchedulerConfig`（只传 3 个字段），并没有
+`_config_from_settings()`。新增该函数并把 `_run()` 切过去；`tick_seconds` /
+`batch_size` / `continuation_seconds` 在 settings 里没有对应项，保持 dataclass 默认值
+（行为不变）。
+
+### ADD-075 `_ensure_graph_batch` 的 run 判定被抽成 `_resolve_run_batch_state`
+
+为了让"0 点批量"与既有维护任务用**同一套** run 状态判定（避免两处漂移），把
+`_ensure_graph_batch` 头部的判定逻辑抽成 `_resolve_run_batch_state`，两处共用。既有
+`tests/unit/test_scheduler.py` 与 `tests/integration/` 的维护任务测试全部保持通过。
+
+### ADD-076 `.env.example` 补 `MEMORY_BATCH_ENABLED`
+
+Phase 0 按 §5.2-B 的配置表往 `.env.example` 写了 5 个 §2.6 D4 参数，**漏了
+`MEMORY_BATCH_ENABLED` 本身**（settings.py 里有、示例文件里没有）。本次补齐。
+
+### ADD-072 幂等命中时只允许把门控**提前**
+
+§5.8 说"已存在同一 evidence 幂等键时只更新必要的门控字段"。实现为：仅当既有行仍是
+`pending_batch` 且新门控**早于**现有 `next_run_at` 时才更新（`WHERE next_run_at > :new`）。
+不允许推后——重放会把已到点的证据又推回未到点状态，等于用重试拖延处理。
 
 ---
 

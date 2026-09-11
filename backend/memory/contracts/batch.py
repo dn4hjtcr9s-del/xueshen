@@ -19,9 +19,10 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from typing import Any, Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -61,6 +62,45 @@ BATCH_MEMBER_TRANSITIONS: dict[str, frozenset[str]] = {
     "succeeded": frozenset({"succeeded"}),
     "dead_letter": frozenset({"dead_letter"}),
 }
+
+
+#: 触发"下一个 0 点"豁免的 evidence trigger（§2.6 D5：用户显式记住不受沉淀时长约束）。
+EXEMPT_TRIGGERS: frozenset[str] = frozenset({"explicit_remember"})
+
+
+def next_daily_gate(now: datetime, *, daily_time: time, timezone: str) -> datetime:
+    """``daily_time``（``timezone`` 本地时间）的下一次出现，返回 UTC 时刻。
+
+    恰好等于当前时刻时取**次日**——门控必须是"未来"，否则刚提交的证据会在同一秒入批，
+    "固定 0 点批量"的语义就没了。Scheduler 的 ``_next_daily`` 与本函数同源，
+    避免"提交侧算的门控"和"调度侧算的触发点"用两套时间逻辑。
+    """
+    tz = ZoneInfo(timezone)
+    local = now.astimezone(tz)
+    candidate = local.replace(
+        hour=daily_time.hour, minute=daily_time.minute, second=0, microsecond=0
+    )
+    if candidate <= local:
+        candidate += timedelta(days=1)
+    return candidate.astimezone(UTC)
+
+
+def evidence_gate(
+    *,
+    now: datetime,
+    trigger: str,
+    min_age_hours: int,
+    daily_time: time,
+    timezone: str,
+) -> datetime:
+    """证据的最早可入批时刻（§2.6 状态机第 1 步）。
+
+    - 普通证据：``submitted_at + min_age_hours``（最短沉淀时长，D4 参数化）；
+    - ``explicit_remember``（D5 豁免）：下一个 0 点，不受沉淀时长约束。
+    """
+    if trigger in EXEMPT_TRIGGERS:
+        return next_daily_gate(now, daily_time=daily_time, timezone=timezone)
+    return now + timedelta(hours=max(min_age_hours, 0))
 
 
 class BatchContractError(ValueError):

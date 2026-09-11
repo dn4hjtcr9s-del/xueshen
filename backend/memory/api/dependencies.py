@@ -18,6 +18,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import Depends, Request
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.auth.context import AuthContext
@@ -204,6 +205,9 @@ async def submit_operation(
 
     kind = payload.kind
     input_kind, priority = OPERATION_ROUTING[kind]
+    # memory-rebuild §2.6：批量门控开启时，证据落 pending_batch 并设置最早可入批时刻。
+    # 关闭时返回 ('queued', None)，逐条路径与本改造前逐字一致。
+    evidence_status, evidence_next_run_at = _evidence_batch_gate(runtime, payload, kind=kind)
     operation_id = uuid4()
     operation = MemoryOperation(
         operation_id=operation_id,
@@ -228,7 +232,11 @@ async def submit_operation(
             if await deletion_repo.get_manifest_by_user_hash(session, user_hash=user_hash):
                 raise AccountPurgeInProgressError("账号删除进行中，已阻止新 operation")
             inserted = await ops_repo.insert_operation(
-                session, operation, idempotency_payload_hash=payload_hash
+                session,
+                operation,
+                idempotency_payload_hash=payload_hash,
+                status=evidence_status,
+                next_run_at=evidence_next_run_at,
             )
             if not inserted:
                 existing = await ops_repo.get_by_idempotency(
@@ -241,6 +249,15 @@ async def submit_operation(
                     raise DatabaseUnavailableError("幂等冲突后未能读取原 operation")
                 if existing["idempotency_payload_hash"] != payload_hash:
                     raise IdempotencyKeyReusedError("同一幂等键提交了不同的 payload")
+                # §5.8"已存在同一 evidence 幂等键时只更新必要的门控字段"：
+                # 只允许把门控**提前**（例如同一证据先按 6 小时沉淀提交、随后又被
+                # explicit_remember 引用），绝不允许推后，否则重放会把已到点的证据
+                # 又推回未到点状态。
+                await _tighten_pending_batch_gate(
+                    session,
+                    existing=existing,
+                    next_run_at=evidence_next_run_at,
+                )
                 return existing
     metrics.memory_operations_total.labels(type=kind, status="queued").inc()
     if priority >= PRIORITY_P1:
@@ -250,6 +267,64 @@ async def submit_operation(
     if row is None:  # pragma: no cover - 刚插入的行必存在
         raise DatabaseUnavailableError("operation 创建后读取失败")
     return row
+
+
+def _evidence_batch_gate(
+    runtime: ApiRuntime, payload: MemoryPayload, *, kind: str
+) -> tuple[str, datetime | None]:
+    """证据池门控（memory-rebuild §2.6 状态机第 1 步）。
+
+    返回 ``(status, next_run_at)``：
+
+    - ``memory_batch_enabled`` 关闭 → ``('queued', None)``，走既有逐条路径；
+    - 非证据类 payload（命令 / 维护 / 投影）→ 同上，批量只作用于证据；
+    - 证据 → ``('pending_batch', evidence_gate(...))``：普通证据按
+      ``memory_evidence_min_age_hours`` 沉淀，``explicit_remember`` 豁免到下一个 0 点（D5）。
+    """
+    from backend.memory.contracts.batch import evidence_gate
+
+    settings = runtime.settings
+    if not settings.memory_batch_enabled:
+        return "queued", None
+    if kind not in ("conversation_evidence", "activity_evidence"):
+        return "queued", None
+    now = datetime.now(UTC)
+    trigger = str(getattr(payload, "trigger", "") or "")
+    gate = evidence_gate(
+        now=now,
+        trigger=trigger,
+        min_age_hours=settings.memory_evidence_min_age_hours,
+        daily_time=settings.memory_summary_daily_time,
+        timezone=settings.memory_scheduler_timezone,
+    )
+    return "pending_batch", gate
+
+
+async def _tighten_pending_batch_gate(
+    session: AsyncSession, *, existing: dict[str, Any], next_run_at: datetime | None
+) -> None:
+    """幂等命中时把 ``pending_batch`` 的门控提前（只提前、不推后）。
+
+    非 ``pending_batch`` 行（已入批 / 已终态）一律不动：批次归属与终态不受重放影响。
+    """
+    if next_run_at is None or existing.get("status") != ops_repo.PENDING_BATCH_STATUS:
+        return
+    await session.execute(
+        text(
+            """
+            UPDATE memory_operations
+            SET next_run_at = :next_run_at, updated_at = now()
+            WHERE operation_id = :operation_id
+              AND status = :status
+              AND next_run_at > :next_run_at
+            """
+        ),
+        {
+            "next_run_at": next_run_at,
+            "operation_id": existing["operation_id"],
+            "status": ops_repo.PENDING_BATCH_STATUS,
+        },
+    )
 
 
 async def _try_fast_path(runtime: ApiRuntime, operation_id: UUID) -> None:

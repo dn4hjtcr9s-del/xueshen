@@ -21,6 +21,7 @@ from backend.memory.contracts.operations import (
 )
 from backend.memory.graph import (
     activity_exposure,
+    batch,
     maintenance,
     manager,
     memory_command,
@@ -76,6 +77,13 @@ def build_memory_manager_graph(
     builder.add_node("upsert_graph_node_activity", activity_exposure.upsert_graph_node_activity)
     builder.add_node("return_no_change", activity_exposure.return_no_change)
 
+    # 批量总结分支（§4.2 / §5.8）：复用 summary 链逐条处理成员，再进 consolidation 入口
+    builder.add_node("load_batch_members", batch.load_batch_members)
+    builder.add_node("begin_batch_member", batch.begin_batch_member)
+    builder.add_node("record_batch_member", batch.record_batch_member)
+    builder.add_node("enter_batch_consolidation", batch.enter_batch_consolidation)
+    builder.add_node("finalize_batch_result", batch.finalize_batch_result)
+
     # 其余分支
     builder.add_node("run_memory_command", memory_command.run_memory_command)
     builder.add_node("run_graph_state", graph_state_branch.run_graph_state)
@@ -100,6 +108,7 @@ def build_memory_manager_graph(
             "graph_state": "run_graph_state",
             "projection": "run_projection",
             "maintenance": "run_maintenance",
+            "batch": "load_batch_members",
             "finalize_replay": "normalize_result",
         },
     )
@@ -123,7 +132,32 @@ def build_memory_manager_graph(
     builder.add_edge("build_mutation_plan_drafts", "prepare_commit_mutation_plans")
     builder.add_edge("prepare_commit_mutation_plans", "commit_summary_memories")
     builder.add_edge("commit_summary_memories", "finalize_summary_result")
-    builder.add_edge("finalize_summary_result", "normalize_result")
+    # §5.8 批量循环：summary 链按**成员** operation 工作，收尾时回到成员循环记结果；
+    # 单条路径（batch_active 为假）行为与改造前逐字一致。
+    builder.add_conditional_edges(
+        "finalize_summary_result",
+        batch.route_after_summary_finalize,
+        {"batch_member_done": "record_batch_member", "normalize": "normalize_result"},
+    )
+
+    # 批量链
+    builder.add_edge("load_batch_members", "begin_batch_member")
+    builder.add_conditional_edges(
+        "begin_batch_member",
+        batch.route_after_begin_member,
+        {
+            "member": "load_source_refs",
+            "next": "begin_batch_member",
+            "consolidate": "enter_batch_consolidation",
+        },
+    )
+    builder.add_conditional_edges(
+        "record_batch_member",
+        batch.route_after_record_member,
+        {"next": "begin_batch_member", "consolidate": "enter_batch_consolidation"},
+    )
+    builder.add_edge("enter_batch_consolidation", "finalize_batch_result")
+    builder.add_edge("finalize_batch_result", "normalize_result")
 
     # activity exposure 链
     builder.add_edge("validate_activity_hints", "upsert_graph_node_activity")

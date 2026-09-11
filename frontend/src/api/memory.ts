@@ -17,7 +17,10 @@ export type OperationStatus =
   | "succeeded"
   | "needs_review"
   | "dead_letter"
-  | "cancelled";
+  | "cancelled"
+  // memory-rebuild §2.6：证据已提交但未到最短沉淀时长，等待 0 点批量入批。
+  // 非终态，因此轮询会继续（与 queued 同样处理）。
+  | "pending_batch";
 
 // PublicError 单一来源在共享请求层；此处重新导出保持既有导入兼容
 export type { PublicError } from "./client";

@@ -280,6 +280,26 @@ class MaintenanceCommand(BaseModel):
     batch_size: int = Field(default=100, ge=1, le=1000)
 
 
+class SummarizeUserMemoryBatchCommand(BaseModel):
+    """nightly 批量总结的入参（memory-rebuild §2.6 D6 / §5.8 Phase 6）。
+
+    **每用户一批**：Scheduler 在 0 点扫描 ``pending_batch`` 且门控到点的证据，按
+    ``user_id`` 聚合成一个批量 operation，成员引用随 payload 下发（正文由 Reader
+    按成员 operation 读回，payload 里**不放证据正文**，避免把对话原文塞进队列行）。
+
+    ``member_operation_ids`` 与 DB 的 ``memory_operations.batch_operation_id`` 归属
+    互为交叉校验：图以 DB 归属为准加载成员，payload 声明用于发现"归属被外部改过"。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["summarize_user_memory_batch"] = "summarize_user_memory_batch"
+    target_user_id: UUID
+    batch_operation_id: UUID
+    member_operation_ids: list[UUID] = Field(min_length=1, max_length=1000)
+    max_evidence: int = Field(default=50, ge=1, le=1000)
+
+
 # ---------------------------------------------------------------------------
 # 判别联合（§6.6）
 # ---------------------------------------------------------------------------
@@ -294,7 +314,8 @@ MemoryPayload = Annotated[
     | ReviewCandidateCommand
     | GraphStateCommand
     | ProjectSummaryToGraphCommand
-    | MaintenanceCommand,
+    | MaintenanceCommand
+    | SummarizeUserMemoryBatchCommand,
     Field(discriminator="kind"),
 ]
 
