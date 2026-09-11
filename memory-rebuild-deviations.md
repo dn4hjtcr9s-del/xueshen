@@ -542,15 +542,30 @@ Phase 1 起才会出现真实的 flag 分支，届时该结论需要重新验证
 | 实现 | v2 提示词改写为"会投影进长期记忆注册表目录"，不再写该标签 |
 | 依据 | 全仓库 grep 后确认：只有 `memory-rebuild.md` 与 `OPUS-5.md` 提到该标签，`backend/` **无任何实现**。写了会让模型误以为存在该注入格式（D1 首轮注入属 Phase 5） |
 
-### OPEN-007 Phase 4 缺 DB 集成测试
+### OPEN-007 `migrate_markdown_schema_v2` 的 DB 集成测试 —— **已关闭**
 
-现状：已有 32 个单元测试（schema v2 往返/校验/link/alias 22 个 + 迁移逻辑 10 个），但
-§5.6「迁移验收」中的**需要真实库**的部分**尚未覆盖**：
-- 同一用户迁移两次：第二次无新版本、无 checksum 抖动；
-- 历史 `versions/` 文件**字节级不变**；
-- 迁移中 kill scheduler 后可从 cursor 续跑；单用户失败不阻塞他人。
+补齐：`tests/integration/test_memory_schema_migration.py`（5 例，真实 PostgreSQL + 真实
+文件存储），覆盖 §5.6「迁移验收」中必须落盘才能证明的部分：
 
-待决：补 `tests/integration/test_memory_schema_migration.py`。这是 Phase 4 唯一未闭合的验收项。
+- v1→v2 后活动指针推进、current 可解析且 `[[link]]` 已现算；
+- **历史 `versions/` 文件字节级不变**（迁移只走 `write_immutable_version` 追加新版本）；
+- 二次迁移：`migrated=0`、版本号与 checksum 均不抖动；
+- dry-run 不推进版本、不改 current；
+- 坏文档进 `failures` 且**不阻塞**同批其他用户；
+- `batch_size=1` 时返回 `continue` + `next_cursor`，续跑真的处理了后续行。
+
+### ADD-044 集成测试抓出的两个**真实缺口**（单测与编译期都发现不了）
+
+补 OPEN-007 的集成测试一次跑出两个缺口，二者都是"Python 常量改了、配套的注册点没改"：
+
+| 缺口 | 现象 | 修法 |
+|---|---|---|
+| DB CHECK 约束未同步 | `contracts/common.py::OperationType` 加了 `migrate_markdown_schema_v2`，但 DB 侧的 `ck_memory_operations_operation_type`（0007 用显式清单建立）没加 → Scheduler 建 operation 时被 `CheckViolation` 拒绝 | 新增迁移 `0009_memory_migrate_schema_op` 扩展约束（按"不得改历史迁移"的规矩，不回头改 0007） |
+| `route_by_type` 未登记 | `manager.py` 的 operation_type → 图分支映射没有该类型 → `InvalidPayloadError: 未路由的 operation_type` | 登记为 `maintenance` |
+
+**教训**：新增一个 operation_type 至少要同步 **4 处**——`OperationType` Literal、
+`OPERATION_ROUTING`、DB CHECK 约束、`manager.route_by_type`。前两处有 mypy 兜底，
+后两处**只有真实库集成测试能发现**。这正是 §5.11 把集成测试列为独立层级的原因。
 
 ### ADD-043 `[[link]]` 的 name 全局唯一目前只是**生成侧纪律**
 
