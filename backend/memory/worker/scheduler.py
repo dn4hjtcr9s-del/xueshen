@@ -73,6 +73,23 @@ def _batch_cursor_tuple(value: str | None) -> tuple[datetime, datetime, UUID] | 
     return (cursor.eligible_at, cursor.created_at, cursor.operation_id)
 
 
+def _batch_run_user_id(idempotency_key: str, *, date: str) -> UUID | None:
+    """从 run 幂等键 ``summarize:{user_id}:{date}`` 解析 user_id（解析不了返回 None）。
+
+    前缀/后缀都由 :data:`BATCH_IDEMPOTENCY_KEY_TEMPLATE` 现算而不是 ``split(":")``：
+    模板一旦变化，这里会**静默失效**成"不收尾"（保守方向），不会误关别的 run。
+    """
+    prefix, _, rest = BATCH_IDEMPOTENCY_KEY_TEMPLATE.partition("{user_id}")
+    suffix = rest.replace("{date}", date)
+    if not idempotency_key.startswith(prefix) or not idempotency_key.endswith(suffix):
+        return None
+    raw = idempotency_key[len(prefix) : len(idempotency_key) - len(suffix)]
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
+
+
 #: 批次 operation 幂等键里的游标摘要长度（十六进制字符）。
 _BATCH_CURSOR_DIGEST_CHARS = 16
 
@@ -565,7 +582,59 @@ class Scheduler:
                         session, user_id=user_id, date=date, now=now
                     )
                     has_more = has_more or user_has_more
+                swept = await self._sweep_batch_runs(
+                    session, now=now, date=date, limit=self.config.batch_max_users_per_run
+                )
+        if swept:
+            self.logger.info("收尾当天已无待入批证据的批量 run：%d 个", swept)
         return has_more
+
+    async def _sweep_batch_runs(
+        self, session: AsyncSession, *, now: datetime, date: str, limit: int
+    ) -> int:
+        """收尾当天已无待入批证据的批量 run（OPEN-011，用户裁决 A）。
+
+        三个条件全满足才关（顺序即优先级）：
+
+        1. **属于当天**：幂等键以 ``:{date}`` 结尾——昨天的 run 不该被今天的 tick 关掉
+           （历史残留交给下一轮 sweep 或人工判断）；
+        2. **最后一批已终态**：在途/待重试的批次不能被判死，否则会把正在跑的批次
+           标成成功、断掉该用户的续跑；
+        3. **该用户已无待入批证据**：``pending_batch AND batch_operation_id IS NULL AND
+           next_run_at <= now``（不传 cursor，看全量而不是游标之后）。
+
+        注意**不能**在批次 operation 完成时直接关 run：>50 条积压的用户要靠 run.cursor
+        续跑第二批，提前关 run 会让剩余证据等到第二天。
+        """
+        swept = 0
+        runs = await maintenance_repo.list_open_runs(
+            session, maintenance_type="summarize_pending_evidence", limit=limit
+        )
+        for run in runs:
+            if not str(run["idempotency_key"]).endswith(f":{date}"):
+                continue
+            operation_id = run["operation_id"]
+            if operation_id is not None:
+                op = await ops_repo.get_operation(session, operation_id)
+                if op is not None and op["status"] not in TERMINAL_STATUSES:
+                    continue
+            user_id = _batch_run_user_id(str(run["idempotency_key"]), date=date)
+            if user_id is None:
+                continue
+            remaining = await ops_repo.list_pending_batch_members(
+                session, user_id=user_id, now=now, limit=1
+            )
+            if remaining:
+                continue
+            await maintenance_repo.complete_run(
+                session,
+                run_id=run["run_id"],
+                status="succeeded",
+                cursor=run["cursor"],
+                result={"reason": "swept_no_pending_evidence"},
+            )
+            swept += 1
+        return swept
 
     async def _summarize_user_batch(
         self, session: AsyncSession, *, user_id: UUID, date: str, now: datetime

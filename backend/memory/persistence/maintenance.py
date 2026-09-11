@@ -58,6 +58,29 @@ async def get_run_by_key(session: AsyncSession, *, idempotency_key: str) -> dict
     return dict(row) if row else None
 
 
+async def list_open_runs(
+    session: AsyncSession, *, maintenance_type: str, limit: int
+) -> list[dict[str, Any]]:
+    """列出某类维护任务中仍在进行（``status='running'``）的 run。
+
+    专供 0 点批量任务的收尾 sweep（OPEN-011，用户 2026-09-12 裁决 A）：该任务的 run 在
+    正常路径下不会被收尾——证据被消费完后用户就不再出现在 `list_pending_batch_user_ids`
+    的扫描结果里，因此需要按类型扫一遍把"已无待入批证据"的 run 关掉。
+    """
+    result = await session.execute(
+        text(
+            """
+            SELECT * FROM memory_maintenance_runs
+            WHERE maintenance_type = :maintenance_type AND status = 'running'
+            ORDER BY created_at ASC
+            LIMIT :limit
+            """
+        ),
+        {"maintenance_type": maintenance_type, "limit": limit},
+    )
+    return [dict(row) for row in result.mappings().all()]
+
+
 async def attach_operation(session: AsyncSession, *, run_id: UUID, operation_id: UUID) -> None:
     """关联进入 Graph 的 batch operation（§14.3）。"""
     await session.execute(

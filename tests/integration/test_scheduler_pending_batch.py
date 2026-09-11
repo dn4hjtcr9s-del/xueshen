@@ -272,10 +272,10 @@ async def test_bounded_batch_resumes_by_cursor_without_loss_or_duplication(
     batches = await _batch_rows(session_factory, user_id)
     assert len(batches) == 2, "不得重复建批次"
     run = await _run_row(session_factory, user_id=user_id)
-    # 该用户已没有未归属的到期证据 → 不再出现在扫描结果里，run 停在 running
-    # （succeeded 收尾只在"扫到该用户但成员为空"的分支发生，见交付报告里的 gap）。
-    # 关键验收是不重不漏：run 即便还在 running，也不会再领走任何已归属证据。
-    assert run["status"] == "running"
+    # 该用户已没有未归属的到期证据：run 由同一 tick 的收尾 sweep 关成 succeeded
+    # （OPEN-011 用户 2026-09-12 裁决 A；此前会停在 running）。
+    # 关键验收仍是不重不漏：run 关闭后也不会再领走任何已归属证据。
+    assert run["status"] == "succeeded"
 
     # 不丢不重：三条证据各自恰好归属一个批次，且互不重叠
     owners: list[UUID] = []
@@ -329,3 +329,100 @@ async def test_second_tick_does_not_rebatch_owned_evidence(
     assert run_after_second["operation_id"] == first["operation_id"]
     assert run_after_second["cursor"] == run_after_first["cursor"]
     assert run_after_second["status"] == "running"
+
+
+# ---------------------------------------------------------------------------
+# run 收尾 sweep（OPEN-011，用户 2026-09-12 裁决 A）
+# ---------------------------------------------------------------------------
+
+
+async def test_sweep_closes_run_when_no_evidence_remains(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """证据全部消费完后，下一次 tick 把当天 run 收尾为 succeeded（不留 running 残留）。"""
+    user_id = uuid4()
+    await _seed_evidence(session_factory, user_id=user_id, next_run_at=NOW - timedelta(hours=1))
+    scheduler = _scheduler(session_factory)
+
+    # 第一轮：入批 → run 被置 running（cursor 待续）
+    await scheduler.run_task("summarize_pending_evidence", NOW)
+    batches = await _batch_rows(session_factory, user_id)
+    assert len(batches) == 1
+    run = await _run_row(session_factory, user_id=user_id)
+    assert run["status"] == "running"
+
+    # 模拟批量图跑完：operation 终态 + 成员 succeeded
+    await _finish_batch(session_factory, UUID(str(batches[0]["operation_id"])))
+
+    # 第二轮：无待入批证据 → sweep 收尾
+    assert await scheduler.run_task("summarize_pending_evidence", NOW) is False
+    run = await _run_row(session_factory, user_id=user_id)
+    assert run["status"] == "succeeded"
+    assert run["completed_at"] is not None
+    assert run["result"]["reason"] == "swept_no_pending_evidence"
+    # 不该产生第二个批次
+    assert len(await _batch_rows(session_factory, user_id)) == 1
+
+
+async def test_sweep_keeps_run_open_while_batch_is_in_flight(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """批次在途时绝不收尾：否则会把正在跑的批次标成成功、断掉该用户的续跑。"""
+    user_id = uuid4()
+    await _seed_evidence(session_factory, user_id=user_id, next_run_at=NOW - timedelta(hours=1))
+    scheduler = _scheduler(session_factory)
+
+    await scheduler.run_task("summarize_pending_evidence", NOW)
+    batches = await _batch_rows(session_factory, user_id)
+    # 批次仍是 queued（未终态）→ sweep 必须跳过
+    assert batches[0]["status"] == "queued"
+
+    await scheduler.run_task("summarize_pending_evidence", NOW)
+    run = await _run_row(session_factory, user_id=user_id)
+    assert run["status"] == "running"
+
+
+async def test_sweep_keeps_run_open_when_more_evidence_is_waiting(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """还有未归属的证据时不能收尾：收尾会让剩余证据的续跑断掉。"""
+    user_id = uuid4()
+    await _seed_evidence(session_factory, user_id=user_id, next_run_at=NOW - timedelta(hours=1))
+    await _seed_evidence(session_factory, user_id=user_id, next_run_at=NOW - timedelta(hours=1))
+    scheduler = _scheduler(session_factory, max_evidence=1)
+
+    await scheduler.run_task("summarize_pending_evidence", NOW)
+    batches = await _batch_rows(session_factory, user_id)
+    assert len(batches) == 1 and len(_member_ids(batches[0])) == 1
+    await _finish_batch(session_factory, UUID(str(batches[0]["operation_id"])))
+
+    # 第二条证据还没入批 → 不收尾，并在同一 tick 由正常路径排下一批
+    await scheduler.run_task("summarize_pending_evidence", NOW)
+    run = await _run_row(session_factory, user_id=user_id)
+    assert run["status"] == "running"
+    assert len(await _batch_rows(session_factory, user_id)) == 2
+
+
+async def test_sweep_ignores_other_days_runs(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """只收尾当天的 run：昨天遗留的 run 不由今天的 tick 关掉。"""
+    user_id = uuid4()
+    yesterday_key = BATCH_IDEMPOTENCY_KEY_TEMPLATE.format(user_id=user_id, date="2026-09-10")
+    async with session_factory() as session:
+        async with session.begin():
+            await maintenance_repo.create_or_reuse_run(
+                session,
+                run_id=uuid4(),
+                maintenance_type="summarize_pending_evidence",
+                idempotency_key=yesterday_key,
+            )
+    scheduler = _scheduler(session_factory)
+    await scheduler.run_task("summarize_pending_evidence", NOW)
+
+    async with session_factory() as session:
+        row = await maintenance_repo.get_run_by_key(session, idempotency_key=yesterday_key)
+    assert row is not None
+    # 未进过图谱的 run 是 queued；无论 queued 还是 running，今天的 sweep 都不该动它
+    assert row["status"] == "queued"
+    assert row["completed_at"] is None, "非当天的 run 不得被今天的 sweep 收尾"

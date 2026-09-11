@@ -960,7 +960,26 @@ maintenance_runs（成员归属与批次结果都在 operation 上），因此�
 处置：入批成功后用既有 `maintenance_repo.update_run_by_operation(status="running",
 cursor=BatchCursor(最后一条成员))`。
 
-### OPEN-011 正常路径下批次 run 不会走到 `succeeded`（残留 running 行）
+### OPEN-011 批次 run 当天不收尾（残留 running 行）—— **已关闭**
+
+**用户裁决（2026-09-12）：选项 A，现在加收尾 sweep。** 实现：
+
+- `persistence/maintenance.py::list_open_runs(maintenance_type, limit)`（新增，按类型列
+  `status='running'` 的 run）；
+- `scheduler._sweep_batch_runs(now, date, limit)`：在 0 点任务末尾（同一事务）把满足
+  三个条件的 run 用既有 `complete_run(status="succeeded", result={"reason":
+  "swept_no_pending_evidence"})` 收尾：① 幂等键以 `:{date}` 结尾（只收当天）；
+  ② 最后一批 operation 已终态（在途批次绝不收尾）；③ 该用户已无
+  `pending_batch AND batch_operation_id IS NULL AND next_run_at <= now` 的证据
+  （不传 cursor，看全量）；
+- 幂等键 → user_id 的解析走 `_batch_run_user_id(key, date=...)`，前缀/后缀由
+  `BATCH_IDEMPOTENCY_KEY_TEMPLATE` 现算；解析不了返回 None（**保守方向**：不收尾，
+  绝不误关别的 run）。
+
+**仍然不能在批次 operation 完成时直接关 run**：>50 条积压的用户要靠 run.cursor 续跑
+第二批，提前关 run 会让剩余证据等到第二天。
+
+原登记内容（保留以供追溯）：
 
 `complete_run(status="succeeded", reason="no_pending_evidence")` 只在"用户出现在
 `list_pending_batch_user_ids` 但 `list_pending_batch_members` 为空"时可达，而两个查询

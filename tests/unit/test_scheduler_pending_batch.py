@@ -175,6 +175,21 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _BatchRecorder:
                 run["status"] = kwargs["status"]
                 run["cursor"] = kwargs["cursor"]
 
+    async def fake_list_open_runs(
+        session: Any, *, maintenance_type: str, limit: int
+    ) -> list[dict[str, Any]]:
+        rec.calls.append("list_open_runs")
+        rows = []
+        for run in rec.runs.values():
+            # fresh_run 模拟"并发实例刚写进库的状态"：sweep 读的是库里的真相，
+            # 因此这里也必须看到它，否则会把在途批次误判成"该用户没有批次"。
+            if rec.fresh_run is not None and run["run_id"] == rec.fresh_run.get("run_id"):
+                run = rec.fresh_run
+            if run["maintenance_type"] != maintenance_type or run["status"] != "running":
+                continue
+            rows.append(run)
+        return rows[:limit]
+
     async def fake_list_user_ids(session: Any, *, now: datetime, limit: int) -> list[UUID]:
         rec.calls.append("list_pending_batch_user_ids")
         earliest: dict[UUID, datetime] = {}
@@ -270,6 +285,7 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _BatchRecorder:
     monkeypatch.setattr(maintenance_repo, "attach_operation", fake_attach_operation)
     monkeypatch.setattr(maintenance_repo, "complete_run", fake_complete_run)
     monkeypatch.setattr(maintenance_repo, "update_run_by_operation", fake_update_run_by_operation)
+    monkeypatch.setattr(maintenance_repo, "list_open_runs", fake_list_open_runs)
     monkeypatch.setattr(ops_repo, "list_pending_batch_user_ids", fake_list_user_ids)
     monkeypatch.setattr(ops_repo, "list_pending_batch_members", fake_list_members)
     monkeypatch.setattr(ops_repo, "assign_batch_members", fake_assign_members)
