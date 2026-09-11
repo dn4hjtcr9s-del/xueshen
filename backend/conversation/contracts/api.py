@@ -41,9 +41,10 @@ ConversationEventType = Literal[
 ]
 
 # turn.degraded 合法 flags（§17.4.1）
-# memory-rebuild Phase 5 追加 5 个：prime 三态降级（缺失/取回失败/服务不可用）与
-# 工具链路两态（工具降级、工具预算耗尽）。这些 flag 只表达"本轮可观测地降级了"，
-# 不改变 answer/SSE 的事件类型集合。
+# memory-rebuild Phase 5 追加 5 个：prime 的空/损坏降级与服务不可用，以及工具链路的
+# 降级、截断、预算耗尽。这些 flag 只表达"本轮可观测地降级了"，不改变 answer/SSE 的
+# 事件类型集合。注意 pin 缺失**不算**降级（见 nodes/memory.py：prime 每轮重新取回，
+# pin 只做审计），因此没有对应 flag。
 DegradedFlag = Literal[
     "memory_unavailable",
     "memory_degraded",
@@ -51,7 +52,6 @@ DegradedFlag = Literal[
     "retrieval_unavailable",
     "citation_degraded",
     "memory_prime_degraded",
-    "memory_prime_pin_missing",
     "memory_prime_unavailable",
     "memory_tool_degraded",
     "memory_tool_truncated",

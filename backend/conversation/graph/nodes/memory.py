@@ -12,9 +12,15 @@
 已把**当前**用户消息排除在外（附录 A.5），所以"空"精确等于"该 thread 没有历史消息"，
 不需要新增标记位（§2.4 D1）。
 
-**pin（§2.4 D2）**：首轮把 prime 快照落成 rollout 的 `memory_prime` 记录；后续轮次从
-rollout 读回同一份。记忆更新不回溯旧提示词——旧 thread 继续用旧快照，新 thread 自然
-用最新 summary。这是刻意语义（对应 codex 会话启动时一次性读取 memory_summary）。
+**pin 与每轮取回（§2.4 D2 + 2026-09-11 用户裁决 A）**：prime **每轮都重新取一次**
+（一次文件读 + 一次索引查询，代价可忽略），因为 graph thread 是 `conv-turn:{turn_id}`，
+checkpoint 不跨轮，而 rollout 的 `memory_prime` 记录按 §1.5「大对象放引用」只存 hash 与
+条目数——**读过它也无法还原摘要正文**。若只信 pin，非首轮注入的就是空 prime（比关 flag
+还差，且不会报错）。
+
+因此 rollout 的 pin 记录只承担**审计与变更检测**：首轮写入一条；后续轮发现 summary
+hash 与 pin 不一致时再写一条（说明"这个 thread 中途换了摘要"），一致则不写。提示词因此
+以"每轮最新摘要"为准，代价是跨日长 thread 可能换用新摘要——用户已确认接受。
 
 失败分类（§16.2 / 评审 P1-5）：认证/权限与 4xx 契约错误 → 抛错使 Turn 失败；
 5xx/超时/网络 → unavailable 快照继续本轮对话。
@@ -90,21 +96,12 @@ def is_first_turn(state: dict[str, Any]) -> bool:
 async def _recall_via_prime(
     state: dict[str, Any], *, runtime: ConversationRuntimeContext
 ) -> dict[str, Any]:
-    """prime 模式：首轮构建并 pin，后续轮次原样复用。"""
-    prime: dict[str, Any]
+    """prime 模式：每轮取最新 prime；首轮 pin，后续轮按 hash 变化补 pin（见模块 docstring）。"""
+    prime = await _build_prime(runtime, state)
     if is_first_turn(state):
-        prime = await _build_prime(runtime, state)
         await _pin_prime(runtime, state, prime)
     else:
-        pinned = await _load_pinned_prime(runtime, state)
-        if pinned is None:
-            # pin 取不到（rollout 未启用或记录缺失）：本轮重新构建并记降级标记。
-            # 代价是这一轮可能用到比首轮更新的 summary —— 属可接受的降级，
-            # 但必须可观测，否则"旧 thread 用旧快照"的语义会被静默破坏。
-            await _emit_degraded(runtime, state, "memory_prime_pin_missing")
-            prime = await _build_prime(runtime, state)
-        else:
-            prime = pinned
+        await _refresh_pin_if_changed(runtime, state, prime)
     if prime.get("degraded"):
         await _emit_degraded(runtime, state, "memory_prime_degraded")
     return {
@@ -163,23 +160,35 @@ def _summary_hash(prime: dict[str, Any]) -> str:
     return hashlib.sha256(str(prime.get("summary") or "").encode("utf-8")).hexdigest()
 
 
+async def _refresh_pin_if_changed(
+    runtime: ConversationRuntimeContext, state: dict[str, Any], prime: dict[str, Any]
+) -> None:
+    """非首轮：pin 的 hash 与最新 prime 不一致时补一条 `memory_prime` 记录。
+
+    pin 不是提示词来源（见模块 docstring），只用于审计"这个 thread 中途换过摘要"。
+    取不到 pin（rollout 未启用、段被 retention 清理、读回失败）时**什么都不做**：
+    提示词已经是最新 prime，缺一条审计记录不是用户可见的降级，不该发降级标记。
+    """
+    pinned = await _load_pinned_prime(runtime, state)
+    if pinned is None:
+        return
+    current_hash = _summary_hash(prime)
+    if str(pinned.get("summary_hash") or "") == current_hash:
+        return
+    runtime.logger.info("thread prime 摘要已更新，补记 pin 记录")
+    await _pin_prime(runtime, state, prime)
+
+
 async def _load_pinned_prime(
     runtime: ConversationRuntimeContext, state: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """从 rollout 读回首轮 pin 的 prime 快照。
+    """读取该 thread **最后一条** `memory_prime` 记录（审计/变更检测用，不做提示词来源）。
 
-    §2.4 D2 要求"旧 thread 保持旧快照继续用"，因此这里**不能**简单地重新构建——
-    必须优先取回 pinned 的那一份。rollout 是 pin 的持久载体（第一章的 `memory_prime`
-    记录类型即为此设计）。
+    返回 None 的情形：rollout 未启用、首轮段已被 retention 清理、或读回失败。
 
-    当前返回 None 的情形：rollout 未启用、首轮段已被 retention 清理、或读回失败。
-    调用方按"重新构建 + 记 `memory_prime_pin_missing` 降级标记"处理。
-
-    **已知限制（已登记偏差）**：rollout 的 `memory_prime` 记录按 §1.5「大对象放引用」
-    只存摘要级信息（hash + 条目数），摘要**正文**不在其中。因此本函数只还原出
-    "pin 的指纹"，正文仍需按 hash 取回——完整实现需要 memory 侧支持按 hash 取指定
-    版本的 summary。当前返回 `summary=""` 并保留 hash，调用方可据此判断"pin 存在但
-    正文未还原"。
+    **已知限制（已登记 DEV-015）**：rollout 的 `memory_prime` payload 按 §1.5
+    「大对象放引用」只存摘要级信息（hash + 条目数），摘要**正文**不在其中，因此这里
+    只能还原"pin 的指纹"，不能还原提示词内容——这正是 prime 每轮重新取回的原因。
     """
     reader = getattr(runtime, "rollout_reader", None)
     if reader is None:
@@ -190,22 +199,21 @@ async def _load_pinned_prime(
     try:
         records = await reader.read_thread_records(UUID(str(thread_id)))
     except Exception:
-        runtime.logger.warning("rollout prime 读回失败，本次按重建处理", exc_info=True)
+        runtime.logger.warning("rollout prime 读回失败，按无 pin 处理", exc_info=True)
         return None
+    latest: dict[str, Any] | None = None
     for record in records:
-        if record.type == "memory_prime":
-            return {
-                "pinned": True,
-                "summary_hash": record.payload.get("summary_hash"),
-                "schema_version": record.payload.get("schema_version"),
-                "generated_at": record.payload.get("generated_at"),
-                "summary_truncated": bool(record.payload.get("truncated")),
-                "index_entry_count": int(record.payload.get("index_entry_count") or 0),
-                "summary": "",
-                "index_entries": [],
-                "degraded": False,
-            }
-    return None
+        if record.type != "memory_prime":
+            continue
+        latest = {
+            "pinned": True,
+            "summary_hash": record.payload.get("summary_hash"),
+            "schema_version": record.payload.get("schema_version"),
+            "generated_at": record.payload.get("generated_at"),
+            "summary_truncated": bool(record.payload.get("truncated")),
+            "index_entry_count": int(record.payload.get("index_entry_count") or 0),
+        }
+    return latest
 
 
 # ---------------------------------------------------------------------------

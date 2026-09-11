@@ -612,7 +612,7 @@ index 投影 + 迁移任务 + 测试）。中间有一次 `memory_service.py` �
 | 现状 | `memory_index_entries.keywords` **恒为空数组**：`memory_service._build_new_content`（learner/mastery）与 restore 三处都是硬编码 `"keywords": []` |
 | 根因 | 全仓库没有任何写入 keywords 的通道——`FrontMatterPatch` 只有 name/description/aliases，两个提示词也不产出该字段；而 index.md v2 注册表里的 keywords **不回投影**到 PG（`rebuild_index` 只重写 index.md） |
 | 影响 | 排序的中间档永远不命中；"判别性检索词"名存实亡（name/aliases 与 description 两档仍可用） |
-| 处置 | 登记为 **OPEN-008**，等待决策：在 Phase 7 consolidation 里补生产者，或明确接受 keywords 档长期空转 |
+| 处置 | **OPEN-008 已由用户裁决（2026-09-11）：记入 Phase 7 范围**——consolidation 落地时补 keywords 生产者（生成"判别性检索词" → 同时写 PG `keywords` 列与 index.md 注册表）。Phase 5 的 search 保持现状（该档此时不命中，属已知空转） |
 
 ### DEV-012 `description` 的真实语义比 §2.3 粗
 
@@ -637,13 +637,21 @@ summary 或在 PG 侧存元数据。
 
 `memory_prime_enabled` / `memory_tools_enabled` 不参与服务端挂载：端点始终存在，由
 conversation 侧的 flag 决定是否调用（§5.2-B 的 flag 表只声明"是否启用该链路"，未要求
-服务端隐藏路由）。若要"flag 关闭即不暴露路由"，需改 `backend/app.py` 条件挂载，属
-独立决策，本 Phase 未做。
+服务端隐藏路由）。
+
+**用户裁决（2026-09-11）：保持现状**——不改成条件挂载。理由：内部端点的可达性由
+`require(actors=_READ_AGENT_ACTORS, scope=SCOPE_MEMORY_READ)` 与网络边界保证，flag 表达的是
+"该链路是否启用"，不是"路由是否存在"；条件挂载会让 `/health/ready` 与契约快照随 flag
+变形，反而制造"同一版本不同形状"的运维负担。
 
 ### ADD-049 `memory.read` 不限制 memory_id 的类型
 
 §5.7 只要求"只允许读取已授权用户的文档"，因此 read 可读该用户**任意**活动文档
-（learner/mastery/index 皆可）。若产品上要禁止读 index.md，需要显式收紧（1 行）。
+（learner/mastery/index 皆可）。
+
+**用户裁决（2026-09-11）：保持现状**——不禁止读 index.md。理由：index 注册表本身就是
+prime 注入给模型的内容，模型读它不产生新的信息暴露；真正的越权风险是"跨用户读取"，
+已由 user_id 强制过滤 + tombstone/quarantine 抑制覆盖。
 
 ### ADD-050 search 的 query 规范化只做空白处理
 
@@ -663,14 +671,26 @@ conversation 侧的 flag 决定是否调用（§5.2-B 的 flag 表只声明"是�
 
 §5.7 原文要求 prime "非首轮只沿用 checkpoint 中已确定的 snapshot，不重复 prime"。但
 graph thread 是 `conv-turn:{turn_id}`（**每轮一个 thread**），checkpoint 天然不跨 turn；
-把 prime 放进 Graph State 就等于每轮重新 prime。因此按 §2.4 D2（同一份文档里更具体的
-决策）实现为：**首轮把 prime 快照 pin 到 rollout 的 `memory_prime` 记录，后续轮从 rollout
-读回**；读不回时重新构建并记 `memory_prime_pin_missing`（可观测降级，不静默改变语义）。
+把 prime 放进 Graph State 就等于每轮重新 prime。**用户裁决（2026-09-11，选项 A）：prime 每轮重新取回**，rollout 的 `memory_prime` 记录
+降级为**审计与变更检测**。
 
-**已知限制**：rollout 的 `memory_prime` payload 按 §1.5「大对象放引用」只存
-`summary_hash` + `schema_version` + `generated_at` + `truncated` + `index_entry_count`，
-**不含 summary 正文**。因此 `_load_pinned_prime` 目前只能还原"pin 的指纹"（`summary=""`）。
-完整还原需要 memory 侧支持"按 hash 取指定版本 summary"——契约未定义，登记为待补。
+原因是实施中发现的一个真实缺口：rollout 的 `memory_prime` payload 按 §1.5「大对象放引用」
+只存 `summary_hash` + `schema_version` + `generated_at` + `truncated` + `index_entry_count`，
+**不含 summary 正文也不含目录**。若把"读回 pin"当作提示词来源，thread 第 2 轮起注入给
+模型的 prime 就是**空的**（`summary=""`、`index_entries=[]`），而且不报任何错——比关闭 flag
+还差。这一点是实测确认的，不是推断。
+
+最终语义：
+- **每轮**调用一次 prime（一次文件读 + 一次索引查询，代价可忽略），提示词始终是最新摘要；
+- 首轮写一条 pin 记录；
+- 非首轮若最新 hash 与最后一条 pin 不一致 → 补写一条 pin（"这个 thread 中途换了摘要"留痕），
+  一致则不写，避免每轮堆重复记录；
+- pin 取不到（rollout 未启用 / 段被 retention 清理 / 读回失败）**不发降级标记**：
+  提示词不受影响，缺一条审计记录不是用户可见的降级。因此 `memory_prime_pin_missing`
+  这个 flag 在定稿时被删除（不留死契约）。
+
+代价（用户已确认接受）：跨日长 thread 可能在中途换用新摘要——§2.4 D2 的"旧 thread 用旧
+快照"只在**同一天内**成立。
 
 ### DEV-016 记忆工具服务落在 `services/memory_tools.py` 而非 `services/context_service.py`
 
