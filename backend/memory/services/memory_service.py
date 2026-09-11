@@ -43,7 +43,7 @@ from backend.memory.persistence import documents as docs_repo
 from backend.memory.persistence import operations as ops_repo
 from backend.memory.persistence import outbox as outbox_repo
 from backend.memory.persistence.database import acquire_user_lock
-from backend.memory.storage.base import MarkdownStore, logical_path_for
+from backend.memory.storage.base import MarkdownStore, logical_path_for, sha256_hex
 from backend.memory.storage.markdown_schema import (
     SCHEMA_VERSION_V2,
     IndexDocument,
@@ -244,6 +244,28 @@ class MemoryService:
             )
             doc = parse_index(content.decode("utf-8"))
             return doc, row["index_dirty_at"] is not None
+
+    async def read_active_content(
+        self, *, user_id: UUID, memory_id: str
+    ) -> tuple[int, str, str] | None:
+        """按活动版本读取原始正文（memory-rebuild §2.4 D3② / §5.7 Phase 5）。
+
+        与 get_learner / get_mastery 共用同一删除抑制语义：文档行缺失、已 tombstone
+        （deleted_at 非空）或没有活动版本一律返回 None——已 quarantined 的正文因此
+        永远读不到。读取只走 DB 活动指针指向的 versions/ 不可变版本，
+        **不读 current/ 物化副本**（§2.4 D3：版本化读取 + 删除抑制）。
+
+        返回 (version, checksum, content)；checksum 是整篇正文的 SHA-256，
+        供 memory.read 的引用溯源使用。
+        """
+        async with self._session_factory() as session:
+            row = await docs_repo.get_document(session, user_id=user_id, memory_id=memory_id)
+            if row is None or row["deleted_at"] is not None or row["active_version"] is None:
+                return None
+            content = await self._store.read_version(
+                user_id=user_id, storage_key=row["active_storage_key"]
+            )
+        return int(row["active_version"]), sha256_hex(content), content.decode("utf-8")
 
     # ---------------- 内容组装 ----------------
 

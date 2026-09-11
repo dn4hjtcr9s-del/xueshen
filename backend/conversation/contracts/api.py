@@ -41,12 +41,21 @@ ConversationEventType = Literal[
 ]
 
 # turn.degraded 合法 flags（§17.4.1）
+# memory-rebuild Phase 5 追加 5 个：prime 三态降级（缺失/取回失败/服务不可用）与
+# 工具链路两态（工具降级、工具预算耗尽）。这些 flag 只表达"本轮可观测地降级了"，
+# 不改变 answer/SSE 的事件类型集合。
 DegradedFlag = Literal[
     "memory_unavailable",
     "memory_degraded",
     "retrieval_partial",
     "retrieval_unavailable",
     "citation_degraded",
+    "memory_prime_degraded",
+    "memory_prime_pin_missing",
+    "memory_prime_unavailable",
+    "memory_tool_degraded",
+    "memory_tool_truncated",
+    "memory_tool_budget_exceeded",
 ]
 
 
@@ -69,6 +78,33 @@ class Citation(BaseModel):
     snippet: str = Field(max_length=MAX_CITATION_SNIPPET_CHARS)
     source_refs: list[dict[str, Any]] = Field(default_factory=list)
     matched_subquery_ids: list[str] = Field(default_factory=list, max_length=6)
+
+
+# ---------------------------------------------------------------------------
+# Memory Citation DTO（memory-rebuild §5.7）
+# ---------------------------------------------------------------------------
+
+
+class MemoryCitation(BaseModel):
+    """本轮**被模型真正读过**的长期记忆文档引用（§5.7：可回查到 version/checksum/段）。
+
+    只登记 `memory.read` 的读取结果：search 只返回注册表条目（无正文、无 checksum），
+    prime 注入的 summary 没有版本化载体，二者都无法满足"回查到具体版本/校验和"
+    这一要求，因此不作为 citation 登记（活动仍留在 rollout 的
+    `memory_tool_call`/`memory_tool_result` 记录里可审计）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    memory_id: str = Field(max_length=160)
+    #: 展示名；`memory.read` 响应契约不含 name，因此允许缺省
+    name: str | None = Field(default=None, max_length=200)
+    version: int = Field(ge=0)
+    checksum: str = Field(max_length=128)
+    #: 本次实际返回的正文行范围（truncated=true 时表示"只读了这一段"）
+    line_offset: int = Field(default=0, ge=0)
+    total_lines: int = Field(default=0, ge=0)
+    truncated: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +277,9 @@ class AnswerCompletedPayload(BaseModel):
     citations: list[Citation] = Field(default_factory=list, max_length=20)
     followups: list[str] = Field(default_factory=list, max_length=MAX_FOLLOWUPS)
     degraded_flags: list[DegradedFlag] = Field(default_factory=list, max_length=16)
+    # memory-rebuild §5.7：长期记忆引用为**可选新增字段**，缺省为空列表；
+    # 关闭 memory_tools 时事件形状与既有实现完全一致。
+    memory_citations: list[MemoryCitation] = Field(default_factory=list, max_length=20)
 
 
 class TurnFailedPayload(BaseModel):

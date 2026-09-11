@@ -276,6 +276,9 @@ class SnapshotMemory:
     recommendations: list[dict[str, object]] = field(default_factory=list)
     truncated: bool = False
     fetched_at: datetime | None = None
+    #: memory-rebuild §2.4 D1：prime 模式注入的固定提示词（summary + 注册表目录）。
+    #: 可选字段，缺省空 dict —— flag 关闭时快照与提示词都与既有实现逐字一致。
+    prime: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

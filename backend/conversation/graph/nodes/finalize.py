@@ -7,7 +7,10 @@
    时跳过，§附录 A.10）；
 4. answer.completed 事件（§17.4.1，含 thread_version/answer/citations/followups）；
 5. Turn 置 completed（携带 thread.status=active fencing，R4：发现 deleting 只能
-   取消或清理，不能重新写完成消息或 Evidence）。
+   取消或清理，不能重新写完成消息或 Evidence）；
+6. memory-rebuild §5.7：把本轮真正读过的长期记忆引用（memory_id/version/checksum/
+   行范围）写进 answer.completed 的 `memory_citations` 结构化字段。该字段是**可选新增**
+   字段，关闭记忆工具时恒为空列表，事件形状与既有实现一致。
 
 source_checkpoint_id 由 canonical manifest（build_source_manifest）生成（§7.2 / D9）。
 """
@@ -45,6 +48,8 @@ async def persist_turn(
     payload = state.get("answer_payload") or {}
     answer = str(payload.get("answer") or "")
     citations = payload.get("citations") or []
+    # §5.7：记忆引用只登记"本轮被模型真正读过"的文档（工具侧产出，见 nodes/memory_tool.py）。
+    memory_citations = [item for item in (state.get("memory_citations") or []) if item][:20]
     followups = (payload.get("followups") or [])[:3]
     degraded_flags = state.get("degraded_flags") or []
     request_id = str(state.get("request_id") or "")
@@ -143,14 +148,15 @@ async def persist_turn(
                     event_type="answer.completed",
                     request_id=request_id,
                     run_id=run_id,
-                    payload={
-                        "assistant_message_id": str(assistant_message_id),
-                        "thread_version": new_version,
-                        "answer": answer,
-                        "citations": citations,
-                        "followups": followups,
-                        "degraded_flags": degraded_flags,
-                    },
+                    payload=build_answer_completed_payload(
+                        assistant_message_id=str(assistant_message_id),
+                        thread_version=new_version,
+                        answer=answer,
+                        citations=citations,
+                        followups=followups,
+                        degraded_flags=degraded_flags,
+                        memory_citations=memory_citations,
+                    ),
                 ),
             )
             # 6. Turn 终态（携带 lease fencing：仅当前 worker 可写；检查行数，
@@ -244,6 +250,33 @@ async def persist_turn(
         "assistant_message_id": str(assistant_message_id),
         "outbox_event_id": outbox_event_id,
         "source_checkpoint_id": source_checkpoint_id,
+    }
+
+
+def build_answer_completed_payload(
+    *,
+    assistant_message_id: str,
+    thread_version: int,
+    answer: str,
+    citations: list[Any],
+    followups: list[Any],
+    degraded_flags: list[Any],
+    memory_citations: list[Any] | None = None,
+) -> dict[str, Any]:
+    """构造 answer.completed 的 payload（§17.4.1 + memory-rebuild §5.7）。
+
+    抽成纯函数是为了让"记忆引用确实进了结构化字段"这件事可以在**无数据库**的单测里
+    证明：真正落库前 `TurnEventWriter` 还会用它跑一次契约校验（extra="forbid"）。
+    `memory_citations` 缺省为空列表——关闭记忆工具时事件形状与既有实现逐字一致。
+    """
+    return {
+        "assistant_message_id": assistant_message_id,
+        "thread_version": thread_version,
+        "answer": answer,
+        "citations": list(citations or []),
+        "followups": list(followups or []),
+        "degraded_flags": list(degraded_flags or []),
+        "memory_citations": list(memory_citations or []),
     }
 
 

@@ -26,9 +26,37 @@ class OpenAIGateway(Protocol):
         ...
 
     async def stream_answer(
-        self, *, answer_context: dict[str, Any]
-    ) -> tuple[list[str], dict[str, Any]]:
-        """完整校验回答后返回应用层正文切片与生成结果（§19.2）。"""
+        self,
+        *,
+        answer_context: dict[str, Any],
+        tools: list[dict[str, Any]] | None = None,
+        previous_response_id: str | None = None,
+        tool_outputs: list[dict[str, Any]] | None = None,
+    ) -> Any:
+        """完整校验回答后返回应用层正文切片与生成结果（§19.2）。
+
+        memory-rebuild §5.7：`tools is None` 时返回既有的
+        `(deltas, payload)` 元组；`tools` 非空时返回工具轮结果
+        （`deltas` / `payload` / `pending_tool_calls` / `response_id`）。
+        这里刻意用 `Any` 表达联合返回：Protocol 无法用重载表达"参数决定返回类型"，
+        而具体形态由 `OpenAIGateway` 实现类的 `@overload` 收口。
+        """
+        ...
+
+    def supports_answer_streaming(self) -> bool:
+        """是否启用真实 token 级流式（§15.4）；无此能力的网关走非流式。"""
+        ...
+
+    def open_answer_stream(
+        self,
+        *,
+        answer_context: dict[str, Any],
+        tools: list[dict[str, Any]] | None = None,
+        previous_response_id: str | None = None,
+        tool_outputs: list[dict[str, Any]] | None = None,
+        tool_rounds: int = 0,
+    ) -> Any:
+        """打开真实流式回答会话（§15.4 / §5.7）；返回可异步迭代的流对象。"""
         ...
 
     async def summarize_conversation(
@@ -50,6 +78,32 @@ class MemoryGateway(Protocol):
         user_id: str | None = None,
     ) -> dict[str, Any]:
         """读取长期记忆（§16.1）；返回 LearningContext dict 或抛域错误。"""
+        ...
+
+    async def search_memories(
+        self,
+        *,
+        queries: list[str],
+        match_mode: str = "any",
+        max_results: int = 10,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """`memory.search`（memory-rebuild §2.4 D3①）：纯关键词定位，**不含正文**。"""
+        ...
+
+    async def read_memory(
+        self,
+        *,
+        memory_id: str,
+        line_offset: int = 0,
+        max_lines: int = 200,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """`memory.read`（§2.4 D3②）：分段读取正文，带 version/checksum 供引用溯源。"""
+        ...
+
+    async def build_memory_prime(self, *, user_id: str | None = None) -> dict[str, Any]:
+        """首轮 prime 输入（§2.4 D1）：summary 正文 + 注册表目录。"""
         ...
 
     async def submit_conversation_evidence(self, **kwargs: Any) -> dict[str, Any]:

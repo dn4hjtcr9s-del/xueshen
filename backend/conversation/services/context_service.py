@@ -127,6 +127,9 @@ class ContextService:
             recommendations=list(memory.get("recommendations") or []),
             truncated=bool(memory.get("truncated")),
             fetched_at=datetime.now(UTC),
+            # prime 模式（§2.4 D1）：摘要 + 注册表目录是**固定提示词**，随快照进入
+            # answer 视图；非 prime 模式取不到该键，保持空 dict。
+            prime=dict(memory.get("prime") or {}),
         )
 
     def _context_hash(self, snapshot: TurnContextSnapshot) -> str:
@@ -202,10 +205,7 @@ class ContextService:
                     {"role": m.role, "content": m.content} for m in snapshot.recent_messages
                 ],
             },
-            "long_term_memory": {
-                "status": snapshot.memory.status,
-                "learner": snapshot.memory.learner,
-            },
+            "long_term_memory": _long_term_memory_view(snapshot.memory),
             "standalone_question": standalone_question,
             "evidence": evidence_summary,
             "evidence_refs": evidence_refs,
@@ -218,3 +218,15 @@ class ContextService:
                 "citation_format": "C1...Cn，仅引用提供的证据",
             },
         }
+
+
+def _long_term_memory_view(memory: SnapshotMemory) -> dict[str, Any]:
+    """长期记忆在回答视图里的投影（§9.4）。
+
+    prime 模式（§2.4 D1）额外挂 `prime` 键（摘要 + 注册表目录，原样复用不重检索）；
+    prime 为空时**不加这个键**，保证 flag 关闭时下发给模型的 JSON 逐字不变。
+    """
+    view: dict[str, Any] = {"status": memory.status, "learner": memory.learner}
+    if memory.prime:
+        view["prime"] = memory.prime
+    return view

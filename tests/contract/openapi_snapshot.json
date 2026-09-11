@@ -3854,6 +3854,271 @@
         "title": "MemorySearchRequest",
         "type": "object"
       },
+      "MemoryToolPrimeIndexEntry": {
+        "description": "首轮注入的目录提示条目：memory_id / name / description / keywords，不含正文。",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "keywords": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Keywords",
+            "type": "array"
+          },
+          "memory_id": {
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "memory_id",
+          "name",
+          "description",
+          "keywords"
+        ],
+        "title": "MemoryToolPrimeIndexEntry",
+        "type": "object"
+      },
+      "MemoryToolPrimeRequest": {
+        "additionalProperties": false,
+        "description": "`memory.prime` 入参：空对象（§2.4 D1 首轮注入，用户由令牌决定）。",
+        "properties": {},
+        "title": "MemoryToolPrimeRequest",
+        "type": "object"
+      },
+      "MemoryToolPrimeResponse": {
+        "description": "首轮 prime：`memory_summary.md` 摘要 + 注册表目录（§2.4 D1）。\n\nsummary 缺失/损坏/超限时不报错：返回空 summary 并置 ``degraded=true``\n（§5.7：按现有降级策略返回空 prime/旧摘要，并记录 memory_prime_degraded）。",
+        "properties": {
+          "degraded": {
+            "title": "Degraded",
+            "type": "boolean"
+          },
+          "generated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generated At"
+          },
+          "index_entries": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryToolPrimeIndexEntry"
+            },
+            "title": "Index Entries",
+            "type": "array"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "summary_truncated": {
+            "title": "Summary Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "summary",
+          "schema_version",
+          "generated_at",
+          "index_entries",
+          "summary_truncated",
+          "degraded"
+        ],
+        "title": "MemoryToolPrimeResponse",
+        "type": "object"
+      },
+      "MemoryToolReadRequest": {
+        "additionalProperties": false,
+        "description": "`memory.read` 入参（§2.4 D3②）：按行分段读取。",
+        "properties": {
+          "line_offset": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Line Offset",
+            "type": "integer"
+          },
+          "max_lines": {
+            "default": 200,
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Max Lines",
+            "type": "integer"
+          },
+          "memory_id": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Memory Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "memory_id"
+        ],
+        "title": "MemoryToolReadRequest",
+        "type": "object"
+      },
+      "MemoryToolReadResponse": {
+        "description": "正文片段 + 版本/checksum 溯源（§5.7：引用可回查到具体 document version）。",
+        "properties": {
+          "checksum": {
+            "title": "Checksum",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "line_offset": {
+            "title": "Line Offset",
+            "type": "integer"
+          },
+          "memory_id": {
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "total_lines": {
+            "title": "Total Lines",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "memory_id",
+          "version",
+          "checksum",
+          "content",
+          "line_offset",
+          "total_lines",
+          "truncated"
+        ],
+        "title": "MemoryToolReadResponse",
+        "type": "object"
+      },
+      "MemoryToolSearchItem": {
+        "description": "检索命中的注册表条目：**不含正文**，强制 search 定位 → read 下沉两段式。",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "keywords": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Keywords",
+            "type": "array"
+          },
+          "memory_id": {
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "memory_id",
+          "name",
+          "description",
+          "keywords",
+          "version",
+          "updated_at"
+        ],
+        "title": "MemoryToolSearchItem",
+        "type": "object"
+      },
+      "MemoryToolSearchRequest": {
+        "additionalProperties": false,
+        "description": "`memory.search` 入参（§2.4 D3①）。",
+        "properties": {
+          "match_mode": {
+            "default": "any",
+            "enum": [
+              "any",
+              "all"
+            ],
+            "title": "Match Mode",
+            "type": "string"
+          },
+          "max_results": {
+            "default": 10,
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Max Results",
+            "type": "integer"
+          },
+          "queries": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Queries",
+            "type": "array"
+          }
+        },
+        "required": [
+          "queries"
+        ],
+        "title": "MemoryToolSearchRequest",
+        "type": "object"
+      },
+      "MemoryToolSearchResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryToolSearchItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "truncated"
+        ],
+        "title": "MemoryToolSearchResponse",
+        "type": "object"
+      },
       "MessageView": {
         "properties": {
           "completed_at": {
@@ -6580,6 +6845,135 @@
         "summary": "Read Sources",
         "tags": [
           "internal-conversation"
+        ]
+      }
+    },
+    "/api/v1/internal/memory/tool/prime": {
+      "post": {
+        "description": "`memory.prime`（§2.4 D1）：首轮注入的 summary + index 注册表目录；缺失时降级不报错。",
+        "operationId": "memory_tool_prime_api_v1_internal_memory_tool_prime_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryToolPrimeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryToolPrimeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Memory Tool Prime",
+        "tags": [
+          "internal",
+          "internal"
+        ]
+      }
+    },
+    "/api/v1/internal/memory/tool/read": {
+      "post": {
+        "description": "`memory.read`（§2.4 D3②）：活动版本正文分段读取 + version/checksum 溯源。",
+        "operationId": "memory_tool_read_api_v1_internal_memory_tool_read_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryToolReadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryToolReadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Memory Tool Read",
+        "tags": [
+          "internal",
+          "internal"
+        ]
+      }
+    },
+    "/api/v1/internal/memory/tool/search": {
+      "post": {
+        "description": "`memory.search`（§2.4 D3①）：纯关键词定位，返回注册表条目、不含正文。",
+        "operationId": "memory_tool_search_api_v1_internal_memory_tool_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryToolSearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryToolSearchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Memory Tool Search",
+        "tags": [
+          "internal",
+          "internal"
         ]
       }
     },

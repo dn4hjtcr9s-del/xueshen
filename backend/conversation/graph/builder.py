@@ -8,6 +8,7 @@ START → load_conversation_context → recall_memory → build_turn_snapshot
      → deduplicate_and_rerank → evaluate_evidence → route(充分?)
        需补检索且预算内 → rewrite_and_plan（回边，不重建快照）
        否则 → generate_answer
+→（memory_tools 开启且模型请求工具时：memory_tool → generate_answer 续写，最多 6 轮）
 → validate_answer_and_citations → persist_turn
 →（memory_trigger=explicit_remember → explicit_remember_ack）→ END
 
@@ -41,6 +42,9 @@ from backend.conversation.graph.nodes import (
 )
 from backend.conversation.graph.nodes import (
     memory_ack as memory_ack_node,
+)
+from backend.conversation.graph.nodes import (
+    memory_tool as memory_tool_node,
 )
 from backend.conversation.graph.nodes import (
     retrieval as retrieval_node,
@@ -116,7 +120,11 @@ def build_conversation_graph(
         )
         # 上下文节点返回的是内容字典，必须挂到 Graph State 的 conversation_context 字段，
         # 否则 LangGraph 会丢弃 current_message/recent_messages，回答模型只能看到空问题。
-        return {"conversation_context": conversation_context}
+        # 同时把"记忆工具是否启用"固化进 State：路由函数保持纯函数，不读运行时对象。
+        return {
+            "conversation_context": conversation_context,
+            "_memory_tools_enabled": memory_tools_enabled,
+        }
 
     async def _node_recall_memory(state: ConversationGraphState) -> dict[str, Any]:
         raw_state = dict(state)
@@ -357,14 +365,25 @@ def build_conversation_graph(
     async def _node_answer(state: ConversationGraphState) -> dict[str, Any]:
         raw_state = dict(state)
         evidence_count = len((raw_state.get("evidence_set") or {}).get("items") or [])
+        # §5.7：工具循环的续写轮（上一轮把工具结果放进了 memory_tool_outputs）
+        # 与首轮用不同的进度文案，前端不会看到两次"正在组织回答"。
+        continuation = bool(raw_state.get("memory_tool_outputs"))
         await emit_progress(
             runtime_context,
             raw_state,
             stage="answer",
             status="started",
-            title="正在组织回答",
-            detail="结合对话上下文、可用记忆与检索证据生成讲解。",
-            metadata={"evidence_count": evidence_count},
+            title="正在结合记忆继续回答" if continuation else "正在组织回答",
+            detail=(
+                "已取得长期记忆内容，继续完成讲解。"
+                if continuation
+                else "结合对话上下文、可用记忆与检索证据生成讲解。"
+            ),
+            metadata={
+                "evidence_count": evidence_count,
+                # 用 TypedDict 取值（raw_state 是 dict[str, object]，mypy 无法收敛 int()）
+                "memory_tool_round": int(state.get("memory_tool_rounds") or 0),
+            },
         )
         result = await answer_node.generate_answer(
             raw_state, runtime=runtime_context, context_service=context_service
@@ -381,6 +400,36 @@ def build_conversation_graph(
         )
         return result
 
+    async def _node_memory_tool(state: ConversationGraphState) -> dict[str, Any]:
+        raw_state = dict(state)
+        pending = raw_state.get("memory_pending_tool_calls") or []
+        titles = ", ".join(sorted({str(call.get("name") or "") for call in pending}))
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="memory",
+            status="started",
+            title="正在读取长期记忆",
+            detail=titles or "执行记忆工具调用。",
+            metadata={
+                "tool_calls": len(pending),
+                "memory_tool_round": int(state.get("memory_tool_rounds") or 0),
+            },
+        )
+        result = await memory_tool_node.run_memory_tools(raw_state, runtime=runtime_context)
+        await emit_progress(
+            runtime_context,
+            raw_state,
+            stage="memory",
+            status="completed",
+            title="已取得长期记忆内容",
+            metadata={
+                "executed": int(result.get("memory_tool_calls") or 0),
+                "truncated": bool(result.get("memory_truncated")),
+            },
+        )
+        return result
+
     async def _node_validate(state: ConversationGraphState) -> dict[str, Any]:
         return await answer_node.validate_answer_and_citations(dict(state), runtime=runtime_context)
 
@@ -389,6 +438,10 @@ def build_conversation_graph(
 
     async def _node_memoryack(state: ConversationGraphState) -> dict[str, Any]:
         return await memory_ack_node.explicit_remember_ack(dict(state), runtime=runtime_context)
+
+    # §5.7：记忆工具是否启用由 builder 决定（composition root 的 flag 快照），
+    # 路由函数只看 state 里的这个布尔值，保持"路由纯函数、无运行时不变量"。
+    memory_tools_enabled = bool(runtime_context.flags.get("memory_tools"))
 
     graph.add_node("load_conversation_context", _node_load_context)
     graph.add_node("recall_memory", _node_recall_memory)
@@ -400,6 +453,7 @@ def build_conversation_graph(
     graph.add_node("deduplicate_and_rerank", _node_rerank)
     graph.add_node("evaluate_evidence", _node_evaluate)
     graph.add_node("generate_answer", _node_answer)
+    graph.add_node("memory_tool", _node_memory_tool)
     graph.add_node("validate_answer_and_citations", _node_validate)
     graph.add_node("persist_turn", _node_finalize)
     graph.add_node("explicit_remember_ack", _node_memoryack)
@@ -463,7 +517,15 @@ def build_conversation_graph(
             "insufficient": "generate_answer",
         },
     )
-    graph.add_edge("generate_answer", "validate_answer_and_citations")
+    # §5.7 tool-call loop：answer 请求了工具且预算未耗尽时先执行工具再续写，
+    # 否则按既有拓扑进入引用校验。两个上限（调用数 6、轮数 6）都在
+    # should_continue_memory_tools 内，且 flag 关闭时该函数恒为 False。
+    graph.add_conditional_edges(
+        "generate_answer",
+        _route_after_answer,
+        {"memory_tool": "memory_tool", "validate": "validate_answer_and_citations"},
+    )
+    graph.add_edge("memory_tool", "generate_answer")
     graph.add_edge("validate_answer_and_citations", "persist_turn")
     graph.add_conditional_edges(
         "persist_turn",
@@ -509,6 +571,15 @@ def _route_evidence_sufficiency(state: dict[str, Any]) -> str:
     if status == "insufficient":
         return "insufficient"
     return "answer"
+
+
+def _route_after_answer(state: dict[str, Any]) -> str:
+    """§5.7：本轮模型请求了记忆工具 → 先执行；否则进入引用校验。"""
+    if not state.get("_memory_tools_enabled"):
+        return "validate"
+    if memory_tool_node.should_continue_memory_tools(state):
+        return "memory_tool"
+    return "validate"
 
 
 def _route_after_finalize(state: dict[str, Any]) -> str:

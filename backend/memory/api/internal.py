@@ -1,8 +1,11 @@
-"""内部账号删除接口（规格 §19.7 / §13.16 / §15.9）。
+"""内部端点：账号删除与记忆工具（规格 §19.7 / §13.16 / §15.9；memory-rebuild §2.4 D1/D3）。
 
-仅允许账户服务使用非浏览器服务 JWT（actor_type=system）+ memory:maintenance
-scope 调用；目标用户只能经 account_identity_mappings 解析，调用方不得直接
-注入内部 user_id。幂等锚点为 account_deletion_id（派生 operation 幂等键）。
+- 账号删除：仅允许账户服务使用非浏览器服务 JWT（actor_type=system）+
+  memory:maintenance scope 调用；目标用户只能经 account_identity_mappings 解析，
+  调用方不得直接注入内部 user_id。幂等锚点为 account_deletion_id（派生 operation 幂等键）。
+- 记忆工具（Phase 5）：POST /api/v1/internal/memory/tool/{search,read,prime}，
+  与既有只读端点同一权限矩阵（_READ_AGENT_ACTORS + memory:read），
+  用户 id 只取 auth.user_id，请求体不接受 user_id。
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.auth.context import (
     SCOPE_MEMORY_MAINTENANCE,
+    SCOPE_MEMORY_READ,
     SCOPE_MEMORY_SOURCE_DELETE,
     AuthContext,
 )
@@ -27,6 +31,10 @@ from backend.memory.api.dependencies import (
     require,
     status_code_for_row,
 )
+
+#: 记忆工具只读端点与既有只读端点共用白名单（§18.3/§19.8：用户与带 delegated user
+#: 的内部 Agent）；直接导入同一常量，避免两处白名单漂移。
+from backend.memory.api.memories import _READ_AGENT_ACTORS
 from backend.memory.contracts.commands import AccountMemoryPurgeRequest, MaintenanceCommand
 from backend.memory.contracts.common import (
     OPERATION_ROUTING,
@@ -41,10 +49,19 @@ from backend.memory.contracts.errors import (
 from backend.memory.contracts.events import AccountMemoryPurgeRequestedPayload
 from backend.memory.contracts.evidence import SourceDeletedEvent
 from backend.memory.contracts.operations import MemoryOperation, MemoryOperationResult
+from backend.memory.contracts.results import (
+    MemoryToolPrimeRequest,
+    MemoryToolPrimeResponse,
+    MemoryToolReadRequest,
+    MemoryToolReadResponse,
+    MemoryToolSearchRequest,
+    MemoryToolSearchResponse,
+)
 from backend.memory.persistence import account_deletion as deletion_repo
 from backend.memory.persistence import operations as ops_repo
 from backend.memory.persistence import outbox as outbox_repo
 from backend.memory.persistence.identity import IdentityMappingRepository
+from backend.memory.services.memory_tools import FilePrimeSummaryReader, MemoryToolsService
 from backend.memory.worker.checkpoint import thread_id_for_operation
 
 router = APIRouter(prefix="/api/v1/internal", tags=["internal"])
@@ -254,3 +271,71 @@ def build_source_deletions_router(
         return {"status": result}
 
     return deletion_router
+
+
+# ---------------------------------------------------------------------------
+# 记忆工具端点（memory-rebuild §2.4 D1/D3 / §5.7 Phase 5）
+#
+# 规范路径是**单数** /api/v1/internal/memory/tool/*：与既有 APIRouter(prefix="/api/v1/memory")
+# 的域名单数约定一致，也与对话域 MemoryClient（backend/memory/client.py）已写死的调用路径一致。
+# 早期 brief 里的复数 /memories/tool/* 以隐藏别名保留（include_in_schema=False），
+# 不进 OpenAPI 契约快照，两边都能工作。
+#
+# 认证照抄既有只读端点：_READ_AGENT_ACTORS + memory:read；user_id 只取 auth.user_id，
+# 三个请求体都是 extra="forbid"，因此夹带 user_id 一律 422 REQUEST_EXTRA_FIELD。
+# ---------------------------------------------------------------------------
+
+_memory_tool_router = APIRouter(prefix="/memory/tool", tags=["internal"])
+_memory_tool_alias_router = APIRouter(prefix="/memories/tool", tags=["internal"])
+
+
+def _memory_tools_service(runtime: ApiRuntime) -> MemoryToolsService:
+    """按请求装配工具服务：summary 读取器绑定当前存储根（Phase 7 可替换实现）。"""
+    return MemoryToolsService(
+        session_factory=runtime.session_factory,
+        memory_service=runtime.memory_service,
+        summary_reader=FilePrimeSummaryReader(runtime.settings.memory_storage_root),
+    )
+
+
+@_memory_tool_router.post("/search", response_model=MemoryToolSearchResponse)
+@_memory_tool_alias_router.post(
+    "/search", response_model=MemoryToolSearchResponse, include_in_schema=False
+)
+async def memory_tool_search(
+    request: MemoryToolSearchRequest,
+    auth: AuthContext = Depends(require(actors=_READ_AGENT_ACTORS, scope=SCOPE_MEMORY_READ)),
+    runtime: ApiRuntime = Depends(get_runtime),
+) -> MemoryToolSearchResponse:
+    """`memory.search`（§2.4 D3①）：纯关键词定位，返回注册表条目、不含正文。"""
+    return await _memory_tools_service(runtime).search(user_id=auth.user_id, request=request)
+
+
+@_memory_tool_router.post("/read", response_model=MemoryToolReadResponse)
+@_memory_tool_alias_router.post(
+    "/read", response_model=MemoryToolReadResponse, include_in_schema=False
+)
+async def memory_tool_read(
+    request: MemoryToolReadRequest,
+    auth: AuthContext = Depends(require(actors=_READ_AGENT_ACTORS, scope=SCOPE_MEMORY_READ)),
+    runtime: ApiRuntime = Depends(get_runtime),
+) -> MemoryToolReadResponse:
+    """`memory.read`（§2.4 D3②）：活动版本正文分段读取 + version/checksum 溯源。"""
+    return await _memory_tools_service(runtime).read(user_id=auth.user_id, request=request)
+
+
+@_memory_tool_router.post("/prime", response_model=MemoryToolPrimeResponse)
+@_memory_tool_alias_router.post(
+    "/prime", response_model=MemoryToolPrimeResponse, include_in_schema=False
+)
+async def memory_tool_prime(
+    request: MemoryToolPrimeRequest,
+    auth: AuthContext = Depends(require(actors=_READ_AGENT_ACTORS, scope=SCOPE_MEMORY_READ)),
+    runtime: ApiRuntime = Depends(get_runtime),
+) -> MemoryToolPrimeResponse:
+    """`memory.prime`（§2.4 D1）：首轮注入的 summary + index 注册表目录；缺失时降级不报错。"""
+    return await _memory_tools_service(runtime).prime(user_id=auth.user_id)
+
+
+router.include_router(_memory_tool_router)
+router.include_router(_memory_tool_alias_router)

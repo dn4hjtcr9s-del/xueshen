@@ -78,14 +78,24 @@ class ConversationGraphState(TypedDict, total=False):
     # 不能靠 Graph State 记忆，必须每轮从 messages 索引表重算（§2.4 D1 明确要求）。
     # 这里存的是**本轮**的 prime 与工具活动，用于提示词组装、rollout 记录与引用回填。
     memory_prime: dict[str, Any]
+    #: 模型在本轮**最新一次续写**中请求、但尚未执行的工具调用（§5.7 tool-call loop）。
+    memory_pending_tool_calls: list[dict[str, Any]]
+    #: 本次续写要回传给模型的工具结果（call_id → 结果 JSON 文本）。
+    memory_tool_outputs: list[dict[str, Any]]
     #: 工具调用计数（上限 6，§2.7-③ 决议 B 组：与检索预算独立，不共享）。
     memory_tool_calls: int
+    #: 工具循环轮数（硬上限 6）：即使全部命中缓存不消耗预算，也不允许无限循环。
+    memory_tool_rounds: int
     #: 本轮工具调用/结果记录（供 rollout 与 finalize 的引用回填）。
     memory_tool_records: list[dict[str, Any]]
     #: 本轮真正被模型读过的记忆文档引用（document_version / checksum / section）。
     memory_citations: list[dict[str, Any]]
     #: 是否有工具结果被截断（超限必须显式告知模型，不能静默丢内容）。
     memory_truncated: bool
+    #: Responses API 的续写锚点：上一轮响应的 response_id。
+    memory_response_id: str | None
+    #: 记忆工具是否启用（builder 在首节点固化，路由函数据此判定，见 §5.7）。
+    _memory_tools_enabled: bool
 
     # Persistence（§10.2）
     assistant_message_id: str | None

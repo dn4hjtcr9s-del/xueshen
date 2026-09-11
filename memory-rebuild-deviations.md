@@ -581,13 +581,224 @@ consolidation（Phase 7）里按 aliases 归并，而不是在解析器里报错
 Phase 4 分两批落地：`001c42c`（schema 双读 + 提示词，中间提交）与收尾提交（契约扩展 +
 index 投影 + 迁移任务 + 测试）。中间有一次 `memory_service.py` 被改坏并回滚：用
 `str.replace("async def ", helper + "async def ", 1)` 插入辅助函数时命中了类内部的第一个
-`async def`，导致整个文件缩进崩坏。教训与正确的锚点做法已记入 `PHASE4-HANDOFF.md`。
+`async def`，导致整个文件缩进崩坏。教训：批量插入辅助函数必须用**唯一锚点**，改完立即核对目标位置——`replace(..., 1)`
+命中类内部第一个 `async def` 时不会有任何报错，只会在后续测试里炸掉整个文件。
 
 ---
 
 ## Phase 5：Memory Prime 与 `memory.search` / `memory.read`
 
-（未开始）
+### ADD-045 memory 侧三个工具端点的落点与形状
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.7「工具契约」只给了语义要求（有界/可审计/用户隔离/默认不返回正文），没给路径与字段名 |
+| 实现 | `POST /api/v1/internal/memory/tool/{search,read,prime}`，请求/响应模型落在 `backend/memory/contracts/results.py`，服务在 `backend/memory/services/memory_tools.py` |
+| 路径依据 | 仓库既有内部路径规范是**单数** `memory`（`/api/v1/internal/memory/...`）；复数写法会与既有约定不一致 |
+| 认证 | `require(actors=_READ_AGENT_ACTORS, scope=SCOPE_MEMORY_READ)`，`user_id` 只来自认证上下文；三个请求体 `extra="forbid"`，夹带 `user_id` 直接 422 `REQUEST_EXTRA_FIELD` |
+| 验收 | `tests/unit/test_memory_tools.py`（35 例）+ `tests/integration/test_memory_tools_sql.py`（9 例，真实 PostgreSQL + 真实文件存储） |
+
+### ADD-046 复数路径作为隐藏别名保留（用户裁决）
+
+对话域客户端一度按复数列写；裁决为"**单数为规范，复数作别名**"。因此
+`/api/v1/internal/memories/tool/*` 以 `include_in_schema=False` 保留，两套都能调，
+但 OpenAPI 快照只含单数路径（不污染公开契约）。
+
+### DEV-011 `memory.search` 的 keywords 档目前是**死代码**（keywords 列无生产者）
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §2.4 D3① 把 `keywords` 与 name/description/aliases 并列为匹配域，并给了"name/aliases > keywords > description"的排序权重 |
+| 现状 | `memory_index_entries.keywords` **恒为空数组**：`memory_service._build_new_content`（learner/mastery）与 restore 三处都是硬编码 `"keywords": []` |
+| 根因 | 全仓库没有任何写入 keywords 的通道——`FrontMatterPatch` 只有 name/description/aliases，两个提示词也不产出该字段；而 index.md v2 注册表里的 keywords **不回投影**到 PG（`rebuild_index` 只重写 index.md） |
+| 影响 | 排序的中间档永远不命中；"判别性检索词"名存实亡（name/aliases 与 description 两档仍可用） |
+| 处置 | 登记为 **OPEN-008**，等待决策：在 Phase 7 consolidation 里补生产者，或明确接受 keywords 档长期空转 |
+
+### DEV-012 `description` 的真实语义比 §2.3 粗
+
+§2.3 描述注册表 `description` 是"一句话 scope"。实际投影的是既有字段的截断：
+mastery → overview 或 understood 前 3 条；learner → goals/preferences 前 3 条。
+行为可用（选择性地反映了用户画像），但**不是**一句话摘要。未按文档改写投影规则
+（那会改动既有记忆内容语义，属 Phase 7 consolidation 的范围）。
+
+### DEV-013 prime 的 `generated_at` 只能取文件 mtime
+
+§2.3 规定 `memory_summary.md` **没有 front matter**（首行恰好是 `v1`），因此没有权威
+生成时间。当前取文件 mtime，无文件时为 `null`。若 Phase 7 要真时间戳，需要版本化
+summary 或在 PG 侧存元数据。
+
+### ADD-047 prime 的 `index_entries` 不做条数上限
+
+冻结契约里没有 `index_entries_truncated` 字段，服务端按"**不静默丢条目**"全量返回，
+条数上限交由 conversation 侧的 token 预算裁剪负责（§5.7「tool result 进入 graph state
+前做 token/字符上限裁剪」）。用户主题很多时首轮注入会偏大，属已知代价。
+
+### ADD-048 三个工具端点**不按 flag 做路由级门控**
+
+`memory_prime_enabled` / `memory_tools_enabled` 不参与服务端挂载：端点始终存在，由
+conversation 侧的 flag 决定是否调用（§5.2-B 的 flag 表只声明"是否启用该链路"，未要求
+服务端隐藏路由）。若要"flag 关闭即不暴露路由"，需改 `backend/app.py` 条件挂载，属
+独立决策，本 Phase 未做。
+
+### ADD-049 `memory.read` 不限制 memory_id 的类型
+
+§5.7 只要求"只允许读取已授权用户的文档"，因此 read 可读该用户**任意**活动文档
+（learner/mastery/index 皆可）。若产品上要禁止读 index.md，需要显式收紧（1 行）。
+
+### ADD-050 search 的 query 规范化只做空白处理
+
+去首尾空白 + 去重，**不做** NFKC 折叠/分词：匹配是与 index 列原文逐字比较的子串关系，
+额外折叠会让"看起来一样"的查询匹配不上原文。全空白 query → 空结果且不打库。
+
+### DEV-014 `DegradedFlag` 是**封闭 Literal**，新降级标记必须同步扩展
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.7 要求 prime 降级记 `memory_prime_degraded`，并新增工具链路的降级语义；§17.4.1 把 `turn.degraded` 的 flags 定义为固定集合 |
+| 现状 | `contracts/api.py::DegradedFlag` 是 `Literal[...]`，`AnswerCompletedPayload`/`TurnDegradedPayload` 都是 `extra="forbid"` |
+| 后果 | Phase 5 WIP 期间 `_emit_degraded` 写 `memory_prime_degraded` 会被契约校验直接拒绝——**编译期不报错、单测不覆盖，只有写事件时才炸** |
+| 处置 | 扩展 `DegradedFlag`：新增 `memory_prime_degraded` / `memory_prime_pin_missing` / `memory_prime_unavailable` / `memory_tool_degraded` / `memory_tool_truncated` / `memory_tool_budget_exceeded`，并在单测里用 `validate_event_payload` 实测过 |
+
+### DEV-015 §5.7 的"非首轮沿用 **checkpoint** 中的 snapshot"在当前图结构下不可实现
+
+§5.7 原文要求 prime "非首轮只沿用 checkpoint 中已确定的 snapshot，不重复 prime"。但
+graph thread 是 `conv-turn:{turn_id}`（**每轮一个 thread**），checkpoint 天然不跨 turn；
+把 prime 放进 Graph State 就等于每轮重新 prime。因此按 §2.4 D2（同一份文档里更具体的
+决策）实现为：**首轮把 prime 快照 pin 到 rollout 的 `memory_prime` 记录，后续轮从 rollout
+读回**；读不回时重新构建并记 `memory_prime_pin_missing`（可观测降级，不静默改变语义）。
+
+**已知限制**：rollout 的 `memory_prime` payload 按 §1.5「大对象放引用」只存
+`summary_hash` + `schema_version` + `generated_at` + `truncated` + `index_entry_count`，
+**不含 summary 正文**。因此 `_load_pinned_prime` 目前只能还原"pin 的指纹"（`summary=""`）。
+完整还原需要 memory 侧支持"按 hash 取指定版本 summary"——契约未定义，登记为待补。
+
+### DEV-016 记忆工具服务落在 `services/memory_tools.py` 而非 `services/context_service.py`
+
+§5.13 的 Memory 清单写的是"`backend/memory/services/context_service.py`：prime/tool/双源
+协调"。实际新建了 `backend/memory/services/memory_tools.py`：既有 `context_service` 的
+职责是"装配给对话的 LearningContext"（投影 + 双源协调），而三个工具是**只读、按请求
+形态返回、不做投影**的另一类接口。把两者混在一个类里会让既有投影路径的测试面被动扩大。
+未改 `context_service.py` 一行。
+
+### ADD-053 memory citations 只登记 `memory.read` 的结果
+
+`search` 只返回注册表条目（无正文、无 checksum），prime 的 summary 没有版本化载体——
+两者都不满足 §5.7 "回查到具体 document version/checksum/section" 的要求。因此
+`memory_citations` 只收 read 结果；search 的命中仍完整留在 rollout 的
+`memory_tool_call` / `memory_tool_result` 记录里可审计（`document_versions` 字段）。
+
+### ADD-054 assistant 消息行没有结构化列，记忆引用只进 turn event
+
+§5.7 说把 memory citations 写进"assistant message/turn event 的结构化字段（若当前 API
+尚无字段则只新增可选字段）"。`conversation_messages` 表**只有 content/content_hash**，
+没有任何 JSON/元数据列；Phase 5 的交付清单里也没有 conversation 迁移。因此：
+
+- `answer.completed` 事件新增**可选**字段 `memory_citations`（list[MemoryCitation]，默认空）；
+- assistant 消息行不动（加列需要新迁移，属独立决策）；
+- rollout 侧靠 `memory_tool_result.document_versions` 留痕。
+
+### ADD-055 工具错误分类：401/403 让 Turn 失败，其余交回模型
+
+§5.7 没写工具失败怎么分类。沿用 §16.2 的既有语义并细化为：
+
+| 情形 | 处理 |
+|---|---|
+| 401/403 | 抛错让 Turn 失败（认证/权限问题不是"模型可以自己纠正"的错误） |
+| 404 / `MEMORY_NOT_FOUND` | 作为工具结果交回模型（引用不存在的 memory_id 是正常纠错场景） |
+| 其它 4xx | 作为工具结果交回模型，错误码 `MEMORY_TOOL_INVALID_ARGUMENT` |
+| 5xx/超时/网络 | 作为工具结果交回模型 + 记 `memory_tool_degraded`，**不阻塞回答** |
+| 网关判定 `executable=false`（arguments 不是合法 JSON 对象） | 不打网关，直接回 `MEMORY_TOOL_INVALID_ARGUMENT` |
+
+### ADD-056 工具循环的两个独立上限 + 缓存命中不消耗预算
+
+- **调用数上限 6**：直接复用 Phase 0 已定型的契约常量
+  `contracts/rollout.py::MEMORY_TOOL_CALL_BUDGET`（=6），不新开配置项——§5.2-B 的配置表
+  里没有这一项，而 §5.7 写死了 6。
+- **轮数上限 6**：幂等缓存命中**不消耗**调用预算，因此"调用数"不再单调递增；若只靠调用数
+  收口，模型反复请求同一个已缓存调用就会死循环。轮数是兜底上限。
+- 缓存键 = 工具名 + **规范化后**参数的稳定 JSON（去空白、去重、边界裁剪、`sort_keys`）。
+- 超限调用不执行、不伪造 `call_index`（契约 `call_index ∈ [1,6]`），只写一条
+  `status="budget_exceeded"` 的 result 记录并回错误结果。
+
+### ADD-057 工具轮 preamble 正文在两种模式下都**保留**（不变量）
+
+网关最初的非流式实现把"工具轮同时返回的正文"丢弃（认为续接轮会重新生成），而流式实现
+会把同一段正文实时 yield 出去。这会让"**已作为 `answer.delta` 发出的正文一定出现在最终
+正文里**"这条不变量在两种模式间不一致（流式下用户看到的开头会凭空消失）。
+
+统一为保留：两种模式都把工具轮的 preamble 计入最终正文，节点用 `answer_buffer` 作为
+跨轮 `carried` 前缀拼接。续写轮**只**流出新增正文，不重复发 preamble。
+
+### ADD-060 OpenAI 线上函数名不能带点号，网关做双向映射
+
+§5.7 把工具名冻结成 `memory.search` / `memory.read`（rollout 契约 `MemoryToolName` 也是
+这两个字符串）。但 Responses API 对**函数名**的限制是 `[A-Za-z0-9_-]{1,64}`——直接下发
+带点的名字会被服务端 400。处置：线上下发 `memory_search` / `memory_read`，解析
+`function_call` 时按 `MEMORY_TOOL_CANONICAL_NAMES` 映射回规范名，**图侧与 rollout 侧无感**
+（`_SUPPORTED_TOOLS` 与 `MemoryToolName` 仍然只有带点的两个名字）。
+
+### ADD-061 `open_answer_stream` 增加 `tool_rounds` 种子参数（冻结签名之外的唯一扩展）
+
+冻结签名里 `AnswerTextStream.tool_rounds` 想表达"调用方已发生的工具轮数"，但每次续接都是
+**新的流实例**，属性只能从 0 起算，上限校验落不了地。因此加了一个**有默认值**的可选参数
+`tool_rounds: int = 0` 作种子（属性 = 种子 + 本轮是否真的请求过工具）；不传时行为与旧签名
+完全一致，既有 Fake 网关不受影响。
+
+### ADD-062 网关的 SDK 事实核对（`openai==2.53.0`）
+
+| 冻结假设 | 实测 |
+|---|---|
+| `response.function_call_arguments.delta` 带 `name` | **不带**（只有 delta/item_id/output_index）。name 只在 `output_item.added` 与 `arguments.done` 上，因此按 `output_index` 归并 added/delta/done 三类事件，name 取 added/done，`.done` 的 arguments 作为权威值覆盖 delta 累积 |
+| `strict` 工具 schema | 用 `strict=false`：strict 要求**全部字段必填且不接受 null**，与 memory 契约"省略即取默认值"直接冲突。JSON Schema 的 type/min/max/enum 与 `MemoryToolSearchRequest`/`MemoryToolReadRequest` 对齐，并有测试锁死同步关系 |
+
+### OPEN-009 工具名为空参数时不判"不可执行"，错误由服务端兜住
+
+网关只负责 JSON 解析：`arguments` 为空串按 `{}` 且 `executable=true`，因此模型对
+`memory.search` 不给 `queries` 时不会在网关被拦下，而是打到 memory 服务端由 Pydantic
+拒绝（422），再由图侧映射成 `MEMORY_TOOL_INVALID_ARGUMENT` 交回模型。要在网关就判
+"必填缺失"，需要网关解释每个工具的参数语义——与"网关不解释业务"的边界冲突，暂不做。
+
+### OPEN-010 `response.incomplete` / `response.failed` 终态事件不置 `truncated`（既有缺口）
+
+既有流式实现只在 `event_type == "response.completed"` 且 `status == "incomplete"` 时置
+`truncated`；SDK 里另有独立的 `response.incomplete` / `response.failed` 终态事件，真走到
+那条路径时 `truncated` 会保持 False（少一个降级标记）。这是**改动前就存在**的缺口，
+因"tools=None 零行为变化"的硬约束未在本 Phase 顺手修，登记待决。
+
+### ADD-059 prime 的提示词载体是 `SnapshotMemory.prime`（可选字段）
+
+§2.4 D1 要求"首轮 prime 注入（摘要 + 注册表目录）"，但没说它怎么进提示词。追代码发现
+`build_answer_view` 的 `long_term_memory` 只投 **status + learner** 两个键——prime 拿到
+手却**根本不会出现在模型输入里**（图和 memory 两侧都"实现完了"，提示词里却是空的）。
+
+处置：`SnapshotMemory` 增加**可选**字段 `prime: dict`（默认空 dict），
+`_memory_from_context` 从 `memory_context["prime"]` 取值，`build_answer_view` 仅在
+`prime` 非空时挂 `long_term_memory["prime"]` 键：
+
+- 关闭 prime 时视图 JSON **逐字不变**（不多一个空键），满足 §5.10 的"关闭即回滚"；
+- prime 随快照进 checkpoint，resume 后提示词不变（已加往返单测）；
+- 快照 `status` 只表达"注入内容是否被截断"：summary 缺失（当前无生产者）是**空状态**
+  而不是内容退化，因此 status 仍为 `available`，可观测性由 `memory_prime_degraded`
+  事件承担。否则在 Phase 7 落地生产者之前，所有用户的每一轮都会被标成 degraded。
+
+### ADD-058 工具循环的进度事件复用 `stage="memory"`
+
+§17.4.1 的 `turn.progress` 没有"记忆工具"专用阶段。工具循环复用了既有 `memory` 阶段
+（`status=started/completed`），续写轮的 answer 阶段标题改为"正在结合记忆继续回答"，
+避免前端看到两次"正在组织回答"。未新增 stage 取值（会改动事件契约）。
+
+### ADD-052 服务端三个端点的 flag 门控与 §5.13 清单差异
+
+见 ADD-048/ADD-049：端点始终挂载、read 不限制 memory_id 类型。两条都在 memory 侧
+小节记录，此处只做索引。
+
+### ADD-051 工具结果没有 `trace_id`（§5.7 要求，但无载体）
+
+§5.7 要求"工具返回都带 trace_id、document_version 和 citation key"。`document_version`
+与 citation key 有（read 响应带 version/checksum；rollout 的 `memory_tool_result` 记
+`document_versions`），但 **memory 侧三个响应契约里没有 trace_id 字段**。轮次级关联
+当前靠 conversation 的 `request_id`/`run_id`。补 trace_id 需要改 memory 侧响应契约，
+未做——登记待决。
 
 ---
 

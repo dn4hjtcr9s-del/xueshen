@@ -110,8 +110,11 @@ async def _recall_via_prime(
     return {
         "memory_prime": prime,
         "memory_context": {
-            "status": "available",
+            # 快照 status 只表达"注入的内容是否被截断"：summary 缺失（当前没有生产者）
+            # 是空状态而不是内容退化，由 `memory_prime_degraded` 事件标记记录可观测性。
+            "status": "degraded" if prime.get("summary_truncated") else "available",
             "prime": prime,
+            "truncated": bool(prime.get("summary_truncated")),
             # prime 模式下不做 query 检索，recommendations 保持为空，
             # 由工具按需下沉（§2.4 D3）
             "recommendations": [],
