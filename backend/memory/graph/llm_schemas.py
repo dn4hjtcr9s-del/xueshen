@@ -65,6 +65,9 @@ class CandidateMemory(BaseModel):
     confidence: float = Field(ge=0, le=1)
     evidence: list[ExtractedEvidence] = Field(min_length=1, max_length=20)
     graph_node_candidates: list[str] = Field(default_factory=list, max_length=5)
+    #: memory-rebuild §3.6②：候选涉及的相邻主题，供 planner 生成 `[[link]]`。
+    #: 只写主题名（不带 `[[...]]`），不改变候选自身的主体归属。
+    related_topic_hints: list[str] = Field(default_factory=list, max_length=5)
 
 
 class CandidateExtractionResult(BaseModel):

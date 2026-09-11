@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.memory.contracts.commands import (
     CommitMutationPlan,
+    FrontMatterPatch,
     LearnerPatch,
     MasteryPatch,
 )
@@ -676,6 +677,12 @@ async def prepare_commit_mutation_plans(
                 mastery_patch=(
                     MasteryPatch.model_validate(draft["mastery_patch"])
                     if draft.get("mastery_patch")
+                    else None
+                ),
+                # §3.6①：frontmatter_patch 是 v2 维护 name/description/aliases 的唯一通道
+                frontmatter_patch=(
+                    FrontMatterPatch.model_validate(draft["frontmatter_patch"])
+                    if draft.get("frontmatter_patch")
                     else None
                 ),
                 candidate_indexes=indexes,

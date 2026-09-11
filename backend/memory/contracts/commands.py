@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.memory.contracts.evidence import (
     ActivityEvidence,
@@ -324,14 +324,39 @@ class MasteryPatch(BaseModel):
     evidence_refs_to_add: list[str] = Field(default_factory=list, max_length=50)
 
 
+class FrontMatterPatch(BaseModel):
+    """v2 frontmatter 补丁（memory-rebuild §3.6① 的 ``frontmatter_patch`` 载荷）。
+
+    ``name`` 一般不变：它是 `[[link]]` 的解析键，改名会让既有链接全部失效，因此
+    补丁场景省略即表示"保持不变"，只有 create 时必须给。
+    ``description`` 必须是**单行**（它要投影进注册表目录的一行里）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    aliases: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("description")
+    @classmethod
+    def _single_line(cls, value: str | None) -> str | None:
+        if value is not None and ("\n" in value or "\r" in value):
+            raise ValueError("frontmatter description 必须是单行")
+        return value
+
+
 class MutationPlanDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target_memory_type: Literal["learner", "mastery"]
     topic_title: str | None = Field(default=None, max_length=120)
-    action: Literal["create", "merge", "replace", "append_evidence", "no_change"]
+    action: Literal[
+        "create", "merge", "replace", "append_evidence", "no_change", "frontmatter_patch"
+    ]
     learner_patch: LearnerPatch | None = None
     mastery_patch: MasteryPatch | None = None
+    frontmatter_patch: FrontMatterPatch | None = None
     candidate_indexes: list[int] = Field(default_factory=list, max_length=20)
     reasoning_summary: str = Field(max_length=500)
 
@@ -356,6 +381,7 @@ class CommitMutationPlan(BaseModel):
         "merge",
         "replace",
         "append_evidence",
+        "frontmatter_patch",
         "forget",
         "restore",
     ]
@@ -363,6 +389,9 @@ class CommitMutationPlan(BaseModel):
     deleted_version: int | None = Field(default=None, ge=1)
     learner_patch: LearnerPatch | None = None
     mastery_patch: MasteryPatch | None = None
+    #: v2：``frontmatter_patch`` 动作的载荷，也是 create/merge 时写 name/description/
+    #: aliases 的唯一通道（§3.6① 要求 planner 能维护 frontmatter v2）。
+    frontmatter_patch: FrontMatterPatch | None = None
     candidate_indexes: list[int] = Field(default_factory=list, max_length=20)
     replacement: MemoryReplacement | None = None
     reason: str | None = Field(default=None, max_length=500)

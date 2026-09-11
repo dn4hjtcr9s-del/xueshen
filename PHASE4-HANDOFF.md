@@ -14,7 +14,7 @@
 分支 `codex/memory-rebuild-implementation`，工作区**有未提交改动**（见第五节清单）。
 Phase 0/1/2/3 已提交（`c13688a`、`1748dc7`、`c2dc6de`、`d9b3f7c`）。
 
-### 已完成并验证
+### 已完成并验证（第二批：契约扩展与版本升级）
 
 | 项 | 文件 | 验证 |
 |---|---|---|
@@ -23,6 +23,10 @@ Phase 0/1/2/3 已提交（`c13688a`、`1748dc7`、`c2dc6de`、`d9b3f7c`）。
 | v2 planner 提示词 | `backend/memory/graph/prompts/build_mutation_plan_v2.md` | 子代理交付 |
 | v3 extractor 提示词 | `backend/memory/graph/prompts/extract_candidates_v3.md` | 子代理交付 |
 | 提示词/schema 绑定校验函数 | `backend/memory/graph/prompt_loader.py::validate_schema_prompt_binding` | 纯函数，10 个单测（`tests/unit/test_prompt_schema_binding.py`） |
+| ✅ 第 1 项：`frontmatter_patch` 动作 + `FrontMatterPatch` 模型 | `contracts/commands.py` | 两个 Literal 均已加；`CommitMutationPlan` 已能承载 |
+| ✅ 第 2 项：`related_topic_hints` | `graph/llm_schemas.py::CandidateMemory` | 已加（≤5） |
+| ✅ 第 3 项：删除提示词兼容分支 | 两个 v2/v3 提示词 | 已删净 |
+| ✅ 第 4 项：升级版本常量 | `prompt_loader.py` | v1→v2 / v2→v3；校验函数现默认通过 |
 
 ### markdown_schema.py 已具备的能力（不要再重写）
 
@@ -40,7 +44,7 @@ Phase 0/1/2/3 已提交（`c13688a`、`1748dc7`、`c2dc6de`、`d9b3f7c`）。
 
 ## 二、剩余工作（按此顺序）
 
-### 1. 扩展 mutation plan 契约：`frontmatter_patch` 动作 + frontmatter 承载字段
+### ~~1. 扩展 mutation plan 契约~~（已完成）：`frontmatter_patch` 动作 + frontmatter 承载字段
 
 **为什么**：§3.6① 要求 planner 能输出 `frontmatter_patch` 动作，但当前 schema 没有它。
 子代理用 `to_strict_json_schema` 实测确认：
@@ -58,14 +62,14 @@ Phase 0/1/2/3 已提交（`c13688a`、`1748dc7`、`c2dc6de`、`d9b3f7c`）。
 `description` / `aliases`（`name` 一般不变）的字段；同步 `summary.py` 里消费
 `action` 的分支与 validator。
 
-### 2. 扩展 `CandidateMemory`：`related_topic_hints`
+### ~~2. 扩展 `CandidateMemory`：`related_topic_hints`~~（已完成）
 
 **位置**：`backend/memory/graph/llm_schemas.py:49-67`（8 个字段，`extra="forbid"`）。
 要加 `related_topic_hints: list[str]`（≤5，见 v3 提示词）。"主体归属"当前只能靠
 `topic_title`（mastery）与 `memory_type`（learner）表达——子代理已按此写提示词，
 **不需要**再加独立归属字段。
 
-### 3. 删掉两个提示词里的"兼容说明"分支
+### ~~3. 删掉两个提示词里的"兼容说明"分支~~（已完成）
 
 子代理在 schema 未扩展时加了两条防御性说明（各 3 行）：
 - `build_mutation_plan_v2.md`「动作选择」末尾：schema 无 `frontmatter_patch` 时改用 `merge`
@@ -73,7 +77,7 @@ Phase 0/1/2/3 已提交（`c13688a`、`1748dc7`、`c2dc6de`、`d9b3f7c`）。
 
 **第 1、2 项落地后必须删掉这两条**，否则提示词自我削弱。
 
-### 4. 升级提示词版本常量
+### ~~4. 升级提示词版本常量~~（已完成）
 
 `backend/memory/graph/prompt_loader.py`：
 - `BUILD_MUTATION_PLAN_PROMPT_VERSION`: `build_mutation_plan_v1` → `build_mutation_plan_v2`
@@ -89,6 +93,18 @@ Phase 0/1/2/3 已提交（`c13688a`、`1748dc7`、`c2dc6de`、`d9b3f7c`）。
 - `backend/app.py` 的 `@app.on_event("startup")`（约 567 行）
 
 ### 6. index 投影落 PG
+
+**⚠️ 断点警告（2026-09-13）**：本项**已尝试过一次，改坏了 `memory_service.py` 并被回滚**。
+坏因：用 `s.replace("async def ", helper + "async def ", 1)` 插入辅助函数，命中了第一个
+`async def`（在 class 内部），导致整个文件缩进崩坏。**重做时请显式指定插入锚点**
+（如 `\nasync def _existing_name(`），并在改完后**立即**跑 `ruff check` 与
+`python -c "import backend.memory.services.memory_service"`。已确认可用的做法见下。
+
+需要改两处：
+- `_apply_frontmatter_patch(doc, patch)`（模块级辅助，注意**只在 name+description 齐备时**
+  才把 `schema_version` 升到 v2——半套 frontmatter 渲染成 v2 会让文档下次读不出来）
+- learner/mastery 两个分支里 `plan.frontmatter_patch` 的应用点，以及 `index_data` 增加
+  `aliases` / `related_topic_keys`，并把 aliases 并入 `search_text`
 
 把 v2 的 `description` / `aliases` / `related_topic_keys` / `keywords` 投影进
 `memory_index_entries`（迁移已加好 `aliases` + `related_topic_keys` 两列 + GIN 索引）。

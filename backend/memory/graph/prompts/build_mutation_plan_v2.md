@@ -63,10 +63,6 @@
   （`name` 一般不变：它是对外链接键，改名会让既有 `[[link]]` 全部失效）。
 - `no_change`：候选与现有内容重复或无长期价值。
 
-**兼容说明**：`frontmatter_patch` 依赖 §3.6① 的配套 schema 扩展。若当前 Structured Outputs Schema
-尚未包含该动作，须改用 `merge` 表达同一意图（在 `reasoning_summary` 里写明要补丁的
-`description` / `aliases` 取值），**禁止**输出 schema 未声明的动作名或字段名，否则整个计划会被拒绝。
-
 ## 禁止事项
 
 - 不得生成 `user_id`、最终 `topic_key`、绝对路径、SQL、稳定 ID、`expected_version`、删除（forget/restore）命令或可执行工具调用。

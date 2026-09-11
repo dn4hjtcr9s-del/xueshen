@@ -75,7 +75,3 @@
 - `graph_node_candidates` 仅在你能明确对应知识节点时填写节点 ID（形如 nNNN），不确定则不填。
 - `ignored_reason_codes` 使用大写下划线风格，如 `PRIVACY_FILTERED`、`ASSISTANT_STATEMENT_ONLY`、`NO_LONG_TERM_VALUE`。
 - 直接输出 JSON 本体，禁止使用 Markdown 代码围栏（如 ```json）包裹输出。
-- **兼容说明**：主体归属与 `related_topic_hints` 依赖 §3.6② 的配套 schema 扩展。若当前
-  Structured Outputs Schema 尚未包含这两个字段，须把归属主题写进 `topic_title`（learner 候选除外）、
-  把相邻主题以主题名形式补在 `summary` 末尾并标注"相邻主题："，
-  **禁止**输出 schema 未声明的字段名，否则整个提取结果会被拒绝。

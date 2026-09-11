@@ -13,8 +13,8 @@ from pathlib import Path
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
-EXTRACT_CANDIDATES_PROMPT_VERSION = "extract_candidates_v2"
-BUILD_MUTATION_PLAN_PROMPT_VERSION = "build_mutation_plan_v1"
+EXTRACT_CANDIDATES_PROMPT_VERSION = "extract_candidates_v3"
+BUILD_MUTATION_PLAN_PROMPT_VERSION = "build_mutation_plan_v2"
 
 #: 当前长期记忆文档 frontmatter 的 schema 版本。
 DOCUMENT_SCHEMA_VERSION = 2

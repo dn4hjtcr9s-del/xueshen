@@ -45,6 +45,8 @@ class MutationResult(BaseModel):
         "merge",
         "replace",
         "append_evidence",
+        # memory-rebuild §3.6①：v2 frontmatter 补丁动作（结果回执里也要能表达）
+        "frontmatter_patch",
         "forget",
         "restore",
     ]
