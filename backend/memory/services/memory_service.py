@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.memory.contracts.commands import (
     CommitMutationPlan,
+    FrontMatterPatch,
     LearnerPatch,
     LearnerReplacement,
     MasteryPatch,
@@ -44,10 +45,12 @@ from backend.memory.persistence import outbox as outbox_repo
 from backend.memory.persistence.database import acquire_user_lock
 from backend.memory.storage.base import MarkdownStore, logical_path_for
 from backend.memory.storage.markdown_schema import (
+    SCHEMA_VERSION_V2,
     IndexDocument,
     IndexEntry,
     LearnerDocument,
     MasteryDocument,
+    normalize_aliases,
     parse_index,
     parse_learner,
     parse_mastery,
@@ -140,6 +143,25 @@ def mastery_from_replacement(base: MasteryDocument, replacement: MasteryReplacem
     base.difficulties = _dedupe_keep_order(replacement.difficulties)
     base.review_advice = _dedupe_keep_order(replacement.review_advice)
     base.evidence_refs = _dedupe_keep_order(replacement.evidence_refs)
+
+
+def apply_frontmatter_patch(
+    doc: LearnerDocument | MasteryDocument, patch: FrontMatterPatch
+) -> None:
+    """把 v2 frontmatter 补丁应用到文档（memory-rebuild §3.6①）。
+
+    **只在 name 与 description 齐备时才把文档升到 schema v2**：v2 解析器要求这两个
+    字段必填，半套 frontmatter 渲染成 v2 会让文档下一次读不出来。补丁不完整时保持
+    原版本——宁可晚一版升级，也不能写出自己解析不了的文档。
+    """
+    if patch.name:
+        doc.name = patch.name
+    if patch.description:
+        doc.description = patch.description
+    if patch.aliases:
+        doc.aliases = normalize_aliases([*doc.aliases, *patch.aliases])
+    if doc.name and doc.description:
+        doc.schema_version = max(doc.schema_version, SCHEMA_VERSION_V2)
 
 
 def _changed_learner_sections(before: LearnerDocument, after: LearnerDocument) -> list[str]:
@@ -262,6 +284,8 @@ class MemoryService:
             )
             if plan.learner_patch is not None:
                 apply_learner_patch(base, plan.learner_patch)
+            if plan.frontmatter_patch is not None:
+                apply_frontmatter_patch(base, plan.frontmatter_patch)
             if plan.replacement is not None:
                 assert isinstance(plan.replacement, LearnerReplacement)
                 learner_from_replacement(base, plan.replacement)
@@ -274,8 +298,17 @@ class MemoryService:
                 "title": "学习者档案",
                 "summary": "；".join((base.goals or base.preferences or ["学习者档案"])[:3]),
                 "keywords": [],
+                # §3.4：alias 是检索键、[[link]] 目标是路由依据，都要进投影与 search_text
+                "aliases": list(base.aliases),
+                "related_topic_keys": list(base.links),
                 "search_text": " ".join(
-                    ["学习者档案", *base.preferences, *base.goals, *base.plans]
+                    [
+                        "学习者档案",
+                        *base.aliases,
+                        *base.preferences,
+                        *base.goals,
+                        *base.plans,
+                    ]
                 ),
                 "changed_sections": changed,
             }
@@ -298,6 +331,8 @@ class MemoryService:
             mbase.topic_title = plan.topic_title
         if plan.mastery_patch is not None:
             apply_mastery_patch(mbase, plan.mastery_patch)
+        if plan.frontmatter_patch is not None:
+            apply_frontmatter_patch(mbase, plan.frontmatter_patch)
         if plan.replacement is not None:
             assert isinstance(plan.replacement, MasteryReplacement)
             mastery_from_replacement(mbase, plan.replacement)
@@ -309,9 +344,12 @@ class MemoryService:
             "title": mbase.topic_title,
             "summary": mbase.overview or "；".join(mbase.understood[:3]),
             "keywords": [],
+            "aliases": list(mbase.aliases),
+            "related_topic_keys": list(mbase.links),
             "search_text": " ".join(
                 [
                     mbase.topic_title,
+                    *mbase.aliases,
                     mbase.overview,
                     *mbase.understood,
                     *mbase.difficulties,
@@ -693,16 +731,19 @@ class MemoryService:
                 """
                 INSERT INTO memory_index_entries (
                     user_id, memory_id, source_version, memory_type, topic_key,
-                    title, summary, keywords, search_text, evidence_refs, updated_at
+                    title, summary, keywords, aliases, related_topic_keys,
+                    search_text, evidence_refs, updated_at
                 ) VALUES (
                     :user_id, :memory_id, :source_version, :memory_type, :topic_key,
-                    :title, :summary, :keywords, :search_text,
-                    CAST(:evidence_refs AS jsonb), :updated_at
+                    :title, :summary, :keywords, :aliases, :related_topic_keys,
+                    :search_text, CAST(:evidence_refs AS jsonb), :updated_at
                 )
                 ON CONFLICT (user_id, memory_id) DO UPDATE
                 SET source_version = EXCLUDED.source_version,
                     title = EXCLUDED.title, summary = EXCLUDED.summary,
-                    keywords = EXCLUDED.keywords, search_text = EXCLUDED.search_text,
+                    keywords = EXCLUDED.keywords, aliases = EXCLUDED.aliases,
+                    related_topic_keys = EXCLUDED.related_topic_keys,
+                    search_text = EXCLUDED.search_text,
                     evidence_refs = EXCLUDED.evidence_refs,
                     updated_at = EXCLUDED.updated_at
                 """
@@ -716,6 +757,9 @@ class MemoryService:
                 "title": index_data["title"],
                 "summary": index_data["summary"][:2000],
                 "keywords": index_data["keywords"],
+                # v2 投影（§3.4）：旧调用方可能不传这两项，用 get 兼容
+                "aliases": list(index_data.get("aliases") or []),
+                "related_topic_keys": list(index_data.get("related_topic_keys") or []),
                 "search_text": index_data["search_text"],
                 "evidence_refs": json.dumps(evidence_refs[:100], ensure_ascii=False),
                 "updated_at": now,

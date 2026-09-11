@@ -3656,7 +3656,8 @@
               "cleanup_orphan_versions",
               "cleanup_checkpoints",
               "purge_account_memory",
-              "summarize_user_memory_batch"
+              "summarize_user_memory_batch",
+              "migrate_markdown_schema_v2"
             ],
             "title": "Operation Type",
             "type": "string"
@@ -3936,6 +3937,7 @@
               "merge",
               "replace",
               "append_evidence",
+              "frontmatter_patch",
               "forget",
               "restore"
             ],

@@ -38,6 +38,7 @@ async def search_candidates(
         text(
             r"""
             SELECT memory_id, memory_type, topic_key, title, summary, keywords,
+                   aliases, related_topic_keys,
                    evidence_refs, confidence, source_version, updated_at,
                    similarity(search_text, :query) AS similarity
             FROM memory_index_entries

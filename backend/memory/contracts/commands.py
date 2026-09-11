@@ -271,6 +271,8 @@ class MaintenanceCommand(BaseModel):
         "cleanup_orphan_versions",
         "cleanup_checkpoints",
         "purge_account_memory",
+        # memory-rebuild §5.6 Phase 4：v1 文档逐用户追加 v2 版本
+        "migrate_markdown_schema_v2",
     ]
     target_user_id: UUID | None = None
     dry_run: bool = False

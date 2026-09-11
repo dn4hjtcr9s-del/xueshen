@@ -458,7 +458,115 @@ Phase 1 起才会出现真实的 flag 分支，届时该结论需要重新验证
 
 ## Phase 4：长期记忆 Markdown schema v2
 
-（未开始）
+### DEV-009 §3.3 描述的"KG registry 强校验"在代码里**不存在**（文档有误，未按文档改）
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §3.3「拆除 [local_markdown.py](backend/memory/storage/local_markdown.py) 33–40 行 `validate_existing_topic_key` 对 KG registry 的强校验」 |
+| 实际 | `validate_existing_topic_key`（`contracts/common.py`）是**纯语法校验**：长度、控制字符、路径穿越字符、连字符规则——docstring 写明用途是"API 路径参数防御"，**完全不触碰 KG registry**。写入路径（`_validate_memory_id`）也只做语法校验 |
+| 结论 | **"mastery 主题自由建档"当前已经成立**，任何语法合法的 topic_key 都能建档，无需改代码 |
+| 处置 | **没有按文档删除它**。删掉只会让存储层丢掉路径穿越防护（它同时被 `api/memories.py` 用于路由参数防御），而不会带来文档想要的效果 |
+
+### DEV-010 §5.6 要求 Phase 4 升版三个提示词，实际只出两个
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.6「提示词绑定」列出 `build_mutation_plan_v1`→v2、`extract_candidates`→v3、**新增 `summary_consolidate_v1`** |
+| 实现 | 只做了前两个。`summary_consolidate_v1` 是 consolidation 末段（Phase 7 / §5.9）的提示词，Phase 4 没有消费方 |
+| 依据 | 用户决策（2026-09-13）：按批次边界划分，consolidation 提示词随 Phase 7 一起落地 |
+
+### ADD-035 index v2 复用 `title`/`summary` 而非新开列
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §3.4 说索引项是 `memory_id | name | description | aliases | keywords | version | updated_at` |
+| 实现 | 迁移只新增 `aliases` 与 `related_topic_keys` 两列；`name` 就是既有 `title` 列、`description` 就是既有 `summary` 列 |
+| 依据 | 用户决策（2026-09-13）：它们本就是同一份投影，再开两列只会让两边漂移 |
+
+### ADD-036 解析器**始终**双读；flag 只管写入与迁移
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.2 B 定义 `memory_schema_v2_read_enabled`（"启用 v1/v2 双读路径"）、§5.10 把它列为灰度阶段 |
+| 实现 | `parse_learner` / `parse_mastery` / `parse_index` **无条件**按 frontmatter 的 `schema_version` 分派；不存在"关闭双读"的代码路径。v2 的写入由迁移任务与 `frontmatter_patch` 触发 |
+| 依据 | 用户决策（2026-09-13）。理由：历史 `versions/` 永不迁移，双读是**长期能力**而非灰度开关；若让 flag 控制读取，一旦误关 flag，已迁移的文档立刻读不出来 |
+| 影响 | `memory_schema_v2_read_enabled` 目前**没有代码读取方**（保留配置位，不产生行为） |
+
+### ADD-037 `frontmatter_patch` 必须整套扩展契约，否则整批被拒
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §3.6① 说这是"配套代码变更"，但没说涉及几处 |
+| 实现 | **三处** action Literal 必须同时改：`MutationPlanDraft.action`（planner 输入）、`CommitMutationPlan.action`（内部计划）、`MutationResult.action`（结果回执）。第三处是 mypy strict 逼出来的——漏掉它编译期就报错 |
+| 依据 | 三者都是 `extra="forbid"` + strict JSON schema（`additionalProperties=False`）。模型一旦输出未声明的动作名，**整批计划**会被 `OpenAISchemaInvalidError` 拒绝，而不是只丢一条 |
+| 影响 | 提示词里曾临时加过 3 行"若 schema 未扩展则改用 merge"的兼容说明；契约落地后**已删除**——留着会让提示词自我削弱 |
+
+### ADD-038 迁移是**机械投影**，不调用 LLM
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §2.7 决议 A 组："迁移 = 后台维护任务把 current/ 按 v2 重新渲染并走正常 write_immutable_version 追加新版本" |
+| 实现 | `_upgrade_to_schema_v2`：`name` 取既有标题、`description` 取概述/偏好的**首行**、`aliases` **留空**、`links` 从正文 `[[...]]` 现算 |
+| 依据 | 机械投影可确定性重放、无 LLM 成本、失败可定位。迁移只保证"能读、格式合规"；更准确的 description/aliases 由 planner 后续用 `frontmatter_patch` 补 |
+| 影响 | 迁移后所有文档的 `aliases` 为空数组，需要靠后续总结逐步充实 |
+
+### ADD-039 frontmatter 补丁只在 name+description 齐备时才升 v2
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | 无 |
+| 实现 | `apply_frontmatter_patch` 应用补丁后，**只有 `name` 与 `description` 都非空**才把 `schema_version` 提到 v2 |
+| 依据 | v2 解析器要求这两个字段必填。若补丁只给了一半就升版，会渲染出一个**自己下次读不出来**的文档——这是比"晚一版升级"严重得多的故障 |
+
+### ADD-040 迁移任务的门控与调度时刻
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.6 只说"在 scheduler.py 增加 `migrate_markdown_schema_v2`"，未给时刻与门控实现 |
+| 实现 | `ScheduledTask("migrate_markdown_schema_v2", daily_at=time(4, 15))`（避开既有 02:30–05:00 的整点任务）；门控 `SchedulerConfig.schema_v2_migration_enabled`，由 `settings.memory_schema_v2_migration_enabled` 装配，**默认 false** |
+| 依据 | §5.6 要求复用 maintenance_runs + cursor 续跑，与 `verify_checksums` 同构（一次 run + 全局文档 cursor） |
+
+### ADD-041 index 文档不在迁移任务处理范围内
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §5.6 步骤 3 说迁移顺序是 "learner → mastery → index" |
+| 实现 | 迁移任务显式 `continue` 跳过 `memory_type == "index"`；index 由既有 `rebuild_index` 维护链路再生 |
+| 依据 | index 是**文档的可再生派生物**（§3.4："文档是唯一事实源，index 是可再生派生物"）。单独迁移它会产生"index 说 v2、被索引的文档还是 v1"的不一致窗口 |
+
+### ADD-042 提示词删掉了 `<memory_listing>` 标签引用
+
+| 项 | 内容 |
+|---|---|
+| 文档位置 | §3.1 引用 OPUS-5 的 `<memory_listing>` 目录机制 |
+| 实现 | v2 提示词改写为"会投影进长期记忆注册表目录"，不再写该标签 |
+| 依据 | 全仓库 grep 后确认：只有 `memory-rebuild.md` 与 `OPUS-5.md` 提到该标签，`backend/` **无任何实现**。写了会让模型误以为存在该注入格式（D1 首轮注入属 Phase 5） |
+
+### OPEN-007 Phase 4 缺 DB 集成测试
+
+现状：已有 32 个单元测试（schema v2 往返/校验/link/alias 22 个 + 迁移逻辑 10 个），但
+§5.6「迁移验收」中的**需要真实库**的部分**尚未覆盖**：
+- 同一用户迁移两次：第二次无新版本、无 checksum 抖动；
+- 历史 `versions/` 文件**字节级不变**；
+- 迁移中 kill scheduler 后可从 cursor 续跑；单用户失败不阻塞他人。
+
+待决：补 `tests/integration/test_memory_schema_migration.py`。这是 Phase 4 唯一未闭合的验收项。
+
+### ADD-043 `[[link]]` 的 name 全局唯一目前只是**生成侧纪律**
+
+`markdown_schema.py` 实现了 `[[...]]` 的提取与 aliases 规范化，但**没有** name 唯一性校验。
+提示词里把"name 全局唯一"写成生成侧要求。若将来发现模型产出重名 name，需要在
+consolidation（Phase 7）里按 aliases 归并，而不是在解析器里报错（悬空与重名都属可接受
+的中间态，最终由 nightly 批收敛）。
+
+---
+
+### 关于 Phase 4 的实现顺序（2026-09-13）
+
+Phase 4 分两批落地：`001c42c`（schema 双读 + 提示词，中间提交）与收尾提交（契约扩展 +
+index 投影 + 迁移任务 + 测试）。中间有一次 `memory_service.py` 被改坏并回滚：用
+`str.replace("async def ", helper + "async def ", 1)` 插入辅助函数时命中了类内部的第一个
+`async def`，导致整个文件缩进崩坏。教训与正确的锚点做法已记入 `PHASE4-HANDOFF.md`。
 
 ---
 

@@ -64,6 +64,9 @@ class SchedulerConfig:
     continuation_seconds: float = 30.0
     notification_retention_days: int = 90
     notification_purge_max_batches: int = 10
+    #: memory-rebuild §5.6：v1→v2 文档迁移任务的门控（默认关闭）。
+    #: "实现不等批准，启用必须等批准"——关闭时任务不建 run、不产生任何调度。
+    schema_v2_migration_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,9 @@ TASKS: tuple[ScheduledTask, ...] = (
     ScheduledTask("cleanup_checkpoints", daily_at=time(3, 30)),
     ScheduledTask("purge_notifications", daily_at=time(3, 45)),
     ScheduledTask("verify_checksums", daily_at=time(4, 0)),
+    # memory-rebuild §5.6 Phase 4：把 v1 活动文档逐个追加 v2 版本。
+    # 门控 memory_schema_v2_migration_enabled（默认 false），关闭时不产生任何调度。
+    ScheduledTask("migrate_markdown_schema_v2", daily_at=time(4, 15)),
     # 认证会话清理（方案 §4.4 / 附录 A.2 #8）：过期超过 30 天的 refresh family
     ScheduledTask("cleanup_expired_refresh_families", daily_at=time(4, 30)),
     ScheduledTask("check_backup_runs", daily_at=time(5, 0)),
@@ -417,6 +423,52 @@ class Scheduler:
                 )
         return outcome != "done"
 
+    async def _task_migrate_markdown_schema_v2(self, now: datetime) -> bool:
+        """把 v1 活动文档逐个追加 v2 版本（§5.6）。
+
+        与 verify_checksums 同构：一次 run + 全局文档 cursor 续跑，跑不完下个周期接着跑。
+        **门控**：``memory_schema_v2_migration_enabled`` 关闭时直接返回，不建 run，
+        因此默认部署下本任务完全不可见。
+        """
+        if not self.config.schema_v2_migration_enabled:
+            return False
+        date = self._local_date(now)
+        key = f"migrate-markdown-schema-v2:{date}"
+        outcome: Literal["scheduled", "waiting", "done"] = "done"
+        async with self.session_factory() as session:
+            async with session.begin():
+                run, _created = await maintenance_repo.create_or_reuse_run(
+                    session,
+                    run_id=uuid4(),
+                    maintenance_type="migrate_markdown_schema_v2",
+                    idempotency_key=key,
+                )
+                if run["operation_id"] is None and run["status"] == "queued":
+                    rows = await docs_repo.list_active_documents_page(
+                        session, batch_size=1, cursor=run["cursor"]
+                    )
+                    if not rows:
+                        await maintenance_repo.complete_run(
+                            session,
+                            run_id=run["run_id"],
+                            status="succeeded",
+                            cursor=None,
+                            result={"skipped": "no_active_documents"},
+                        )
+                        return False
+                outcome = await self._ensure_graph_batch(
+                    session,
+                    run=run,
+                    operation_type="migrate_markdown_schema_v2",
+                    user_id=SYSTEM_USER_ID,
+                    payload_factory=lambda cursor: MaintenanceCommand(
+                        kind="migrate_markdown_schema_v2",
+                        cursor=cursor,
+                        batch_size=self.config.batch_size,
+                    ),
+                )
+        return outcome != "done"
+
     async def _task_purge_notifications(self, now: datetime) -> bool:
         """清理超过 90 天的用户通知（§13.13）；不进入 Graph，run 由 Scheduler 直接收尾。"""
         date = self._local_date(now)
@@ -598,6 +650,7 @@ async def _run() -> None:
             config=SchedulerConfig(
                 timezone=settings.memory_scheduler_timezone,
                 notification_retention_days=settings.memory_notification_retention_days,
+                schema_v2_migration_enabled=settings.memory_schema_v2_migration_enabled,
             ),
             maintenance_gate=maintenance_gate,
             auth_session_factory=auth_db.session_factory,

@@ -138,6 +138,11 @@ async def _run() -> None:
     db = Database(settings)
     maintenance_gate = MaintenanceGate(db.engine)
     try:
+        # memory-rebuild §3.6④：文档 schema 与 planner prompt 必须配套。
+        # 放在最前面 fail-fast：配置错位时不要启动到一半才发现（会写出自己读不回的文档）。
+        from backend.memory.graph.prompt_loader import validate_schema_prompt_binding
+
+        validate_schema_prompt_binding()
         store = LocalMarkdownStore(settings.memory_storage_root)
         memory_service = MemoryService(
             settings=settings, session_factory=db.session_factory, store=store

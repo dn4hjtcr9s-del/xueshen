@@ -67,6 +67,8 @@ OperationType = Literal[
     "purge_account_memory",
     # memory-rebuild §2.6： nightly 批量总结（每用户一个批量 operation）。
     "summarize_user_memory_batch",
+    # memory-rebuild §5.6 Phase 4：v1→v2 文档 schema 迁移（Scheduler 日任务）。
+    "migrate_markdown_schema_v2",
 ]
 
 OperationStatus = Literal[
@@ -118,6 +120,8 @@ OPERATION_ROUTING: dict[str, tuple[InputKind, int]] = {
     # 批量总结是"对话总结"的批量形态（§2.6），故与 conversation_evidence 同为
     # evidence + P2：max_attempts=4，claim 排序在 P0/P1 之后、P3/P4 之前。
     "summarize_user_memory_batch": ("evidence", PRIORITY_P2),
+    # 文档 schema 迁移是系统维护动作，与 cleanup_orphan_versions 同族（P4、max_attempts=3）
+    "migrate_markdown_schema_v2": ("maintenance", PRIORITY_P4),
 }
 
 #: 任务级 max_attempts（§11.2）

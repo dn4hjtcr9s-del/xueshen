@@ -566,6 +566,10 @@ def create_app(
 
     @app.on_event("startup")
     async def _startup() -> None:
+        # memory-rebuild §3.6④：文档 schema 与 planner prompt 版本必须配套，fail-fast。
+        from backend.memory.graph.prompt_loader import validate_schema_prompt_binding
+
+        validate_schema_prompt_binding()
         # §7.10：同步 Pillow 像素上限作为显式拒绝后的双保险
         from backend.community.storage.validation import configure_image_security
 

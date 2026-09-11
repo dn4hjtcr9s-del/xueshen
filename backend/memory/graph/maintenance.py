@@ -24,9 +24,66 @@ from backend.memory.persistence import documents as docs_repo
 from backend.memory.persistence import maintenance as maintenance_repo
 from backend.memory.persistence.database import exec_rowcount
 from backend.memory.storage.base import sha256_hex
-from backend.memory.storage.markdown_schema import MarkdownParseError, parse_learner, parse_mastery
+from backend.memory.storage.markdown_schema import (
+    SCHEMA_VERSION_V2,
+    MarkdownParseError,
+    document_links,
+    parse_learner,
+    parse_mastery,
+    render_learner,
+    render_mastery,
+)
 
 logger = logging.getLogger("memory.maintenance")
+
+
+def _first_line(candidates: list[str]) -> str:
+    """取首个非空内容并压成单行（description 必须单行）。"""
+    for item in candidates:
+        text = " ".join(str(item).split())
+        if text:
+            return text[:200]
+    return ""
+
+
+def _upgrade_to_schema_v2(*, memory_type: str, text: str) -> str | None:
+    """把 v1 文档文本机械升级为 v2；已是 v2 返回 None（幂等）。
+
+    **只做机械投影、不调用 LLM**（§2.7 决议 A 组："迁移 = 后台维护任务把 current/ 按
+    v2 重新渲染并走正常 write_immutable_version 追加新版本"）：
+    ``name`` 取既有标题，``description`` 取既有概述/偏好的首行，``aliases`` 留空，
+    ``links`` 从正文 `[[...]]` 现算。更准确的 description/aliases 由 planner 后续用
+    ``frontmatter_patch`` 补——迁移只保证"能读、格式合规"。
+    """
+    if memory_type == "learner":
+        learner = parse_learner(text)
+        if learner.schema_version >= SCHEMA_VERSION_V2:
+            return None
+        learner.name = learner.name or "学习者档案"
+        learner.description = (
+            learner.description
+            or _first_line([*learner.goals, *learner.preferences])
+            or "学习偏好与目标"
+        )
+        learner.links = learner.links or document_links(
+            learner.preferences, learner.goals, learner.plans
+        )
+        learner.schema_version = SCHEMA_VERSION_V2
+        return render_learner(learner)
+    if memory_type == "mastery":
+        mastery = parse_mastery(text)
+        if mastery.schema_version >= SCHEMA_VERSION_V2:
+            return None
+        mastery.name = mastery.name or mastery.topic_title
+        mastery.description = (
+            mastery.description or _first_line([mastery.overview]) or f"主题：{mastery.topic_title}"
+        )
+        mastery.links = mastery.links or document_links(
+            mastery.overview, mastery.understood, mastery.difficulties, mastery.review_advice
+        )
+        mastery.schema_version = SCHEMA_VERSION_V2
+        return render_mastery(mastery)
+    return None
 
 
 async def run_maintenance(
@@ -322,6 +379,85 @@ async def _execute_batch(
             "checked": checked,
             "corrupted": corrupted,
             "rematerialized": rematerialized,
+            "dry_run": payload.dry_run,
+            "next_cursor": None if finished else next_cursor,
+        }
+
+    if kind == "migrate_markdown_schema_v2":
+        # memory-rebuild §5.6：把 v1 活动文档**追加**一个 v2 版本并更新 current。
+        # 铁律：versions/ 历史文件永不原地改写（§2.7 决议 A 组）——本处理器只调用
+        # 正常 write_immutable_version 追加新版本，因此 checksum 级联不会失效、
+        # 回滚语义不受损。index 文档由 rebuild_index 重新生成，不在此处理。
+        rows = await docs_repo.list_active_documents_page(
+            session, batch_size=payload.batch_size, cursor=payload.cursor
+        )
+        migrated = 0
+        skipped_already_v2 = 0
+        failures: list[dict[str, Any]] = []
+        next_cursor = None
+        for row in rows:
+            next_cursor = f"{row['user_id']}:{row['memory_id']}"
+            if row["memory_type"] == "index":
+                continue
+            try:
+                content = await store.read_version(
+                    user_id=row["user_id"], storage_key=row["active_storage_key"]
+                )
+            except FileNotFoundError:
+                failures.append(
+                    {
+                        "user_id": str(row["user_id"]),
+                        "memory_id": row["memory_id"],
+                        "reasons": ["active_version_missing"],
+                    }
+                )
+                continue
+            try:
+                upgraded = _upgrade_to_schema_v2(
+                    memory_type=row["memory_type"], text=content.decode("utf-8")
+                )
+            except (MarkdownParseError, UnicodeDecodeError) as exc:
+                # 坏文档不阻塞同批其他用户（§5.6 迁移验收）
+                failures.append(
+                    {
+                        "user_id": str(row["user_id"]),
+                        "memory_id": row["memory_id"],
+                        "reasons": [f"parse_failed:{type(exc).__name__}"],
+                    }
+                )
+                continue
+            if upgraded is None:
+                skipped_already_v2 += 1  # 已是 v2：幂等跳过，不产生新版本
+                continue
+            migrated += 1
+            if payload.dry_run:
+                continue
+            new_version = int(row["active_version"]) + 1
+            encoded = upgraded.encode("utf-8")
+            stored = await store.write_immutable_version(
+                user_id=row["user_id"],
+                memory_id=row["memory_id"],
+                version=new_version,
+                content=encoded,
+            )
+            await docs_repo.set_active_version(
+                session,
+                user_id=row["user_id"],
+                memory_id=row["memory_id"],
+                active_version=new_version,
+                active_storage_key=stored.storage_key,
+                active_checksum=stored.checksum,
+            )
+            await store.materialize_current(
+                user_id=row["user_id"], memory_id=row["memory_id"], content=encoded
+            )
+        finished = len(rows) < payload.batch_size
+        return {
+            "kind": kind,
+            "status": "done" if finished else "continue",
+            "migrated": migrated,
+            "skipped_already_v2": skipped_already_v2,
+            "failures": failures,
             "dry_run": payload.dry_run,
             "next_cursor": None if finished else next_cursor,
         }
