@@ -855,6 +855,12 @@ class MemoryService:
         link；``restore`` 由调用方重新绑定；调用方给出节点集合时，消失的节点依旧被置
         inactive（情况 1）。
 
+        **情况 2 的版本判据是"``active`` 行里最高版本的那一批"**（review-3 残留）：文档
+        活动版本会被非提交路径整格甚至多格跳跃（迁移 / restore / 手工修版本 / 未来的批量
+        回填），"恰好等于 ``active_version - 1``"的谓词在落后 ≥2 版时永远找不到既有映射，
+        该主题的 KG 双写就会**永久** ``no_graph_mapping``。具体对齐规则与边界见
+        :func:`backend.memory.persistence.graph_states.align_active_graph_links`。
+
         **情况 1 的两条铁律**（评审新发现 1）：
 
         - 置 inactive 只允许**一次**调用 + 集合排除。`deactivate_graph_links` 的 SQL
@@ -869,22 +875,19 @@ class MemoryService:
         """
         from backend.memory.persistence import graph_states as gs_repo
 
-        # 一次取齐：PK 是 (user_id, memory_id, node_id)，同一节点至多一行。
-        rows = await gs_repo.list_links_for_memory(session, user_id=user_id, memory_id=memory_id)
-        # "上一版活动的映射"（情况 2 的推进对象，也是 method/confidence 的首选来源）
-        previous_active = {
-            str(row["node_id"]): row
-            for row in rows
-            if row["active"] and int(row["memory_version"]) == active_version - 1
-        }
         if node_ids:
-            # method/confidence 的回退来源：先"上一版活动的行"，再"该节点任意历史行"。
-            # 后者让**曾经映射过、当前 inactive 或停在旧版本**的节点也能被本次提交重新
-            # 激活——否则它会被下面的集合排除挡在外面，永远停在 inactive。
+            # 一次取齐：PK 是 (user_id, memory_id, node_id)，同一节点至多一行。
+            rows = await gs_repo.list_links_for_memory(
+                session, user_id=user_id, memory_id=memory_id
+            )
+            # method/confidence 的回退来源 = 该节点**任意历史行**（同一节点至多一行，
+            # 所以"历史行"就是它本身）。这让**曾经映射过、当前 inactive 或停在旧版本**的
+            # 节点也能被本次提交重新激活——否则它会被下面的集合排除挡在外面，永远停在
+            # inactive。
             fallback_by_node: dict[str, dict[str, Any]] = {str(row["node_id"]): row for row in rows}
             upserted: list[str] = []
             for node_id in node_ids:
-                previous = previous_active.get(node_id) or fallback_by_node.get(node_id)
+                previous = fallback_by_node.get(node_id)
                 # mapping_method 有 CHECK 白名单（explicit_hint/exact_alias/model_candidate），
                 # confidence 有 BETWEEN 0 AND 1：两列都 NOT NULL，既不能留空也不能编造。
                 # 本轮没给就沿用旧行的值；旧行也没有（这个节点从未映射过）时只能跳过——
@@ -913,17 +916,10 @@ class MemoryService:
                 session, user_id=user_id, memory_id=memory_id, except_node_ids=upserted
             )
             return
-        # 情况 2：本次提交没有图谱信息 —— 既有映射一个都不删，只把版本推上去。
-        for link in previous_active.values():
-            await gs_repo.upsert_graph_link(
-                session,
-                user_id=user_id,
-                memory_id=memory_id,
-                node_id=str(link["node_id"]),
-                memory_version=active_version,
-                mapping_method=str(link["mapping_method"]),
-                mapping_confidence=float(link["mapping_confidence"]),
-            )
+        # 情况 2：本次提交没有图谱信息 —— 既有映射一个都不删，只把版本对齐到新活动版本。
+        await gs_repo.align_active_graph_links(
+            session, user_id=user_id, memory_id=memory_id, memory_version=active_version
+        )
 
     async def _upsert_index_entry(
         self,
@@ -1083,14 +1079,17 @@ class MemoryService:
                             "version": self._settings.privacy_hmac_key_version,
                         },
                     )
-                # 图谱 link 全部置 inactive（§16.4）；先取删除前 link 用于事件候选
+                # 图谱 link 全部置 inactive（§16.4）；先取删除前 link 用于事件候选。
+                # review-3 同类（同一根因的第二个站点）：候选列表若用严格的"版本 =
+                # deleted_version"谓词，链接因非提交路径的版本跳跃而停在更旧版本时会读到
+                # 空列表 → `memory.deleted` 事件没有图谱候选 → 消费侧（§14.4）直接幂等
+                # 返回、不建"删除后重算"投影，该节点的 overlay 会一直留着这条已删记忆的
+                # 贡献。这里取"当前有效的映射"（active 里最高版本那一批），随后的
+                # **无条件**全部置 inactive 一字未动——删除映射的语义不变。
                 from backend.memory.persistence import graph_states as gs_repo
 
-                links = await gs_repo.list_active_links_for_memory(
-                    session,
-                    user_id=user_id,
-                    memory_id=memory_id,
-                    active_version=deleted_version,
+                links = await gs_repo.list_current_mapping_rows(
+                    session, user_id=user_id, memory_id=memory_id
                 )
                 await gs_repo.deactivate_graph_links(session, user_id=user_id, memory_id=memory_id)
                 # Outbox

@@ -376,7 +376,7 @@ async def list_links_for_memory(
 ) -> list[dict[str, Any]]:
     """该记忆的**全部** link 行（含 inactive 与旧版本），按 node_id 稳定排序。
 
-    供提交路径一次取齐"上一版活动的映射"与"每个节点最近一次的映射来源"：
+    供提交路径一次取齐"当前有效的映射"与"每个节点最近一次的映射来源"：
     ``memory_graph_links`` 的主键是 ``(user_id, memory_id, node_id)``，同一节点至多
     一行，因此它天然就是"每个节点最近一行的快照"，不需要两次查询。
     """
@@ -389,6 +389,75 @@ async def list_links_for_memory(
         {"user_id": user_id, "memory_id": memory_id},
     )
     return [dict(r) for r in result.mappings().all()]
+
+
+async def list_current_mapping_rows(
+    session: AsyncSession, *, user_id: UUID, memory_id: str
+) -> list[dict[str, Any]]:
+    """该记忆**当前有效的映射**：``active = true`` 里**最高版本**那一批行。
+
+    与 :func:`list_active_links_for_memory`（严格"版本 = 活动版本"）的分工：
+
+    - 本函数回答"这条记忆**现在**的映射集是什么"，**不要求**链接版本已经跟上文档
+      版本。版本会被**非提交**路径整格甚至多格跳跃（``migrate_markdown_schema_v2``
+      把版本 +1 却从不碰本表、运维手工修版本、未来的批量回填），跳跃后严格谓词返回
+      空列表，但映射其实还在，只是没被推进；（``restore`` 的版本跳跃不属于这一类：
+      ``forget`` 已把行置 inactive，本函数对它返回空，映射要由调用方重新绑定。）
+    - 严格谓词回答"某个文档版本的提交写下的映射是哪几条"，KG 双写
+      （``_load_active_links``）与 overlay 读侧用它，是"映射必须与活动版本同时成立"这一
+      不变量的载体，不能放宽。
+
+    只返回 **active** 行，且只返回其中最高版本的那一批：从来没有映射的记忆（提交路径
+    I-3 情况 3）与映射已被显式取消的记忆（``forget`` / purge / 显式节点集合里消失的
+    节点）都返回空——不凭空造映射、也不复活已取消的映射，取消映射只有调用方显式发起
+    这一个合法入口。当前全部写入路径都是集合语义整批写，``active`` 行版本恒一致，
+    因此"最高版本那一批"就是"最近一次写入的映射快照"；即使越界写入造出混版，也只取
+    最近快照，更旧的活动行既不被拉进映射集也不被删除（不猜测）。
+    """
+    rows = await list_links_for_memory(session, user_id=user_id, memory_id=memory_id)
+    active = [row for row in rows if row["active"]]
+    if not active:
+        return []
+    latest_version = max(int(row["memory_version"]) for row in active)
+    return [row for row in active if int(row["memory_version"]) == latest_version]
+
+
+async def align_active_graph_links(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    memory_id: str,
+    memory_version: int,
+) -> list[str]:
+    """把该记忆**当前有效的映射**对齐到 ``memory_version``，返回被对齐的 node_id。
+
+    "当前有效"的判据见 :func:`list_current_mapping_rows`：``active = true`` 里**最高
+    版本**那一批，而不是"版本恰好等于 ``memory_version - 1``"。旧的"上一版"谓词在文档
+    版本被非提交路径跳跃一格以上时永远找不到既有映射，而 KG 双写与 overlay 读侧的谓词是
+    ``active = true AND memory_version = 当前活动版本``——于是该主题**永久**
+    ``no_graph_mapping``，后续任何无图谱信息的提交都无从推进它。
+
+    另一个方向也成立：``memory_version`` 低于链接当前版本（版本回滚）时同样对齐，链接上
+    的版本只是"针对哪个文档版本计算"的戳记，对齐后不变量重新成立。
+
+    调用方负责事务与提交（提交路径与迁移处理器都与 ``set_active_version`` 同事务）。
+    """
+    aligned: list[str] = []
+    rows = await list_current_mapping_rows(session, user_id=user_id, memory_id=memory_id)
+    for row in rows:
+        node_id = str(row["node_id"])
+        # method/confidence 两列 NOT NULL 且有 CHECK 约束：只能沿用行内的既有值。
+        await upsert_graph_link(
+            session,
+            user_id=user_id,
+            memory_id=memory_id,
+            node_id=node_id,
+            memory_version=memory_version,
+            mapping_method=str(row["mapping_method"]),
+            mapping_confidence=float(row["mapping_confidence"]),
+        )
+        aligned.append(node_id)
+    return aligned
 
 
 async def list_active_links_for_memory(

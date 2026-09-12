@@ -1075,6 +1075,49 @@ Phase 0 按 §5.2-B 的配置表往 `.env.example` 写了 5 个 §2.6 D4 参数�
 - **DEV-071** 两个**死枚举值**：`retrieval_partial` / `retrieval_unavailable` 在 backend 里无任何生产者（检索节点不产降级标记，唯一出现处是测试夹具）；`graph_failed` 只进 rollout 审计（开放字段）。已在元测试的 `NEVER_PRODUCED` / `ROLLOUT_ONLY` 白名单里显式登记原因。
 - **DEV-072**（Nit）`resolve_resume` 的 fencing 形参未被使用 → 删掉该形参，改在真正的写路径（`mark_deleted` / `register_open` / `discard_open`）补租约守卫。
 
+### DEV-073 链接落后文档超过 1 个版本时无节点提交推不动它（**已修，review-3 最后一个 Minor**）
+
+**问题**：`_sync_graph_links` 的"本次提交不携带图谱信息"分支用"链接版本恰好 = `active_version - 1`"
+取既有映射，而**迁移任务**会把文档版本 +1 却不碰 `memory_graph_links`。探针：v1 建档带映射 →
+迁移跳到 v2（links 仍在 v1）→ 一次 `frontmatter_patch` 到 v3 → `links=[('n7711',1,True)]`、
+stale 1 → 该主题 KG 双写**永久 `no_graph_mapping`**。影响面仅单个主题的 KG overlay 不同步
+（长期记忆与索引投影正常），不阻塞启用。
+
+**修法（两半一起做）**：
+- **(a) 主修（读侧放宽）**：判据从"恰好落后一版"改为"该 `(user, memory_id)` 的 active 行里
+  **最高版本那一批**"（`graph_states.list_current_mapping_rows`），再在新 `active_version` 上
+  重新 upsert（`align_active_graph_links`）。对**任意版本跳跃来源**都成立——迁移、restore 的
+  重新编号、运维手工修版本、未来批量回填、甚至回退方向，都不再需要写侧配合。
+  为什么取"最高版本那一批"而不是"所有 active 行"：全部写侧都是集合语义整批写，active 行版本
+  恒一致、两种写法等价；只有越界写入才会混版，而混版时"最近一次写入的快照"才是可解释的映射集。
+- **(b) 辅修（写侧收敛）**：`migrate_markdown_schema_v2` 的两个分支与索引投影**同一事务**里对齐
+  链接版本（升版分支用 `new_version`、`skipped_already_v2` 分支用当前 `active_version`），
+  新增 `graph_links_aligned` 计数。(b) 单独做不够（只覆盖迁移一条来源），但能关掉"迁移完成到该
+  主题下一次提交之间"的可见性窗口，**并让"重跑迁移"成为存量 stale 数据的运维修复入口**。
+
+**同根因的第二个站点（一并修）**：`forget` 的 `memory.deleted` 事件候选也用严格版本谓词 →
+链接 stale 时读到空候选 → §14.4 消费侧对空候选幂等成功、不建"删除后重算"投影 → 节点 overlay
+一直保留已删记忆的贡献。改用 `list_current_mapping_rows`。
+
+**真值表**（10 行：正常提交 ±图谱信息 / 迁移升版 / 迁移回填 / restore / 手工改版本 / 未来回填 /
+从来没映射 / forget-purge）见 `REPORT-...`（子任务报告）。要点：修复前 #2/#3/#4/#6/#7 都会 stale，
+修复后全部收敛；#9"从来没映射"仍然完全不碰（不造行）。
+
+**验证**：修复前 5 failed（含探针断言 `[('n7711', 1, True)] == [('n7711', 3, True)]`）→ 修复后
+18 passed；两处变异注入（forget 改回严格谓词、抽掉 maintenance 的对齐）均实跑变红后撤销；
+四个元测试全绿且**无需**登记新站点（新函数不命中四条发现规则，附 AST 自检证据）。
+
+### OPEN-012 `restore` 之后 KG 映射保持 inactive（语义决策，未修）
+
+生产路径 `_run_restore` 从不传 `graph_node_ids`，而 `memory.restored` 的
+`graph_projection_candidates` 只取自该形参（不读链接表）→ "改 name → forget → restore"之后，
+该主题对 KG 双写 / overlay / 推荐都不可见，直到下一次携带节点的提交。
+
+这**不是** DEV-073 的版本谓词问题（`forget` 已把行置 inactive，没有 stale 行可推进），而是
+"restore 是否应当恢复删除前的 KG 映射"的语义决策；`restore` 的 docstring 明写"由调用方重新绑定"，
+因此未擅自改。修法二选一：① `_run_restore` 从链接表读回 inactive 行并作为候选重新绑定；
+② 明确接受"恢复后需下一次提交才重新可见"并写进文档。
+
 ### 两项待裁决项的裁决结果（用户 2026-09-12：「按你的建议进行」）
 
 **① `BATCH_ALL_MEMBERS_FAILED` 并入公开错误码集合** —— 已登记，并顺带抓出同类漏项：

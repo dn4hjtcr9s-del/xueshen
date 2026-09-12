@@ -21,6 +21,7 @@ from backend.memory.contracts.errors import InvalidPayloadError
 from backend.memory.contracts.operations import MemoryOperation
 from backend.memory.graph.state import MemoryManagerState, MemoryRuntimeContext
 from backend.memory.persistence import documents as docs_repo
+from backend.memory.persistence import graph_states as graph_states_repo
 from backend.memory.persistence import maintenance as maintenance_repo
 from backend.memory.persistence.database import exec_rowcount
 from backend.memory.storage.base import sha256_hex
@@ -398,12 +399,19 @@ async def _execute_batch(
         # index dirty（不写新版本、不改正文、幂等）。批量与 cursor 有界，且本任务受
         # `memory_schema_v2_migration_enabled` 门控、每天最多建一个 run，因此代价可控；
         # 换来的是"无论何时跑迁移都能补齐投影"这一确定性。
+        #
+        # 链接版本同样在这里收敛（review-3 残留）：本处理器把文档版本 +1 却从不碰
+        # `memory_graph_links`，链接会落后文档一格，而 KG overlay 读侧与双写都要求
+        # "版本相等"，这段窗口里该主题的映射不可见。于是两个分支都在同一事务里调用
+        # `align_active_graph_links`——它只推进已经 active 的行（没有映射的记忆是 no-op、
+        # 已取消的映射不复活），顺带把存量 stale 数据也修好（重跑本任务即修复入口）。
         rows = await docs_repo.list_active_documents_page(
             session, batch_size=payload.batch_size, cursor=payload.cursor
         )
         migrated = 0
         skipped_already_v2 = 0
         refreshed_already_v2 = 0
+        graph_links_aligned = 0
         failures: list[dict[str, Any]] = []
         next_cursor = None
         for row in rows:
@@ -459,6 +467,15 @@ async def _execute_batch(
                     continue
                 if refreshed:
                     refreshed_already_v2 += 1
+                # 本分支不改版本，但可能正是"存量 stale 链接"的现场（早期迁移 / 手工修
+                # 版本把文档推到了 v2 而链接停在 v1）：按当前活动版本对齐一次即修复。
+                aligned = await graph_states_repo.align_active_graph_links(
+                    session,
+                    user_id=row["user_id"],
+                    memory_id=row["memory_id"],
+                    memory_version=int(row["active_version"]),
+                )
+                graph_links_aligned += len(aligned)
                 continue
             migrated += 1
             if payload.dry_run:
@@ -484,6 +501,15 @@ async def _execute_batch(
             await ctx.memory_service.refresh_index_projection(
                 session, user_id=row["user_id"], memory_id=row["memory_id"]
             )
+            # review-3 残留：升版的同一事务里把 KG 链接对齐到新活动版本，否则在该主题下一次
+            # 提交之前，KG overlay 读侧会因为"版本不等"看不到这些映射。
+            aligned = await graph_states_repo.align_active_graph_links(
+                session,
+                user_id=row["user_id"],
+                memory_id=row["memory_id"],
+                memory_version=new_version,
+            )
+            graph_links_aligned += len(aligned)
             await store.materialize_current(
                 user_id=row["user_id"], memory_id=row["memory_id"], content=encoded
             )
@@ -495,6 +521,9 @@ async def _execute_batch(
             "skipped_already_v2": skipped_already_v2,
             # 已是 v2 但投影被本次回填补齐的文档数（评审新发现 9 的可观测信号）
             "refreshed_already_v2": refreshed_already_v2,
+            # 被对齐到新活动版本的 KG 链接行数（review-3 残留的可观测信号）：既覆盖本次
+            # 升版，也覆盖"重跑修好了多少条存量 stale 链接"
+            "graph_links_aligned": graph_links_aligned,
             "failures": failures,
             "dry_run": payload.dry_run,
             "next_cursor": None if finished else next_cursor,
