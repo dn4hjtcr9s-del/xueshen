@@ -93,7 +93,7 @@ backup 容器每日 03:17（UTC）逐库 `pg_dump -Fc` 到 named volume `backups
 | python 基础镜像补丁版（根 Dockerfile FROM） | python:3.13.15-slim（chore f2148b1 已提交） | 所有者 | 2026-08-31 |
 | node 构建镜像补丁版 | node:24.20.0-slim | 所有者 | 2026-08-31 |
 | Docker Engine / Compose 版本 | 29.7.2 / v5.5.0 | 所有者 | 2026-08-31 |
-| git commit | cce9a74 | 所有者 | 2026-09-06 |
+| git commit | 224a820 | 所有者 | 2026-09-12 |
 | 回滚用旧 commit | 5252d20（P5 首次拉栈基线） | 所有者 | 2026-08-31 |
 | 前端产物目录 | /opt/xueshen/frontend/dist | 所有者 | 2026-08-31 |
 | 域名 / CDN 域名 / DNS | xueshen.xin + www.xueshen.xin / tkkx5xhrb.hd-bkt.clouddn.com（仅 HTTP 可用，见偏离项）/ A 记录已生效 | 所有者 | 2026-08-31 |
