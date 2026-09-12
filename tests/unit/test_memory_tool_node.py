@@ -352,7 +352,12 @@ async def test_query_whitespace_and_order_are_normalized_for_cache_key() -> None
 
 
 @pytest.mark.asyncio
-async def test_oversized_result_is_truncated_with_read_hint() -> None:
+async def test_oversized_single_line_result_gets_no_executable_offset_hint() -> None:
+    """单行超长正文连一行都放不下：不给可执行 offset，改"勿重试"语义（新发现 11）。
+
+    此时 `consumed + delivered == consumed`（delivered=0），旧实现会把提示写回**请求的
+    同一 offset**，模型照做只会命中幂等缓存、白白浪费剩余轮数。
+    """
     gateway = FakeMemoryToolsGateway()
     gateway.read_results = [
         _read_payload(content="x" * (node.RESULT_MAX_CHARS + 1000), total_lines=1)
@@ -371,16 +376,24 @@ async def test_oversized_result_is_truncated_with_read_hint() -> None:
     assert "memory_tool_truncated" in result["degraded_flags"]
     output = result["memory_tool_outputs"][0]["output"]
     assert len(output) <= node.RESULT_MAX_CHARS + 1000
-    assert '"truncated": true' in output
-    assert "line_offset" in output
+    payload = json.loads(output)  # 仍是合法 JSON
+    assert payload["truncated"] is True
+    assert payload.get("reason") == "memory_tool_budget_exhausted"
+    hint = payload["hint"]
+    assert "line_offset" not in hint, "连一行都放不下时不得给出可执行的 offset 提示"
+    assert hint["retryable"] is False
+    assert "勿" in hint["note"]
 
 
 @pytest.mark.asyncio
 async def test_long_result_is_cut_to_remaining_token_budget() -> None:
+    """预算能吃下若干行时：正文按行裁到预算内，并给出指向**已投递**下一行的 offset。"""
     gateway = FakeMemoryToolsGateway()
-    gateway.read_results = [_read_payload(content=" ".join(["词"] * 500))]
+    gateway.read_results = [
+        _read_payload(content="\n".join(f"第 {index} 行内容" for index in range(500)))
+    ]
     runtime = _runtime(memory_gateway=gateway)
-    runtime.settings = runtime.settings.model_copy(update={"conversation_memory_token_budget": 20})
+    runtime.settings = runtime.settings.model_copy(update={"conversation_memory_token_budget": 120})
     result = await run_memory_tools(
         _state(
             memory_pending_tool_calls=[
@@ -395,8 +408,11 @@ async def test_long_result_is_cut_to_remaining_token_budget() -> None:
     output = result["memory_tool_outputs"][0]["output"]
     # 正文被裁到剩余预算以内；续读提示是裁剪**之后**追加的固定小额开销，
     # 因此总量 = 预算 + 提示（提示本身有固定上限，不会随正文增长）。
-    assert runtime.token_counter.count(output) <= 20 + 64
-    assert '"line_offset"' in output
+    assert runtime.token_counter.count(output) <= 120 + 64
+    payload = json.loads(output)
+    delivered = str(payload["content"]).splitlines()
+    assert 0 < len(delivered) < 500, "预算应当真的裁掉了后面的行"
+    assert payload["hint"]["line_offset"] == len(delivered)
     assert '"truncated": true' in output
 
 

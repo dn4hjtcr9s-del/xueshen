@@ -36,6 +36,7 @@ from backend.memory.graph.policies import LLMCallBudget
 from backend.memory.graph.prompt_loader import SUMMARY_CONSOLIDATE_PROMPT_VERSION
 from backend.memory.graph.state import MemoryManagerState, MemoryRuntimeContext
 from backend.memory.persistence import documents as docs_repo
+from backend.memory.services.memory_service import projected_title
 from backend.memory.storage import summary_file
 
 logger = logging.getLogger("memory.graph.consolidation")
@@ -236,6 +237,10 @@ def _learner_view(learner: Any) -> dict[str, Any]:
         "memory_id": "learner",
         "memory_type": "learner",
         "version": int(learner.version),
+        # 评审新发现 7 同类：视图里的标题也必须走 projected_title（v2 取 frontmatter
+        # `name`）。learner 与 mastery 两个视图保持同一组键，`_govern_dangling_links`
+        # 构造链接命名空间时读的就是这里的 `name`。
+        "name": projected_title(learner),
         "preferences": list(learner.preferences),
         "goals": list(learner.goals),
         "plans": list(learner.plans),
@@ -250,7 +255,9 @@ def _mastery_view(mastery: Any) -> dict[str, Any]:
         "memory_type": "mastery",
         "topic_key": mastery.topic_key,
         "topic_title": mastery.topic_title,
-        "name": mastery.name or mastery.topic_title,
+        # 评审新发现 7 同类：这里曾自己写 `mastery.name or mastery.topic_title`
+        # （没有 v2 判定、也没有 learner 回退），是第五个"标题投影站点"。统一走权威规则。
+        "name": projected_title(mastery),
         "description": mastery.description or "",
         "aliases": list(mastery.aliases),
         "keywords": list(getattr(mastery, "keywords", []) or []),
@@ -756,7 +763,10 @@ async def _dual_write_kg(
     outcome = await kg_dual_write.after_consolidation(
         user_id=user_id,
         batch_operation_id=batch_operation_id,
-        operation_id=_operation(state).operation_id,
+        # review-2 新发现 8：这里同样必须是**批次** operation——`state["operation"]` 此刻
+        # 仍被投影成最后一个成员（还原在 finalize_batch_result），传错会让 KG 幂等键与
+        # 审计锚错位到成员上。
+        operation_id=_batch_operation(state).operation_id,
         changed_topics=changed_topics,
         conflicts=[
             {"memory_ids": list(item.memory_ids), "description": item.description}

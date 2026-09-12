@@ -32,8 +32,10 @@ SUMMARY_TRIGGER_TOKENS = 8000
 class JobWorker:
     """标题/摘要/删除 Job 消费器（§7.6 / §7.7 / §8.6）。"""
 
-    #: memory-rebuild §1.8：delete_thread 用它物理删除 rollout 段对象。
-    #: 由 composition root 在构造后注入；为 None 时跳过对象删除（见 thread_deletion）。
+    #: memory-rebuild §1.8：delete_thread 用它物理删除 rollout 段对象与本地热段。
+    #: 由 composition root 在构造后注入；为 None 时 thread_deletion **拒绝**落 tombstone
+    #: 并保持 deleting 待重试（error_code=ROLLOUT_OBJECT_STORE_MISSING），绝不"没删数据
+    #: 却宣称删了"（I-6 / review-2 新发现 6）。
     rollout_object_store: Any = None
 
     def __init__(

@@ -388,11 +388,22 @@ async def _execute_batch(
         # 铁律：versions/ 历史文件永不原地改写（§2.7 决议 A 组）——本处理器只调用
         # 正常 write_immutable_version 追加新版本，因此 checksum 级联不会失效、
         # 回滚语义不受损。index 文档由 rebuild_index 重新生成，不在此处理。
+        #
+        # 本处理器同时是**全量回填入口**（评审新发现 9）：`skipped_already_v2` 分支
+        # 也刷新投影。理由：文档升到 v2 有两条路——本任务（v1→v2 追加版本）与
+        # `frontmatter_patch` 原生升版；后者从不经过这里，早期版本的迁移也已经把
+        # 它们跳过。若只在"本次升级了文档"的分支刷新，这些文档的 aliases/keywords/
+        # related 永远补不上，运维"再跑一次任务"完全是 no-op。
+        # 代价：每次运行都会对**已是 v2 的活动文档**重算并 upsert 一次投影、标一次
+        # index dirty（不写新版本、不改正文、幂等）。批量与 cursor 有界，且本任务受
+        # `memory_schema_v2_migration_enabled` 门控、每天最多建一个 run，因此代价可控；
+        # 换来的是"无论何时跑迁移都能补齐投影"这一确定性。
         rows = await docs_repo.list_active_documents_page(
             session, batch_size=payload.batch_size, cursor=payload.cursor
         )
         migrated = 0
         skipped_already_v2 = 0
+        refreshed_already_v2 = 0
         failures: list[dict[str, Any]] = []
         next_cursor = None
         for row in rows:
@@ -427,7 +438,27 @@ async def _execute_batch(
                 )
                 continue
             if upgraded is None:
-                skipped_already_v2 += 1  # 已是 v2：幂等跳过，不产生新版本
+                # 已是 v2：不再产生新版本，但**投影仍要回填**（评审新发现 9）——
+                # 本任务因此成为"无论何时跑都能补齐投影"的全量入口。
+                skipped_already_v2 += 1
+                if payload.dry_run:
+                    continue
+                try:
+                    refreshed = await ctx.memory_service.refresh_index_projection(
+                        session, user_id=row["user_id"], memory_id=row["memory_id"]
+                    )
+                except (MarkdownParseError, UnicodeDecodeError):
+                    # 投影刷新失败不拖垮同批其他文档：只记账（正文本身没动）
+                    failures.append(
+                        {
+                            "user_id": str(row["user_id"]),
+                            "memory_id": row["memory_id"],
+                            "reasons": ["projection_refresh_failed"],
+                        }
+                    )
+                    continue
+                if refreshed:
+                    refreshed_already_v2 += 1
                 continue
             migrated += 1
             if payload.dry_run:
@@ -462,6 +493,8 @@ async def _execute_batch(
             "status": "done" if finished else "continue",
             "migrated": migrated,
             "skipped_already_v2": skipped_already_v2,
+            # 已是 v2 但投影被本次回填补齐的文档数（评审新发现 9 的可观测信号）
+            "refreshed_already_v2": refreshed_already_v2,
             "failures": failures,
             "dry_run": payload.dry_run,
             "next_cursor": None if finished else next_cursor,

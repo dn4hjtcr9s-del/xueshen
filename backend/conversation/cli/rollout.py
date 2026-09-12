@@ -16,7 +16,10 @@
 
 删除类子命令（``delete-thread-rollouts`` / ``retention-scan``）除对象镜像外还会删除
 **本地热缓存段文件**（``{root}/threads/...``，C-3）：只删 ``objects/`` 会让用户原文
-留在磁盘上，而 tombstone 之后再没有工具能发现它。
+留在磁盘上，而 tombstone 之后再没有工具能发现它。两条路径都经由
+:func:`~backend.conversation.rollout.deletion.delete_rollout_payloads`（对象 + 热段 +
+按 thread 清扫）——review-2 新发现 6 要求未封存段（``object_key IS NULL``）也必须被删掉，
+而它们没有 key 可推导，只能按 ``<thread_id>`` 目录清扫。
 
 退出码：0 成功；1 发现不一致或存在失败的操作；2 前置条件不满足（配置/对象存储不可用）。
 """
@@ -47,7 +50,10 @@ from backend.conversation.persistence.database import (
     create_conversation_session_factory,
 )
 from backend.conversation.rollout.codec import sha256_hex
-from backend.conversation.rollout.object_store import delete_hot_segment
+from backend.conversation.rollout.deletion import (
+    delete_rollout_payloads,
+    delete_thread_rollout_payloads,
+)
 from backend.conversation.rollout.reconcile import (
     FAILURE_PREFIX,
     ReconcileReport,
@@ -240,37 +246,42 @@ async def _delete_thread_rollouts(args: argparse.Namespace) -> int:
     """逐个删除对象与本地热段，**全部成功后才**落 tombstone。"""
     dry_run = _resolve_dry_run(args)
     async with _open_runtime() as runtime:
+        async with runtime.session_factory() as session:
+            segments = await manifests_repo.list_by_thread(session, args.thread_id)
+        keys = [str(segment["object_key"]) for segment in segments if segment.get("object_key")]
+        unsealed = [segment for segment in segments if not segment.get("object_key")]
         if dry_run:
-            async with runtime.session_factory() as session:
-                segments = await manifests_repo.list_by_thread(session, args.thread_id)
-            keys = [str(segment["object_key"]) for segment in segments if segment.get("object_key")]
             print(
                 f"[dry-run] 将把 thread {args.thread_id} 的 {len(segments)} 个段标记为 deleted，"
                 f"并删除 {len(keys)} 个对象（含本地热缓存段）："
             )
             for key in keys:
                 print(f"  待删除对象 {key}")
+            if unsealed:
+                # 未封存段没有 object key（新发现 6）：只能按 <thread_id> 目录清扫
+                print(
+                    f"  另有 {len(unsealed)} 个未封存段（无 object_key），"
+                    "将按 thread 目录清扫本地热缓存段"
+                )
             print("[dry-run] 未产生任何写操作；确认后加 --apply 执行")
             return 0
         # 顺序（与 thread_deletion 统一）：**先把对象与热段删干净，再落 tombstone**。
         # 反过来的话，对象删除失败会留下"manifest 已是 deleted、对象还在"的残留；
         # 而 reconcile 的孤儿判定只把**非 deleted** 行的 object_key 当作有效引用，
         # 这种残留对象将永远不被报为孤儿 —— 静默的数据泄漏。
-        async with runtime.session_factory() as session:
-            segments = await manifests_repo.list_by_thread(session, args.thread_id)
-        keys = [str(row["object_key"]) for row in segments if row.get("object_key")]
-        failed: list[str] = []
-        for key in keys:
-            try:
-                await runtime.object_store.delete(key=key)
-                # C-3：热缓存段与对象镜像同构，必须一并删除（Kodo 等无热缓存实现 no-op）
-                await delete_hot_segment(object_store=runtime.object_store, key=key)
-            except (ObjectStoreError, OSError) as exc:
-                failed.append(key)
-                print(f"对象/热段删除失败：{key}（{exc}）", file=sys.stderr)
-        if failed:
+        #
+        # 热段走统一助手：逐 key 精确删除 + 按 thread 目录清扫（未封存段、kodo 本地
+        # 缓存、无 manifest 行的孤儿热文件都在这条路径上被清掉）。
+        report = await delete_thread_rollout_payloads(
+            object_store=runtime.object_store,
+            object_keys=keys,
+            thread_id=args.thread_id,
+        )
+        if not report.ok:
+            for failure in report.failures:
+                print(f"对象/热段删除失败：{failure}", file=sys.stderr)
             print(
-                f"有 {len(failed)} 个对象未删除成功；段**未**标 tombstone，"
+                f"有 {len(report.failures)} 项未删除成功；段**未**标 tombstone，"
                 "重跑本命令即可（对象删除是幂等的）",
                 file=sys.stderr,
             )
@@ -278,7 +289,7 @@ async def _delete_thread_rollouts(args: argparse.Namespace) -> int:
         async with runtime.session_factory() as session:
             async with session.begin():
                 await manifests_repo.mark_thread_deleted(session, thread_id=args.thread_id)
-        print(f"thread {args.thread_id}：对象与热段删除 {len(keys)} 个，段已标记 deleted")
+        print(f"thread {args.thread_id}：{report.summary()}，{len(segments)} 个段已标记 deleted")
         return 0
 
 
@@ -305,6 +316,8 @@ async def _retention_scan(args: argparse.Namespace) -> int:
             print("[dry-run] 未产生任何写操作；确认后加 --apply 执行")
             return 0
         # 与 delete-thread-rollouts 同序：先删对象与热段，逐个成功后才落 tombstone。
+        # retention 是**段级**删除，只做逐 key 精确清理，**不得**按 thread 清扫目录
+        # （那会连带删掉同 thread 内未过期的段）。
         marked = 0
         deleted = 0
         failed: list[str] = []
@@ -312,19 +325,26 @@ async def _retention_scan(args: argparse.Namespace) -> int:
             segment_id = row["segment_id"]
             object_key = row.get("object_key")
             if not object_key:
-                continue
-            try:
-                await runtime.object_store.delete(key=str(object_key))
-                # C-3：retention 也必须删掉本地热缓存段，否则正文残留在磁盘上
-                await delete_hot_segment(object_store=runtime.object_store, key=str(object_key))
-            except (ObjectStoreError, OSError) as exc:
-                failed.append(str(object_key))
+                # sealed 行按 CHECK 约束必有 object_key；真出现就显式报失败，
+                # 绝不静默跳过（静默跳过正是新发现 6 的病根）。
+                failed.append(str(segment_id))
                 print(
-                    f"对象/热段删除失败，段保持 sealed 待下次 retention：{object_key}（{exc}）",
+                    f"段 {segment_id} 是 sealed 却没有 object_key，无法删除对象，跳过并计为失败",
                     file=sys.stderr,
                 )
                 continue
-            deleted += 1
+            report = await delete_rollout_payloads(
+                object_store=runtime.object_store, object_keys=[str(object_key)]
+            )
+            if not report.ok:
+                failed.append(str(object_key))
+                print(
+                    f"对象/热段删除失败，段保持 sealed 待下次 retention：{object_key}"
+                    f"（{'；'.join(report.failures)}）",
+                    file=sys.stderr,
+                )
+                continue
+            deleted += report.deleted_objects
             try:
                 async with runtime.session_factory() as session:
                     async with session.begin():

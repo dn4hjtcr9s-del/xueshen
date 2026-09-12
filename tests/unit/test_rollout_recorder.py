@@ -306,6 +306,118 @@ async def test_thread_meta_cannot_be_recorded_explicitly(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
+# 降级只作用于本 turn（review-2 新发现 5）
+# ---------------------------------------------------------------------------
+
+
+class _FlakySealer:
+    """登记先失败、后成功的 sealer 替身（模拟一次瞬时 DB 错误）。"""
+
+    def __init__(self, *, failures: int) -> None:
+        self.failures = failures
+        self.register_calls = 0
+
+    async def resolve_resume(self, **kwargs: object) -> object:
+        from backend.conversation.rollout.sealer import NewSegment
+
+        return NewSegment(ordinal_start=0)
+
+    async def register_open(self, **kwargs: object) -> object:
+        from backend.conversation.rollout.sealer import RegisterResult, RegistrationStatus
+
+        self.register_calls += 1
+        if self.failures > 0:
+            self.failures -= 1
+            return RegisterResult(status=RegistrationStatus.failed, reason="InjectedError")
+        return RegisterResult(status=RegistrationStatus.inserted)
+
+    async def discard_open(self, **kwargs: object) -> bool:
+        return True
+
+    async def seal(self, request: object) -> object:
+        from backend.conversation.rollout.sealer import SealResult
+
+        return SealResult(sealed=True)
+
+
+def _recorder_with_sealer(tmp_path: Path, sealer: object) -> RolloutRecorder:
+    return RolloutRecorder(
+        root=tmp_path,
+        clock=SystemClock(),
+        id_generator=SystemIdGenerator(),
+        logger=logging.getLogger("test.rollout"),
+        sealer=sealer,
+    )
+
+
+async def test_registration_failure_degrades_only_this_turn(tmp_path: Path) -> None:
+    """新发现 5：一次瞬时登记失败只让**本 turn**停止记录，下一个 turn 必须能重新写。
+
+    旧实现把 ``_degraded`` 当成进程级开关（永不重置），一次瞬时 DB 错误会静默停掉该
+    worker 上所有 thread 的 rollout 写入，直到进程重启。
+    """
+    sealer = _FlakySealer(failures=1)
+    recorder = _recorder_with_sealer(tmp_path, sealer)
+    thread_id, user_id = uuid.uuid4(), uuid.uuid4()
+
+    # 第一个 turn：登记失败 → 本 turn 降级、不写行
+    turn_1 = uuid.uuid4()
+    handle = await recorder.open_turn(
+        thread_id=thread_id, turn_id=turn_1, user_id=user_id, thread_created_at=_CREATED
+    )
+    assert handle is not None
+    assert await recorder.record("turn_started", payload=_started_payload(turn_1)) is True
+    await recorder.flush()
+    assert recorder.degraded is True
+    assert recorder.degraded_reason == "manifest_register_failed"
+    assert await recorder.record("turn_started", payload=_started_payload(turn_1)) is False
+    await recorder.close_turn()
+
+    # 第二个 turn：**同一个 recorder** 必须恢复正常（降级收敛到单个 turn）
+    turn_2 = uuid.uuid4()
+    handle_2 = await recorder.open_turn(
+        thread_id=thread_id, turn_id=turn_2, user_id=user_id, thread_created_at=_CREATED
+    )
+    assert handle_2 is not None, "降级不得泄漏到下一个 turn"
+    assert recorder.degraded is False
+    assert recorder.degraded_reason is None
+    assert await recorder.record("turn_started", payload=_started_payload(turn_2)) is True
+    await recorder.flush()
+    assert handle_2.path.is_file(), "第二个 turn 必须真的重新落盘"
+    await recorder.close_turn()
+    await recorder.aclose()
+
+
+async def test_write_failure_degrades_only_this_turn(tmp_path: Path) -> None:
+    """新发现 5（写路径同理）：磁盘故障降级也要在下一个 turn 清零。"""
+    recorder = _recorder(tmp_path)
+    thread_id, user_id = uuid.uuid4(), uuid.uuid4()
+
+    broken_turn = uuid.uuid4()
+    broken = await recorder.open_turn(
+        thread_id=thread_id, turn_id=broken_turn, user_id=user_id, thread_created_at=_CREATED
+    )
+    assert broken is not None
+    broken.path.mkdir(parents=True)  # 用目录占住段路径 → 写必然失败
+    assert await recorder.record("turn_started", payload=_started_payload(broken_turn)) is True
+    await recorder.flush()
+    assert recorder.degraded is True
+    await recorder.close_turn()
+
+    healthy_turn = uuid.uuid4()
+    healthy = await recorder.open_turn(
+        thread_id=thread_id, turn_id=healthy_turn, user_id=user_id, thread_created_at=_CREATED
+    )
+    assert healthy is not None
+    assert recorder.degraded is False
+    assert await recorder.record("turn_started", payload=_started_payload(healthy_turn)) is True
+    await recorder.flush()
+    assert healthy.path.is_file()
+    await recorder.close_turn()
+    await recorder.aclose()
+
+
+# ---------------------------------------------------------------------------
 # 背压
 # ---------------------------------------------------------------------------
 

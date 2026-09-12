@@ -70,7 +70,13 @@ async def _new_operation(session_factory: async_sessionmaker[AsyncSession]) -> U
     return operation_id
 
 
-async def _seed_graph_node(session_factory: async_sessionmaker[AsyncSession]) -> None:
+async def _seed_graph_node(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    node_id: str = NODE_ID,
+    title: str = TOPIC_KEY,
+) -> None:
+    """注册一个 KG 节点（knowledge_graph_nodes 在测试间保留，故用 DO NOTHING）。"""
     async with session_factory() as session:
         async with session.begin():
             await session.execute(
@@ -79,7 +85,7 @@ async def _seed_graph_node(session_factory: async_sessionmaker[AsyncSession]) ->
                     "source_checksum) VALUES (:n, :t, 'test.md', :ck) "
                     "ON CONFLICT (node_id) DO NOTHING"
                 ),
-                {"n": NODE_ID, "t": TOPIC_KEY, "ck": "0" * 64},
+                {"n": node_id, "t": title, "ck": "0" * 64},
             )
 
 
@@ -234,7 +240,16 @@ async def test_explicit_empty_node_list_is_the_only_way_to_drop_mappings(
         mapping_methods_by_plan=["exact_alias"],
         mapping_confidences_by_plan=[0.8],
     )
-    assert {row["node_id"] for row in await _links(session_factory)} == {NODE_ID, other_node}
+    # review-2 新发现 1（Critical）：**每个计划内节点都必须 active=True**。
+    # 只断言行集合会让"两行都在、但两条都 active=false"的回归照样通过——正是上一轮
+    # `for kept in node_ids: deactivate(except_node_id=kept)` 循环实现漏掉的那一点。
+    after_two = await _links(session_factory)
+    assert {row["node_id"] for row in after_two} == {NODE_ID, other_node}
+    for row in after_two:
+        assert row["active"] is True, (
+            f"计划内节点 {row['node_id']} 被置为 inactive（多节点提交把所有映射杀掉了）"
+        )
+        assert int(row["memory_version"]) == 2
 
     # 再提交一次，只保留 NODE_ID：消失的 other_node 必须被置 inactive
     drop = CommitMutationPlan(
@@ -258,6 +273,114 @@ async def test_explicit_empty_node_list_is_the_only_way_to_drop_mappings(
     assert by_node[NODE_ID]["active"] is True
     assert int(by_node[NODE_ID]["memory_version"]) == 3
     assert by_node[other_node]["active"] is False
+
+
+async def test_planned_node_without_new_method_is_reactivated(
+    memory_service: MemoryService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """计划内节点即便本轮没带 mapping_method，也要沿用历史行重新激活（真值表第 4 行）。
+
+    旧实现只在"上一版活动的行"里找 method：节点被上一轮 drop 掉（inactive）后再被
+    重新声明时找不到来源，于是它被集合排除挡在外面、永远停在 inactive。现在回退来源
+    扩大到"该节点的任意历史行"。
+    """
+    await _create_mastery_with_graph_link(memory_service, session_factory)
+    other_node = "n7713"
+    await _seed_graph_node(session_factory, node_id=other_node, title="圆锥曲线")
+    # v2：把 two-node 映射建起来
+    plan = CommitMutationPlan(
+        mutation_id=uuid4(),
+        memory_id=MEMORY_ID,
+        target_memory_type="mastery",
+        action="merge",
+        expected_version=1,
+        mastery_patch=MasteryPatch(understood_to_add=["掌握第二定义"]),
+    )
+    await memory_service.commit_plans(
+        operation_id=await _new_operation(session_factory),
+        user_id=USER,
+        actor_type="user",
+        plans=[plan],
+        graph_node_ids_by_plan=[[NODE_ID, other_node]],
+        mapping_methods_by_plan=["model_candidate"],
+        mapping_confidences_by_plan=[0.6],
+    )
+    # v3：drop 掉 other_node（active=false，但它那一行的 method 仍在）
+    drop = CommitMutationPlan(
+        mutation_id=uuid4(),
+        memory_id=MEMORY_ID,
+        target_memory_type="mastery",
+        action="merge",
+        expected_version=2,
+        mastery_patch=MasteryPatch(understood_to_add=["复习准线"]),
+    )
+    await memory_service.commit_plans(
+        operation_id=await _new_operation(session_factory),
+        user_id=USER,
+        actor_type="user",
+        plans=[drop],
+        graph_node_ids_by_plan=[[NODE_ID]],
+        mapping_methods_by_plan=["exact_alias"],
+        mapping_confidences_by_plan=[0.9],
+    )
+    assert {row["node_id"]: row["active"] for row in await _links(session_factory)}[other_node] is (
+        False
+    )
+
+    # v4：重新声明两个节点但**不带任何元数据** → 必须沿用历史行的 method/confidence
+    revive = CommitMutationPlan(
+        mutation_id=uuid4(),
+        memory_id=MEMORY_ID,
+        target_memory_type="mastery",
+        action="merge",
+        expected_version=3,
+        mastery_patch=MasteryPatch(understood_to_add=["综合练习"]),
+    )
+    await memory_service.commit_plans(
+        operation_id=await _new_operation(session_factory),
+        user_id=USER,
+        actor_type="user",
+        plans=[revive],
+        graph_node_ids_by_plan=[[NODE_ID, other_node]],
+    )
+    revived = {row["node_id"]: row for row in await _links(session_factory)}
+    assert revived[other_node]["active"] is True, "计划内节点必须重新激活"
+    assert int(revived[other_node]["memory_version"]) == 4
+    assert revived[other_node]["mapping_method"] == "model_candidate"
+    assert float(revived[other_node]["mapping_confidence"]) == 0.6
+    assert revived[NODE_ID]["active"] is True
+    assert int(revived[NODE_ID]["memory_version"]) == 4
+
+
+async def test_all_planned_nodes_stay_active_without_graph_metadata(
+    memory_service: MemoryService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """真值表边界：节点从未映射过且本轮没有 method → 表里不留行，也不影响其它节点。"""
+    await _create_mastery_with_graph_link(memory_service, session_factory)
+    unknown_node = "n7714"
+    await _seed_graph_node(session_factory, node_id=unknown_node, title="未映射主题")
+    plan = CommitMutationPlan(
+        mutation_id=uuid4(),
+        memory_id=MEMORY_ID,
+        target_memory_type="mastery",
+        action="merge",
+        expected_version=1,
+        mastery_patch=MasteryPatch(understood_to_add=["新知识点"]),
+    )
+    await memory_service.commit_plans(
+        operation_id=await _new_operation(session_factory),
+        user_id=USER,
+        actor_type="user",
+        plans=[plan],
+        graph_node_ids_by_plan=[[unknown_node]],
+        # 不带 mapping_methods_by_plan：新节点无来源可继承
+    )
+    rows = {row["node_id"]: row for row in await _links(session_factory)}
+    assert unknown_node not in rows, "无 mapping_method 的新节点不应落库（NOT NULL 约束）"
+    # 计划集合以本次为准：旧节点不在集合里 → 必须被置 inactive（不是被"保护"）
+    assert rows[NODE_ID]["active"] is False
 
 
 async def test_related_topic_keys_are_projected_on_first_commit(
@@ -364,6 +487,118 @@ async def test_v1_document_registry_title_stays_topic_title(
     row = await _index_row(session_factory)
     assert row is not None
     assert row["title"] == TOPIC_KEY
+
+
+async def test_rename_then_forget_then_restore_keeps_frontmatter_name(
+    memory_service: MemoryService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """review-2 新发现 7 的端到端回归：改 name → 删除 → 恢复，注册表标题不得回退。
+
+    恢复路径曾自己拼一份投影、title 取 ``parsed.topic_title``（v2 文档的
+    ``memory_documents.topic_title`` 只在 create 时写过一次），于是"撤销删除"会把
+    注册表 / prime / search 看到的标题打回旧值。
+    """
+    await _seed_graph_node(session_factory)
+    create = CommitMutationPlan(
+        mutation_id=uuid4(),
+        memory_id=MEMORY_ID,
+        target_memory_type="mastery",
+        topic_title=TOPIC_KEY,
+        action="create",
+        mastery_patch=MasteryPatch(overview="圆锥曲线之一"),
+        frontmatter_patch=FrontMatterPatch(name="抛物线的标准方程", description="圆锥曲线之一"),
+    )
+    await memory_service.commit_plans(
+        operation_id=await _new_operation(session_factory),
+        user_id=USER,
+        actor_type="user",
+        plans=[create],
+    )
+    rename = CommitMutationPlan(
+        mutation_id=uuid4(),
+        memory_id=MEMORY_ID,
+        target_memory_type="mastery",
+        action="merge",
+        expected_version=1,
+        frontmatter_patch=FrontMatterPatch(name="抛物线及其性质"),
+    )
+    await memory_service.commit_plans(
+        operation_id=await _new_operation(session_factory),
+        user_id=USER,
+        actor_type="user",
+        plans=[rename],
+    )
+    assert (await _index_row(session_factory))["title"] == "抛物线及其性质"  # type: ignore[index]
+
+    deleted_version = await _document_version(session_factory)
+    await memory_service.forget(
+        operation_id=await _new_operation(session_factory),
+        user_id=USER,
+        actor_type="user",
+        mutation_id=uuid4(),
+        memory_id=MEMORY_ID,
+        expected_version=deleted_version,
+        reason="用户要求删除",
+    )
+    assert await _index_row(session_factory) is None, "删除同事务移除索引行（§8.7）"
+
+    await memory_service.restore(
+        operation_id=await _new_operation(session_factory),
+        user_id=USER,
+        actor_type="user",
+        mutation_id=uuid4(),
+        memory_id=MEMORY_ID,
+        deleted_version=deleted_version,
+    )
+    restored = await _index_row(session_factory)
+    assert restored is not None
+    assert restored["title"] == "抛物线及其性质", (
+        "恢复路径必须与提交路径同源投影：title 取 frontmatter name，而不是 topic_title"
+    )
+    assert restored["source_version"] == deleted_version + 1
+    # 这两条计划没有写过 `[[link]]`，所以 related 为空（有链接的场景由 I-11② 的用例覆盖）
+    assert list(restored["related_topic_keys"]) == []
+    document = (await memory_service.store.read_current(user_id=USER, memory_id=MEMORY_ID)).decode(
+        "utf-8"
+    )
+    assert parse_mastery(document).name == "抛物线及其性质"
+
+
+async def test_rebuild_index_uses_registry_title_not_topic_title(
+    memory_service: MemoryService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """review-2 新发现 7 第二处：index.md 的 `- name` 必须与注册表投影一致。"""
+    await _seed_graph_node(session_factory)
+    create = CommitMutationPlan(
+        mutation_id=uuid4(),
+        memory_id=MEMORY_ID,
+        target_memory_type="mastery",
+        topic_title=TOPIC_KEY,
+        action="create",
+        mastery_patch=MasteryPatch(overview="圆锥曲线之一"),
+        frontmatter_patch=FrontMatterPatch(name="抛物线的标准方程", description="圆锥曲线之一"),
+    )
+    await memory_service.commit_plans(
+        operation_id=await _new_operation(session_factory),
+        user_id=USER,
+        actor_type="user",
+        plans=[create],
+    )
+    # 提交路径会标 index dirty；重建走真实 render_index + _index_projection
+    rebuilt = await memory_service.rebuild_index(
+        user_id=USER, operation_id=await _new_operation(session_factory)
+    )
+    assert rebuilt["rebuilt"] is True, rebuilt
+    index_doc, _stale = await memory_service.get_index(user_id=USER)
+    assert index_doc is not None and index_doc.mastery_entries
+    entry = index_doc.mastery_entries[0]
+    assert entry.title == "抛物线的标准方程"
+    assert entry.title != TOPIC_KEY, "index.md 不得再用 memory_documents.topic_title"
+    assert entry.description == "圆锥曲线之一"
+    assert entry.aliases == []
+    assert entry.related_topic_keys == []
 
 
 async def test_refresh_index_projection_backfills_v2_columns(

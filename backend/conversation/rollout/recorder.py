@@ -18,7 +18,12 @@ turn 关键路径；队列把"节点产出"与"落盘"解耦，同时用有界�
 6. 同一时刻只允许一个活动段（Phase 1 决策：worker 单并发执行 turn）；
 7. **登记先于写入**（I-1）：新段写第一行之前必须先确认 manifest 行存在；登记失败
    即降级、不写这一行。否则会走到"对象已上传、manifest ``UPDATE`` 更新 0 行"的
-   孤儿对象 + 指针全部落空。
+   孤儿对象 + 指针全部落空；
+8. **降级只作用于本 turn**（review-2 新发现 5）：``_degraded`` 是"本 turn 停止记录"
+   的语义，``open_turn`` 一进来就清掉它（下一个 turn 重新尝试）。否则一次瞬时 DB 错误
+   会静默停掉该 worker 上**所有** thread 的 rollout 写入直到进程重启。turn 内一旦降级
+   就不再恢复：被跳过的行可能是必须首行的 ``thread_meta``，中途续写会留下无法解释的
+   序号空洞。
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from backend.conversation.contracts.rollout import (
 from backend.conversation.rollout.codec import encode_record
 from backend.conversation.rollout.file_naming import (
     list_segment_paths,
+    max_local_ordinal,
     segment_dir,
     segment_path,
 )
@@ -186,7 +192,11 @@ class RolloutRecorder:
         self._file: Any = None
         self._active: RolloutSegmentHandle | None = None
         self._committed_bytes = 0
+        #: 本 turn 是否已降级（review-2 新发现 5：**不是**进程级开关）。
+        #: 置位后本 turn 的后续记录一律丢弃，但下一个 ``open_turn`` 会重新尝试。
         self._degraded = False
+        #: 导致降级的原因（日志与测试观测用；None = 未降级）。
+        self._degraded_reason: str | None = None
         self._closed = False
         self._pending_acks: set[asyncio.Future[None]] = set()
 
@@ -196,7 +206,26 @@ class RolloutRecorder:
 
     @property
     def degraded(self) -> bool:
+        """本 turn 是否已降级（下一个 turn 会清零重试）。"""
         return self._degraded
+
+    @property
+    def degraded_reason(self) -> str | None:
+        return self._degraded_reason
+
+    def _mark_degraded(self, reason: str) -> None:
+        """把本 turn 标记为降级（幂等）。"""
+        self._degraded = True
+        self._degraded_reason = reason
+
+    def _clear_degraded(self) -> None:
+        """清除降级状态；**只在"新 turn 开始"（``open_turn``）调用**。
+
+        turn 内不清除：被跳过的行可能是必须首行的 ``thread_meta``，中途续写会留下
+        无法解释的序号空洞（见模块 docstring 第 8 条）。
+        """
+        self._degraded = False
+        self._degraded_reason = None
 
     @property
     def queue_depth(self) -> int:
@@ -260,10 +289,11 @@ class RolloutRecorder:
     ) -> RolloutSegmentHandle | None:
         """开启本 turn 的段；降级/已关闭/已有活动段/无法安全复用时返回 None。
 
-        ``ordinal_start``：复用既有段时沿用其值；新建时由 manifest 给出（该 thread
-        所有行含 deleted 的最大末序号 + 1），保证与既有段范围不重叠。
+        ``ordinal_start``：复用既有段时沿用其值；新建时取 **manifest 与本地热段真实最大
+        ordinal 的较大者 + 1**（open 段的 ``ordinal_end`` 在 DB 里是 NULL，只看 manifest
+        会复用已写过的序号，review-2 新发现 4①），保证与既有段范围不重叠。
         """
-        if self._degraded or self._closed:
+        if self._closed:
             return None
         if self._active is not None:
             # 单一活动段：worker 单并发，出现第二个即契约被破坏 → 降级而非覆盖
@@ -273,6 +303,13 @@ class RolloutRecorder:
                 turn_id,
             )
             return None
+        # 新 turn：**只**清除上一个 turn 的降级（review-2 新发现 5）。一次瞬时 DB/磁盘
+        # 故障不该让该 worker 上的所有 thread 永久停止记录。
+        if self._degraded:
+            self._logger.warning(
+                "rollout 上一个 turn 处于降级（%s），本 turn 重新尝试记录", self._degraded_reason
+            )
+        self._clear_degraded()
         self.start()
         self._fence = fence
         directory = segment_dir(
@@ -296,7 +333,9 @@ class RolloutRecorder:
                 thread_created_at=thread_created_at,
                 segment_path_for=_path_for,
                 new_segment_id=segment_id,
-                fence=fence,
+                # 新建段的 ordinal_start 必须结合本地热段真实最大 ordinal：
+                # open 段的 ordinal_end 在 DB 里是 NULL（review-2 新发现 4①）。
+                local_max_ordinal=self._max_local_ordinal,
             )
             if decision is None:
                 # 既不能安全复用、也拿不到安全的新建序号：放弃本 turn 的记录（旁路）
@@ -357,6 +396,10 @@ class RolloutRecorder:
         self._active = handle
         self._committed_bytes = 0
         return handle
+
+    def _max_local_ordinal(self, thread_id: UUID) -> int | None:
+        """该 thread 本地热段真实写过的最大 ordinal（跨日期分片，review-2 新发现 4①）。"""
+        return max_local_ordinal(root=self._root, thread_id=thread_id)
 
     def _next_ordinal_start(self, directory: Path) -> int:
         """扫描该 thread 已有段，返回"最大 ordinal + 1"（未装配 sealer 时的退路）。"""
@@ -513,7 +556,8 @@ class RolloutRecorder:
             handle.turn_id,
             handle.segment_id,
         )
-        await self._sealer.discard_open(segment_id=handle.segment_id)
+        # 带租约守卫：失租者不得标废当前持有者的段（review-2 新发现 17）
+        await self._sealer.discard_open(segment_id=handle.segment_id, fence=self._fence)
 
     async def _seal_segment(self, handle: RolloutSegmentHandle) -> None:
         """按 §5.4 顺序封存：先上传对象，再在 PG 事务内写 manifest 与指针。
@@ -660,21 +704,37 @@ class RolloutRecorder:
             supersede_segment_id=handle.superseded_segment_id,
             rename_from=handle.rename_from,
             rename_to=handle.path if handle.rename_from is not None else None,
+            # 标废旧段带租约守卫：失租者不能 tombstone 当前持有者的段
+            fence=self._fence,
         )
-        if getattr(registration, "status", None) is RegistrationStatus.failed:
+        if not bool(getattr(registration, "ok", False)):
             handle.registered = False
-            self._degraded = True
+            status = getattr(registration, "status", None)
+            reason = getattr(registration, "reason", "unknown")
+            # rename_failed 与 failed 都要求停止本 turn 的记录，但事实不同（review-2 新发现 4②）：
+            # 前者 DB 行已建并已补偿标废，后者压根没有行。日志/指标必须能区分。
+            self._mark_degraded(f"manifest_register_{status}")
             self._logger.error(
-                "rollout 段登记失败，本 turn 停止记录（避免未登记段被封存成孤儿对象）: "
-                "turn=%s segment=%s reason=%s",
+                "rollout 段登记未成功，本 turn 停止记录（避免未登记段被封存成孤儿对象）: "
+                "turn=%s segment=%s status=%s reason=%s",
                 handle.turn_id,
                 handle.segment_id,
-                getattr(registration, "reason", "unknown"),
+                status,
+                reason,
             )
-            _inc_counter("rollout_dropped_total", reason="manifest_register_failed")
+            _inc_counter(
+                "rollout_dropped_total",
+                reason="manifest_register_rename_failed"
+                if status is RegistrationStatus.rename_failed
+                else "manifest_register_failed",
+            )
             return False
         handle.registered = True
         handle.rename_from = None
+        # 注意：这里**不**清除降级。登记失败时被跳过的可能是"必须首行"的 thread_meta，
+        # 若后续登记成功就继续写，段内会出现无法解释的序号空洞、并破坏"thread_meta 是
+        # 段内首行"的不变式（§5.3 写入顺序第 1 条）。降级因此只在下一个 turn 的
+        # ``open_turn`` 清零——这正好对应 docstring 里"本 turn 停止记录"的语义。
         return True
 
     def _resolve_ack(self, envelope: _Envelope) -> None:
@@ -696,7 +756,7 @@ class RolloutRecorder:
             await self._reopen_and_truncate()
             await self._write_once(envelope)
         except Exception as second_error:
-            self._degraded = True
+            self._mark_degraded("write_failed")
             self._logger.error(
                 "rollout 写入二次失败，进入降级（后续记录丢弃，不影响 turn）: %s", second_error
             )

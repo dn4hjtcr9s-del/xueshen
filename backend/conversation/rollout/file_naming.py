@@ -130,6 +130,47 @@ def list_segment_paths(thread_dir: Path) -> list[tuple[int, UUID, Path]]:
     return found
 
 
+def iter_thread_dirs(*, root: str | Path, thread_id: UUID | str) -> list[Path]:
+    """该 thread 在 ``{root}/threads/*/*/*/`` 下的**全部**日期分片目录（可能为空）。
+
+    为什么需要"全部"：日期目录取的是**调用方传入**的 thread 创建时间。``runner`` 在
+    thread 行还没落库时取的是 ``clock.now()``，与 ``conversation_threads.created_at``
+    不保证同日；``find_segment_dir`` 只返回日期最新的那一个目录，会漏掉另一个分片。
+    热段删除（review-2 新发现 6/15）与 ordinal 扫描都必须跨分片，因此这里返回列表。
+    """
+    base = Path(root) / THREADS_DIRNAME
+    if not base.is_dir():
+        return []
+    normalized = str(normalize_thread_id(thread_id))
+    return sorted(path for path in base.glob(f"*/*/*/{normalized}") if path.is_dir())
+
+
+def max_local_ordinal(*, root: str | Path, thread_id: UUID | str) -> int | None:
+    """该 thread 本地热段里**真实写过的最大 ordinal**；没有可读段时返回 ``None``。
+
+    ``manifest`` 侧对 ``open`` 段只能给出 ``ordinal_start``（``ordinal_end`` 为 NULL，
+    懒创建时不写），因此"下一个安全起点"必须结合本地文件（review-2 新发现 4①）。
+    只读每个分片里 ``ordinal_start`` 最大的那个文件的尾部（ordinal 单调递增，
+    最大值必然在最后一行），不做全文扫描。
+
+    读不出最后一条完整行（空文件 / 半行 / 损坏）时返回 ``None``——此时 manifest 的
+    ``COALESCE(ordinal_end, ordinal_start)`` 仍是安全下界，不夸大也不缩小起点。
+    """
+    from backend.conversation.rollout.recorder import read_last_ordinal
+
+    best: int | None = None
+    for thread_dir in iter_thread_dirs(root=root, thread_id=thread_id):
+        segments = list_segment_paths(thread_dir)
+        if not segments:
+            continue
+        _ordinal_start, _segment_id, last_path = segments[-1]
+        last_ordinal = read_last_ordinal(last_path)
+        if last_ordinal is None:
+            continue
+        best = last_ordinal if best is None else max(best, last_ordinal)
+    return best
+
+
 def find_segment_dir(*, root: str | Path, thread_id: UUID | str) -> Path | None:
     """在已有分片中反查 thread 的段目录（不知道创建时间时用）。
 

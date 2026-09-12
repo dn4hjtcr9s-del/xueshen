@@ -63,6 +63,10 @@ from backend.settings import Settings
 
 MAX_PLANS_PER_OPERATION = 8
 
+#: 学习者档案的固定显示标签：learner 是单文件档案，正文主标题恒为它（§3.3），
+#: v1 文档没有 frontmatter ``name`` 时投影标题也回退到它。
+LEARNER_PROFILE_TITLE = "学习者档案"
+
 
 @dataclass
 class CommitOutcome:
@@ -117,6 +121,66 @@ def _links_of_rendered(content: bytes) -> list[str]:
     正文是唯一事实源（§3.4），"这一版写了什么"当然以渲染结果为准。
     """
     return extract_links(content.decode("utf-8"))
+
+
+def projected_title(doc: LearnerDocument | MasteryDocument) -> str:
+    """注册表/索引/prime 共用的 ``title`` 投影规则（§3.4 / 评审 I-11③ 收尾）。
+
+    v2 文档取 frontmatter ``name``（§3.2：``name`` 就是链接显示名，也是"这个文件里
+    有什么"的判据）；v1 文档没有 ``name``，回退到文档自身的标题——mastery 取
+    ``topic_title``，learner 取固定标签 ``学习者档案``（它是单文件档案，正文主标题
+    恒为这个标签）。
+
+    **所有投影写入路径都必须走这里**。上一轮的 I-11③ 只改了提交路径，于是
+    ``restore`` 与 ``rebuild_index`` 仍旧取 ``topic_title``：重命名后撤销删除会把
+    注册表标题打回旧值，index.md 与 prime 永久不一致（评审新发现 7）。
+    """
+    if _is_v2(doc):
+        name = str(getattr(doc, "name", "") or "").strip()
+        if name:
+            return name
+    return str(getattr(doc, "topic_title", None) or LEARNER_PROFILE_TITLE)
+
+
+def index_projection_from_document(
+    doc: LearnerDocument | MasteryDocument,
+    *,
+    related_topic_keys: list[str] | None = None,
+) -> dict[str, Any]:
+    """文档 → 注册表投影数据（**唯一权威实现**，§3.4）。
+
+    提交（``_build_new_content``）、恢复（``restore``）、迁移回填
+    （``refresh_index_projection``）三条写入路径共用本函数，因此"某个字段只在其中
+    一处改了"这类漂移在结构上不再可能。``rebuild_index`` 不重算投影，它读提交路径
+    写进 ``memory_index_entries`` 的同一份数据（见 ``_index_projection``）。
+
+    字段来源（真值表见 ``tests/unit/test_projection_sites_meta.py``）：
+
+    - ``title`` ← :func:`projected_title`（v2 取 frontmatter ``name``）；
+    - ``summary`` ← 正文概述（mastery ``overview`` / learner ``goals`` 拼接），
+      **刻意不等于 frontmatter ``description``**：PG 的 ``summary`` 同时是
+      ``memory.search`` 的匹配域，改动它属独立的检索语义变更（DEV-023 已登记）；
+    - ``keywords`` / ``aliases`` ← 同名 frontmatter 字段（文档是唯一事实源）；
+    - ``related_topic_keys`` ← 正文 ``[[link]]``：显式传入时以调用方为准（提交路径从
+      **新渲染正文**现算，见 :func:`_links_of_rendered`），否则用解析结果
+      ``doc.links``（恢复/迁移路径解析的就是活动版本正文本身）；
+    - ``search_text`` ← 标题 + aliases + 正文各段（trigram 相似度域）。
+    """
+    title = projected_title(doc)
+    if isinstance(doc, LearnerDocument):
+        summary = "；".join((doc.goals or doc.preferences or [LEARNER_PROFILE_TITLE])[:3])
+        body: list[str] = [*doc.preferences, *doc.goals, *doc.plans]
+    else:
+        summary = doc.overview or "；".join(doc.understood[:3])
+        body = [doc.overview, *doc.understood, *doc.difficulties, *doc.review_advice]
+    return {
+        "title": title,
+        "summary": summary,
+        "keywords": list(doc.keywords),
+        "aliases": list(doc.aliases),
+        "related_topic_keys": list(doc.links if related_topic_keys is None else related_topic_keys),
+        "search_text": " ".join([title, *doc.aliases, *body]),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -337,26 +401,16 @@ class MemoryService:
             base.updated_at = now
             content = render_learner(base).encode("utf-8")
             changed = _changed_learner_sections(before_snapshot, base)
+            # §3.4：投影只有 index_projection_from_document 一个权威实现，三条写入路径
+            # 共用它。这里多出的 `changed_sections` 不是投影字段，而是 learner.updated
+            # 事件的载荷依据。
             index_data: dict[str, Any] = {
-                "title": "学习者档案",
-                "summary": "；".join((base.goals or base.preferences or ["学习者档案"])[:3]),
-                # §3.4 + 2026-09-12 裁决 A：keywords 是 v2 frontmatter 字段，文档是唯一
-                # 事实源；这里只做投影，不写死空列表（生产者是 Phase 7 consolidation 节点）。
-                "keywords": list(base.keywords),
-                # §3.4：alias 是检索键、[[link]] 目标是路由依据，都要进投影与 search_text
-                "aliases": list(base.aliases),
-                # 评审 I-11②：links 必须从**新渲染正文**现算。`base.links` 是上一版解析
-                # 结果（apply_learner_patch / apply_frontmatter_patch 都不重算它），照抄
-                # 会让"首次写入含 [[链接]] 的正文"投影为空、此后永远滞后一个提交。
-                "related_topic_keys": _links_of_rendered(content),
-                "search_text": " ".join(
-                    [
-                        "学习者档案",
-                        *base.aliases,
-                        *base.preferences,
-                        *base.goals,
-                        *base.plans,
-                    ]
+                **index_projection_from_document(
+                    base,
+                    # 评审 I-11②：links 必须从**新渲染正文**现算。`base.links` 是上一版解析
+                    # 结果（apply_learner_patch / apply_frontmatter_patch 都不重算它），照抄
+                    # 会让"首次写入含 [[链接]] 的正文"投影为空、此后永远滞后一个提交。
+                    related_topic_keys=_links_of_rendered(content),
                 ),
                 "changed_sections": changed,
             }
@@ -388,29 +442,13 @@ class MemoryService:
         mbase.version = after_version
         mbase.updated_at = now
         content = render_mastery(mbase).encode("utf-8")
-        # 评审 I-11③：v2 文档的注册表 title 取 frontmatter `name`（v2 里它就是文档标题），
-        # v1 文档没有 name，保持 topic_title 逐字不变——否则改 name 的 frontmatter_patch
-        # 永远到不了注册表与 search。
-        projected_title = (mbase.name or mbase.topic_title) if _is_v2(mbase) else mbase.topic_title
-        index_data = {
-            "title": projected_title,
-            "summary": mbase.overview or "；".join(mbase.understood[:3]),
-            # 同 learner：keywords 由文档投影，文档是唯一事实源（§3.4 / 裁决 A）
-            "keywords": list(mbase.keywords),
-            "aliases": list(mbase.aliases),
-            # related_topic_keys 同 learner，见上面的 I-11② 说明
-            "related_topic_keys": _links_of_rendered(content),
-            "search_text": " ".join(
-                [
-                    mbase.topic_title,
-                    *mbase.aliases,
-                    mbase.overview,
-                    *mbase.understood,
-                    *mbase.difficulties,
-                    *mbase.review_advice,
-                ]
-            ),
-        }
+        # 评审 I-11③ / 新发现 7：标题一律走 projected_title（v2 取 frontmatter `name`），
+        # 与 restore / rebuild_index / refresh_index_projection 同源，否则改 name 的
+        # frontmatter_patch 只到得了其中一部分站点。related_topic_keys 同 learner，
+        # 从新渲染正文现算（I-11②）。
+        index_data = index_projection_from_document(
+            mbase, related_topic_keys=_links_of_rendered(content)
+        )
         return content, before_version, after_version, topic_key, index_data
 
     # ---------------- 原子提交 ----------------
@@ -764,10 +802,15 @@ class MemoryService:
                         )
 
         finally:
+            # 评审新发现 3：clear 必须和 mark 打在同一行上（`fencing_operation_id`）。
+            # 漏传时 CAS 落在从未被 claim 的成员行（`locked_by` 为空、状态
+            # `pending_batch`）上，恒 0 行 → 批次行的 `commit_started_at` 残留，
+            # 取消仲裁据此误判"正在提交"。标记语义必须成对成立。
             await self._clear_commit_started(
                 operation_id,
                 expected_worker=expected_worker,
                 expected_generation=expected_generation,
+                fencing_operation_id=cas_operation_id,
             )
 
         # 按原 plans 顺序汇总（replay 命中与新提交混排时保持返回顺序稳定）
@@ -811,19 +854,40 @@ class MemoryService:
         真正"要删除映射"的场景不受影响：``forget`` / purge 各自显式 deactivate 全部
         link；``restore`` 由调用方重新绑定；调用方给出节点集合时，消失的节点依旧被置
         inactive（情况 1）。
+
+        **情况 1 的两条铁律**（评审新发现 1）：
+
+        - 置 inactive 只允许**一次**调用 + 集合排除。`deactivate_graph_links` 的 SQL
+          没有版本谓词，按 node_id 循环调用会让"本次要保留"的节点在下一轮被连带置
+          false（两个节点 → 0/2 条 active，实测复现）；
+        - 排除集合 = **本次真正写成功的节点**（``upserted``），不是"计划里的节点"。
+          ``upserted ⊆ node_ids``，且只有"该节点从未映射过、表里没有行"或"行存在但
+          本轮与历史都没有 mapping_method"才会出现二者不等——那时保留它也没有意义
+          （留着的是 active=false 或旧版本的行，``_dual_write_kg`` 的
+          ``active AND memory_version=:v`` 谓词两个都不满足），不如按"本次集合为准"
+          清干净，等下一次携带元数据的提交重新激活。
         """
         from backend.memory.persistence import graph_states as gs_repo
 
-        previous_links = await gs_repo.list_active_links_for_memory(
-            session, user_id=user_id, memory_id=memory_id, active_version=active_version - 1
-        )
+        # 一次取齐：PK 是 (user_id, memory_id, node_id)，同一节点至多一行。
+        rows = await gs_repo.list_links_for_memory(session, user_id=user_id, memory_id=memory_id)
+        # "上一版活动的映射"（情况 2 的推进对象，也是 method/confidence 的首选来源）
+        previous_active = {
+            str(row["node_id"]): row
+            for row in rows
+            if row["active"] and int(row["memory_version"]) == active_version - 1
+        }
         if node_ids:
-            previous_by_node = {str(link["node_id"]): link for link in previous_links}
+            # method/confidence 的回退来源：先"上一版活动的行"，再"该节点任意历史行"。
+            # 后者让**曾经映射过、当前 inactive 或停在旧版本**的节点也能被本次提交重新
+            # 激活——否则它会被下面的集合排除挡在外面，永远停在 inactive。
+            fallback_by_node: dict[str, dict[str, Any]] = {str(row["node_id"]): row for row in rows}
+            upserted: list[str] = []
             for node_id in node_ids:
-                previous = previous_by_node.get(node_id)
+                previous = previous_active.get(node_id) or fallback_by_node.get(node_id)
                 # mapping_method 有 CHECK 白名单（explicit_hint/exact_alias/model_candidate），
                 # confidence 有 BETWEEN 0 AND 1：两列都 NOT NULL，既不能留空也不能编造。
-                # 本轮没给就沿用旧行的值；旧行也没有（新映射没带元数据）时只能跳过——
+                # 本轮没给就沿用旧行的值；旧行也没有（这个节点从未映射过）时只能跳过——
                 # 宁可不建这条 link，也不能写一个违反约束的"未知来源"。
                 method = mapping_method or str((previous or {}).get("mapping_method") or "")
                 if not method:
@@ -842,14 +906,15 @@ class MemoryService:
                     mapping_method=method,
                     mapping_confidence=min(max(confidence, 0.0), 1.0),
                 )
-            # 节点集合以本次提交为准：不再出现的旧 link 置 inactive（§16.4）
-            for kept_node_id in node_ids:
-                await gs_repo.deactivate_graph_links(
-                    session, user_id=user_id, memory_id=memory_id, except_node_id=kept_node_id
-                )
+                upserted.append(node_id)
+            # 节点集合以本次提交为准：不再出现的旧 link 置 inactive（§16.4）。
+            # **一次**调用 + 集合排除（评审新发现 1）：upserted 里的节点全部保持 active。
+            await gs_repo.deactivate_graph_links(
+                session, user_id=user_id, memory_id=memory_id, except_node_ids=upserted
+            )
             return
         # 情况 2：本次提交没有图谱信息 —— 既有映射一个都不删，只把版本推上去。
-        for link in previous_links:
+        for link in previous_active.values():
             await gs_repo.upsert_graph_link(
                 session,
                 user_id=user_id,
@@ -1196,43 +1261,19 @@ class MemoryService:
                     active_storage_key=stored.storage_key,
                     active_checksum=stored.checksum,
                 )
-                # 重建检索索引：keywords/aliases 从恢复出的文档投影（§3.4 / 裁决 A）
+                # 重建检索索引：整份投影走唯一权威实现（§3.4）。
+                # 评审新发现 7：这里曾自己拼一份、title 取 `parsed.topic_title`，于是
+                # "改 name → 删除 → 恢复"会把注册表标题打回旧值（`parsed.name` 就在手边）。
                 memory_type = doc["memory_type"]
-                parsed: Any
+                parsed: LearnerDocument | MasteryDocument
                 if memory_type == "learner":
                     parsed = parse_learner(content.decode("utf-8"))
-                    index_data = {
-                        "title": "学习者档案",
-                        "summary": "；".join(
-                            (parsed.goals or parsed.preferences or ["学习者档案"])[:3]
-                        ),
-                        "keywords": list(parsed.keywords),
-                        "aliases": list(parsed.aliases),
-                        "related_topic_keys": list(parsed.links),
-                        "search_text": " ".join(
-                            ["学习者档案", *parsed.preferences, *parsed.goals, *parsed.plans]
-                        ),
-                    }
-                    evidence_refs = parsed.evidence_refs
                 else:
                     parsed = parse_mastery(content.decode("utf-8"))
-                    index_data = {
-                        "title": parsed.topic_title,
-                        "summary": parsed.overview or "；".join(parsed.understood[:3]),
-                        "keywords": list(parsed.keywords),
-                        "aliases": list(parsed.aliases),
-                        "related_topic_keys": list(parsed.links),
-                        "search_text": " ".join(
-                            [
-                                parsed.topic_title,
-                                parsed.overview,
-                                *parsed.understood,
-                                *parsed.difficulties,
-                                *parsed.review_advice,
-                            ]
-                        ),
-                    }
-                    evidence_refs = parsed.evidence_refs
+                # 恢复出的正文就是活动版本正文本身，`related_topic_keys` 取解析结果
+                # （`parsed.links`）与"从渲染正文现算"逐字等价，无需重算。
+                index_data = index_projection_from_document(parsed)
+                evidence_refs = parsed.evidence_refs
                 await self._upsert_index_entry(
                     session,
                     user_id=user_id,
@@ -1415,44 +1456,12 @@ class MemoryService:
         if loaded is None:
             return False
         row, doc = loaded
-        if isinstance(doc, LearnerDocument):
-            index_data: dict[str, Any] = {
-                "title": "学习者档案",
-                "summary": "；".join((doc.goals or doc.preferences or ["学习者档案"])[:3]),
-                "keywords": list(doc.keywords),
-                "aliases": list(doc.aliases),
-                "related_topic_keys": list(doc.links),
-                "search_text": " ".join(
-                    ["学习者档案", *doc.aliases, *doc.preferences, *doc.goals, *doc.plans]
-                ),
-            }
-            evidence_refs = list(doc.evidence_refs)
-            memory_type = "learner"
-            topic_key = None
-        elif isinstance(doc, MasteryDocument):
-            projected_title = (doc.name or doc.topic_title) if _is_v2(doc) else doc.topic_title
-            index_data = {
-                "title": projected_title,
-                "summary": doc.overview or "；".join(doc.understood[:3]),
-                "keywords": list(doc.keywords),
-                "aliases": list(doc.aliases),
-                "related_topic_keys": list(doc.links),
-                "search_text": " ".join(
-                    [
-                        doc.topic_title,
-                        *doc.aliases,
-                        doc.overview,
-                        *doc.understood,
-                        *doc.difficulties,
-                        *doc.review_advice,
-                    ]
-                ),
-            }
-            evidence_refs = list(doc.evidence_refs)
-            memory_type = "mastery"
-            topic_key = doc.topic_key
-        else:  # pragma: no cover - _load_active_document 只返回这两种类型
-            return False
+        # 投影只有一个权威实现（评审新发现 7：这条路径也曾自己拼一份，且 v2 文档的
+        # title 取 `doc.topic_title`，与提交路径不一致）。
+        index_data = index_projection_from_document(doc)
+        evidence_refs = list(doc.evidence_refs)
+        memory_type = "learner" if isinstance(doc, LearnerDocument) else "mastery"
+        topic_key = None if isinstance(doc, LearnerDocument) else doc.topic_key
         active_version = int(row["active_version"])
         await self._upsert_index_entry(
             session,
@@ -1502,6 +1511,11 @@ class MemoryService:
 
         投影行缺失（例如历史数据未回填）时 v2 字段退化为空、updated_at 退回文档行：
         重建必须照常产出 index.md，缺字段只是投影不完整，不能变成重建失败。
+
+        **title 优先取投影行**（评审新发现 7）：``memory_documents.topic_title`` 只在
+        create 时写过一次，改 frontmatter ``name`` 不会同步它，拿它渲染 index.md 会让
+        目录与注册表/prime 永久不一致。投影行缺失时才退回文档行标题，保证历史数据
+        （含未回填投影的 v1 文档）照常重建。
         """
         raw_updated = (projection or {}).get("updated_at") or doc["updated_at"]
         updated_at = (
@@ -1513,11 +1527,12 @@ class MemoryService:
         def _strings(key: str) -> list[str]:
             return [str(item) for item in ((projection or {}).get(key) or [])]
 
+        projected_title = str((projection or {}).get("title") or "").strip()
         return IndexEntry(
             memory_id=doc["memory_id"],
             memory_type=doc["memory_type"],
             topic_key=doc["topic_key"],
-            title=doc["topic_title"] or "学习者档案",
+            title=projected_title or doc["topic_title"] or LEARNER_PROFILE_TITLE,
             version=int(doc["active_version"]),
             updated_at=updated_at,
             description=str((projection or {}).get("summary") or ""),

@@ -62,6 +62,14 @@ DegradedFlag = Literal[
     "answer_stream_interrupted",
     "answer_stream_truncated",
     "answer_stream_refused",
+    # memory-rebuild 同族缺口（review-2 新发现 2）：rewrite / evidence 两个节点的确定性降级
+    # 路径同样会 append 标记，漏在这里的后果与上面三个逐字一致（finalize 事务内校验失败
+    # → 整个事务回滚）。**这三个值由 tests/unit/test_degraded_flag_enum_meta.py 固定**：
+    # 该元测试从 backend/conversation/** 提取全部降级字面量与本 Literal 做集合比较，
+    # 新增标记而忘记补这里会直接变红（不再依赖人工逐点补）。
+    "rewrite_structured_fallback",
+    "rewrite_plan_contract_invalid",
+    "evidence_structured_fallback",
 ]
 
 

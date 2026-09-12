@@ -104,9 +104,10 @@ async def _recall_via_prime(
 ) -> dict[str, Any]:
     """prime 模式：每轮取最新 prime；首轮 pin，后续轮按 hash 变化补 pin（见模块 docstring）。
 
-    review I-5：注入前按 token 预算裁剪注册表目录。服务端的条数上限只是第一道界
-    （`PRIME_INDEX_ENTRIES_MAX`），提示词体积必须由这里的预算兜底，否则主题多的用户
-    仍会把首轮注入与 checkpoint 撑大。
+    review I-5 + review-2 新发现 10：注入前按 token 预算裁剪 **summary 与注册表目录**
+    （同一份 `conversation_memory_token_budget`，先扣 summary、再按剩余预算裁目录）。
+    服务端的条数上限只是第一道界（`PRIME_INDEX_ENTRIES_MAX`），提示词体积必须由这里的
+    预算兜底，否则主题多、摘要长的用户仍会把首轮注入与 checkpoint 撑大。
     """
     prime = await _build_prime(runtime, state)
     prime = _apply_prime_budget(runtime, prime)
@@ -114,9 +115,11 @@ async def _recall_via_prime(
         await _pin_prime(runtime, state, prime)
     else:
         await _refresh_pin_if_changed(runtime, state, prime)
-    if prime.get("degraded") or prime.get("index_entries_truncated"):
-        await _emit_degraded(runtime, state, "memory_prime_degraded")
     truncated = _is_prime_truncated(prime)
+    if prime.get("degraded") or truncated:
+        # 目录裁剪、summary 按 token 截断、服务端条数上限三种情况都要发降级标记
+        # （review-2 新发现 10：summary 也被同一预算裁，不能只在目录维度上报）。
+        await _emit_degraded(runtime, state, "memory_prime_degraded")
     return {
         "memory_prime": prime,
         "memory_context": {
@@ -148,10 +151,11 @@ def _apply_prime_budget(
         prime, budget_tokens=budget_tokens, token_counter=runtime.token_counter
     )
     if truncated:
-        # 用户 id 不入日志（隐私约定）：只记保留条数与预算
+        # 用户 id 不入日志（隐私约定）：只记保留条数、summary 是否被截断与预算
         runtime.logger.warning(
-            "memory_prime_index_truncated: kept=%d budget_tokens=%d",
+            "memory_prime_index_truncated: kept=%d summary_truncated=%s budget_tokens=%d",
             len(trimmed.get("index_entries") or []),
+            bool(trimmed.get("summary_truncated")),
             budget_tokens,
         )
     return trimmed

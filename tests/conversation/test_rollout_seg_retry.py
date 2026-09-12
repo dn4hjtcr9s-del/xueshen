@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -41,7 +42,7 @@ from backend.conversation.rollout.file_naming import (
     segment_path,
 )
 from backend.conversation.rollout.object_store import LocalRolloutObjectStore
-from backend.conversation.rollout.recorder import RolloutRecorder
+from backend.conversation.rollout.recorder import RolloutRecorder, read_last_ordinal
 from backend.conversation.rollout.sealer import (
     RegistrationStatus,
     RolloutSegmentSealer,
@@ -604,6 +605,285 @@ async def test_register_open_reports_insert_and_replay(
 
     rows = await _segment_rows(factory, ids["turn_id"])
     assert len(rows) == 1, "失败的登记不得留下半行"
+
+
+# ---------------------------------------------------------------------------
+# review-2 新发现 4①：新建段的 ordinal_start 必须避开未封存段已写过的序号
+# ---------------------------------------------------------------------------
+
+
+async def test_new_segment_avoids_unsealed_segment_ordinal_range(
+    conversation_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """open 段的 ``ordinal_end`` 是 NULL → 只按 manifest 算会复用已写过的序号。
+
+    复现 review-2 的实测：崩溃段文件里 ordinal 已用到 1，``next_ordinal_start`` 仍给 1，
+    新段与旧段范围重叠（``(0,3)`` 与 ``(1,2)`` 那类），而没有任何 reconcile 类别能发现。
+    """
+    factory = conversation_session_factory
+    ids = await _seed_turn(factory, message_count=1)
+    object_store = LocalRolloutObjectStore(root=tmp_path)
+
+    # 第一次尝试：写入两条记录（thread_meta=0、user_message=1）后"崩溃"
+    # （flush + aclose：文件在、manifest 行停在 open、ordinal_end 仍为 NULL）
+    crashed = _build_recorder(factory, tmp_path, object_store)
+    handle = await crashed.open_turn(
+        thread_id=ids["thread_id"],
+        turn_id=ids["turn_id"],
+        user_id=ids["user_id"],
+        thread_created_at=_NOW,
+        fence=(_LEASE_OWNER, _LEASE_GENERATION),
+    )
+    assert handle is not None
+    await _record_messages_payload_only(crashed, ids, message_indexes=[0])
+    await crashed.flush()
+    await crashed.aclose()
+
+    rows = await _segment_rows(factory, ids["turn_id"])
+    assert [(row["status"], row["ordinal_start"], row["ordinal_end"]) for row in rows] == [
+        ("open", 0, None)
+    ], "崩溃段必须停在 open 且 ordinal_end 为 NULL"
+    files = _hot_files(tmp_path, ids["thread_id"])
+    assert len(files) == 1
+    assert read_last_ordinal(files[0]) == 1, "文件里已写到 ordinal=1"
+
+    # manifest 侧只能看到 ordinal_start=0 → 旧实现会给出起点 1（重叠）
+    async with factory() as session:
+        assert await manifests_repo.next_ordinal_start(session, ids["thread_id"]) == 1, (
+            "本断言固定 DB 侧的盲区：open 段的 ordinal_end 为 NULL"
+        )
+
+    # 新 turn（同一 thread，重启后）：起点必须避开已写过的序号
+    other_turn = uuid.uuid4()
+    async with factory() as session:
+        async with session.begin():
+            # 崩溃的 turn 在现实中会被 Worker 标成终态，之后才允许同 thread 开新 turn
+            # （uq_conv_turns_one_active_per_thread 只允许一个活动 turn）
+            await session.execute(
+                text(
+                    "UPDATE conversation.conversation_turns SET status = 'failed' "
+                    "WHERE turn_id = :turn_id"
+                ),
+                {"turn_id": ids["turn_id"]},
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO conversation.conversation_turns ("
+                    "turn_id, thread_id, user_id, client_request_id, request_id, run_id, "
+                    "user_message_id, status, lease_owner, lease_generation, "
+                    "next_attempt_at, expected_thread_version"
+                    ") VALUES ("
+                    ":turn_id, :thread_id, :user_id, 'c-2', 'req-2', 'run-2', "
+                    ":user_message_id, 'running', :lease_owner, :lease_generation, :now, 1)"
+                ),
+                {
+                    "turn_id": other_turn,
+                    "thread_id": ids["thread_id"],
+                    "user_id": ids["user_id"],
+                    "user_message_id": ids["message_ids"][0],
+                    "lease_owner": _LEASE_OWNER,
+                    "lease_generation": _LEASE_GENERATION,
+                    "now": _NOW,
+                },
+            )
+
+    recorder = _build_recorder(factory, tmp_path, object_store)
+    handle = await recorder.open_turn(
+        thread_id=ids["thread_id"],
+        turn_id=other_turn,
+        user_id=ids["user_id"],
+        thread_created_at=_NOW,
+        fence=(_LEASE_OWNER, _LEASE_GENERATION),
+    )
+    assert handle is not None
+    assert handle.ordinal_start == 2, (
+        "新段起点必须是「本地热段真实最大 ordinal + 1」，否则两段序号范围重叠"
+    )
+    await recorder.record(
+        "user_message",
+        payload={
+            "message_id": str(ids["message_ids"][0]),
+            "sequence": 1,
+            "role": "user",
+            "content": "第 1 条消息",
+            "content_hash": hashlib.sha256("第 1 条消息".encode()).hexdigest(),
+            "occurred_at": _NOW.isoformat(),
+        },
+    )
+    await recorder.close_turn()
+    await recorder.aclose()
+
+    # 两段文件里的 ordinal 不得重复
+    seen: list[int] = []
+    for path in _hot_files(tmp_path, ids["thread_id"]):
+        for line in path.read_bytes().splitlines():
+            if line:
+                seen.append(int(json.loads(line)["ordinal"]))
+    assert len(seen) == len(set(seen)), f"ordinal 出现重复（范围重叠）：{sorted(seen)}"
+
+
+# ---------------------------------------------------------------------------
+# review-2 新发现 4②：热段改名失败必须补偿，不得谎称"没有 manifest 行"
+# ---------------------------------------------------------------------------
+
+
+async def test_rename_failure_compensates_and_next_turn_recovers(
+    conversation_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """改名失败：DB 已提交 → 补偿标废新行 + 清掉改名源，且**不**留下不可发现的残留。
+
+    同时验证 review-2 新发现 5：这次降级只作用于本 turn，下一个 turn 必须能重新记录。
+    """
+    factory = conversation_session_factory
+    ids = await _seed_turn(factory, message_count=1)
+    object_store = LocalRolloutObjectStore(root=tmp_path)
+
+    crashed = _build_recorder(factory, tmp_path, object_store)
+    crash_handle = await crashed.open_turn(
+        thread_id=ids["thread_id"],
+        turn_id=ids["turn_id"],
+        user_id=ids["user_id"],
+        thread_created_at=_NOW,
+        fence=(_LEASE_OWNER, _LEASE_GENERATION),
+    )
+    assert crash_handle is not None
+    await _record_messages_payload_only(crashed, ids, message_indexes=[0])
+    await crashed.flush()
+    await crashed.aclose()
+    old_files = _hot_files(tmp_path, ids["thread_id"])
+    assert len(old_files) == 1
+
+    def _boom(source: Path, target: Path) -> None:
+        raise OSError("注入的改名失败")
+
+    recorder = _build_recorder(factory, tmp_path, object_store)
+    monkeypatch.setattr("backend.conversation.rollout.sealer._rename_segment_file", _boom)
+
+    # 同一 turn 重试 → 走"复用既有热段"路径（需要改名为新 segment_id 的路径）
+    handle = await recorder.open_turn(
+        thread_id=ids["thread_id"],
+        turn_id=ids["turn_id"],
+        user_id=ids["user_id"],
+        thread_created_at=_NOW,
+        fence=(_LEASE_OWNER, _LEASE_GENERATION),
+    )
+    assert handle is not None
+    await _record_messages_payload_only(recorder, ids, message_indexes=[0])
+    await recorder.flush()
+
+    assert recorder.degraded is True, "改名失败必须让记录器停止本 turn 的记录"
+    rows = await _segment_rows(factory, ids["turn_id"])
+    assert all(row["status"] == "deleted" for row in rows), (
+        f"补偿后不得留下 open 行（DB 已变更却停止记录会留下不可发现的残留）：{rows}"
+    )
+    assert len(rows) == 2, "旧行（标废）+ 新行（补偿标废）各一条"
+    assert not old_files[0].exists(), "改名源必须被清掉（否则成为不可发现的热文件残留）"
+    assert _hot_files(tmp_path, ids["thread_id"]) == []
+    assert await object_store.list_prefix(prefix="rollouts/") == [], "不得留下孤儿对象"
+    # 生产路径由 runner 的 finally 调 close_turn：未登记的段不会封存，也不会写 manifest
+    await recorder.close_turn()
+
+    # 下一个 turn（同一个 recorder）：降级必须在 open_turn 时清零并重新可用
+    monkeypatch.undo()
+    other_turn = uuid.uuid4()
+    async with factory() as session:
+        async with session.begin():
+            # 崩溃的 turn 在现实中会被 Worker 标成终态，之后才允许同 thread 开新 turn
+            # （uq_conv_turns_one_active_per_thread 只允许一个活动 turn）
+            await session.execute(
+                text(
+                    "UPDATE conversation.conversation_turns SET status = 'failed' "
+                    "WHERE turn_id = :turn_id"
+                ),
+                {"turn_id": ids["turn_id"]},
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO conversation.conversation_turns ("
+                    "turn_id, thread_id, user_id, client_request_id, request_id, run_id, "
+                    "user_message_id, status, lease_owner, lease_generation, "
+                    "next_attempt_at, expected_thread_version"
+                    ") VALUES ("
+                    ":turn_id, :thread_id, :user_id, 'c-2', 'req-2', 'run-2', "
+                    ":user_message_id, 'running', :lease_owner, :lease_generation, :now, 1)"
+                ),
+                {
+                    "turn_id": other_turn,
+                    "thread_id": ids["thread_id"],
+                    "user_id": ids["user_id"],
+                    "user_message_id": ids["message_ids"][0],
+                    "lease_owner": _LEASE_OWNER,
+                    "lease_generation": _LEASE_GENERATION,
+                    "now": _NOW,
+                },
+            )
+    await _record_messages(recorder, ids, turn_id=other_turn, message_indexes=[0])
+    assert recorder.degraded is False, "降级必须收敛到单个 turn（新发现 5）"
+    rows_after = await _segment_rows(factory, other_turn)
+    assert [row["status"] for row in rows_after] == ["sealed"], "下一个 turn 必须正常封存"
+
+
+# ---------------------------------------------------------------------------
+# review-2 新发现 17：标废（tombstone）也必须带租约守卫
+# ---------------------------------------------------------------------------
+
+
+async def test_mark_deleted_and_discard_open_require_lease_fence(
+    conversation_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """失租的 worker 不得 tombstone 当前持有者的段，也不得清空其消息指针。"""
+    factory = conversation_session_factory
+    ids = await _seed_turn(factory, message_count=1)
+    object_store = LocalRolloutObjectStore(root=tmp_path)
+    recorder = _build_recorder(factory, tmp_path, object_store)
+    await _record_messages(recorder, ids, message_indexes=[0])
+    rows = await _segment_rows(factory, ids["turn_id"])
+    assert [row["status"] for row in rows] == ["sealed"]
+    segment_id = rows[0]["segment_id"]
+    pointer_before = await _message_row(factory, ids["message_ids"][0])
+    assert pointer_before["segment_id"] == segment_id, "封存后消息指针应指向该段"
+
+    # 租约不匹配：标废必须被拒绝，且**不能**清指针
+    async with factory() as session:
+        async with session.begin():
+            denied = await manifests_repo.mark_deleted(
+                session, segment_id=segment_id, fence=(_LEASE_OWNER, _LEASE_GENERATION + 1)
+            )
+    assert denied is False, "失租者不得 tombstone 当前持有者的段"
+    assert (await _segment_rows(factory, ids["turn_id"]))[0]["status"] == "sealed"
+    pointer_after = await _message_row(factory, ids["message_ids"][0])
+    assert pointer_after["segment_id"] == segment_id, "被拒绝的标废不得清空消息指针"
+
+    # 租约匹配：正常标废 + 清指针
+    async with factory() as session:
+        async with session.begin():
+            allowed = await manifests_repo.mark_deleted(
+                session, segment_id=segment_id, fence=(_LEASE_OWNER, _LEASE_GENERATION)
+            )
+    assert allowed is True
+    assert (await _segment_rows(factory, ids["turn_id"]))[0]["status"] == "deleted"
+    assert (await _message_row(factory, ids["message_ids"][0]))["segment_id"] is None
+
+    # discard_open 同理（空段标废）
+    sealer = RolloutSegmentSealer(
+        session_factory=factory,
+        object_store=object_store,
+        logger=logging.getLogger("test.rollout.seg_retry"),
+    )
+    open_segment = uuid.uuid4()
+    await sealer.register_open(
+        segment_id=open_segment,
+        thread_id=ids["thread_id"],
+        turn_id=ids["turn_id"],
+        ordinal_start=99,
+    )
+    assert await sealer.discard_open(segment_id=open_segment, fence=("other-worker", 1)) is False
+    assert (
+        await sealer.discard_open(segment_id=open_segment, fence=(_LEASE_OWNER, _LEASE_GENERATION))
+        is True
+    )
 
 
 # ---------------------------------------------------------------------------

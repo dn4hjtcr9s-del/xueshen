@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -47,7 +48,11 @@ from langgraph.runtime import Runtime
 from sqlalchemy import text
 from sqlalchemy.exc import InterfaceError, OperationalError
 
-from backend.memory.contracts.errors import DatabaseUnavailableError, StorageUnavailableError
+from backend.memory.contracts.errors import (
+    DatabaseUnavailableError,
+    OperationDeadLetterError,
+    StorageUnavailableError,
+)
 from backend.memory.contracts.operations import MemoryOperation
 from backend.memory.graph.prompt_loader import BUILD_MUTATION_PLAN_PROMPT_VERSION
 from backend.memory.graph.state import MemoryManagerState, MemoryRuntimeContext
@@ -62,6 +67,39 @@ MEMBER_OUTCOME_NEEDS_REVIEW = "needs_review"
 MEMBER_OUTCOME_SKIPPED = "skipped_already_committed"
 #: 成员体抛异常（评审 I-9 隔离）：该成员没有写入，但批次继续处理后续成员。
 MEMBER_OUTCOME_FAILED = "failed"
+#: payload 声明了该成员，但它已取消/已释放/已终态，本批按设计不再处理
+#: （评审新发现 14：这不是"归属丢失"，不能与真·数据不一致混为一谈）。
+MEMBER_OUTCOME_UNAVAILABLE = "skipped_not_processable"
+
+#: 批次级失败信号（评审新发现 12）：本批**一条都没写**、也没有审核候选，且存在失败成员。
+BATCH_ALL_MEMBERS_FAILED = "BATCH_ALL_MEMBERS_FAILED"
+
+
+class BatchAllMembersFailedError(OperationDeadLetterError):
+    """批次内全部成员被隔离、无任何写入（评审新发现 12）。
+
+    单成员失败不拖垮整批（§5.8），但**全部**成员失败时批次不能报 ``succeeded``：
+    operation 状态会与实际写入量不符，而"整批一条都没写进去"只藏在 warnings 里。
+
+    继承 :class:`OperationDeadLetterError` 是为了**不改 ``manager.py`` / ``retry.py``
+    就生效**：``retry.py::classify_failure`` 对"非 retryable 的 MemoryError"直接判
+    ``DEAD_LETTER``，因此批次 operation 落到 ``dead_letter``（人工审）而不是
+    ``succeeded``，也不会进 retry 循环。``code`` 单独取一个名字，让
+    ``public_error.code`` 能一眼区分"这一批全灭"与其它死信原因。
+
+    取舍（为什么不是只往 ``state["errors"]`` 写一个结构化 code）：``normalize_result``
+    目前只识别 ``LLM_BUDGET_EXHAUSTED`` 一个 code（``manager.py`` 不在本轮改动范围），
+    只写 code 不改变任何状态，等于"登记了但没生效"；而伪造
+    ``LLM_BUDGET_EXHAUSTED`` 会把"预算耗尽"这个真实语义污染掉。代价是异常路径下
+    ``MemoryOperationResult.result`` 为 ``None``（逐成员诊断只在图 state / checkpoint
+    里），因此异常消息里带上人数与首条失败摘要，保证公开可见面仍有信息量。
+    """
+
+    code = BATCH_ALL_MEMBERS_FAILED
+
+
+#: 批次级失败信号里带出的失败摘要条数上限（避免超长 public_error.message）。
+MAX_BATCH_FAILURE_SUMMARY_ITEMS = 2
 
 #: 成员失败原因（进 ``batch_failed[].reason``）与异常摘要长度上限（评审 I-9）。
 MEMBER_FAILURE_REASON = "member_exception"
@@ -115,13 +153,35 @@ def _operation_from_row(row: dict[str, Any]) -> dict[str, Any]:
 async def load_batch_members(
     state: MemoryManagerState, runtime: Runtime[MemoryRuntimeContext]
 ) -> dict[str, Any]:
-    """读取本批成员（稳定序），并把批次自身保存起来供收尾还原。"""
+    """读取本批成员（稳定序），并把批次自身保存起来供收尾还原。
+
+    payload ↔ DB 归属交叉校验（评审新发现 14）：`list_batch_member_operations` 只返回
+    ``status='pending_batch'`` 的行（I-8 的正确过滤），因此"被用户取消 / 已被释放回池子 /
+    已终态"的成员也会落进"查不到"的集合。它们与"行根本不存在"是**完全不同**的两件事，
+    措辞不能都叫"归属丢失"：
+
+    - 行还在、只是状态或归属变了 → 按设计跳过，记进 ``batch_processed``（中性措辞，
+      不进 warnings——它不是异常）；
+    - 行不存在 → 真·归属丢失/数据不一致，保留警告并点明需人工核查。
+    """
     ctx = runtime.context
     operation = _operation(state)
     async with ctx.session_factory() as session:
         rows = await ops_repo.list_batch_member_operations(
             session, batch_operation_id=operation.operation_id
         )
+        payload_ids = _declared_member_ids(operation)
+        loaded_ids = {str(row["operation_id"]) for row in rows}
+        declared_missing = payload_ids - loaded_ids
+        # 只有"声明了却没返回"的才需要回查：一次 ANY 查询，正常批次拿空集
+        existing_rows = (
+            await ops_repo.list_operations_by_ids(
+                session, operation_ids=[UUID(item) for item in declared_missing]
+            )
+            if declared_missing
+            else []
+        )
+    by_id = {str(row["operation_id"]): row for row in existing_rows}
     members = [
         {
             "operation_id": str(row["operation_id"]),
@@ -131,13 +191,35 @@ async def load_batch_members(
         for row in rows
     ]
     warnings: list[str] = []
-    payload_ids = _declared_member_ids(operation)
-    loaded_ids = {member["operation_id"] for member in members}
-    if payload_ids and not payload_ids.issubset(loaded_ids):
-        # payload 声明了成员但 DB 归属查不到：说明批次归属被外部改过。
-        # 不静默处理——记警告并只处理查得到的成员，避免"以为处理了 N 条其实只有 M 条"。
-        missing = sorted(payload_ids - loaded_ids)
-        warnings.append(f"批次 payload 声明的 {len(missing)} 条成员在库中无归属，已忽略")
+    skipped: list[dict[str, Any]] = []
+    inconsistent: list[str] = []
+    for member_id in sorted(declared_missing):
+        row = by_id.get(member_id)
+        if row is None:
+            inconsistent.append(member_id)
+            continue
+        status = str(row.get("status") or "")
+        skipped.append(
+            {
+                "operation_id": member_id,
+                "outcome": MEMBER_OUTCOME_UNAVAILABLE,
+                "reason": f"成员状态为 {status}（已取消/已释放/已终态），按设计跳过",
+            }
+        )
+        # 不是异常，诊断价值低于 warnings：只留 debug 级痕迹
+        logger.debug("批次成员 %s 状态 %s，按设计跳过", member_id, status)
+    if inconsistent:
+        # 真·不一致：声明了却查不到行，必须让人看见
+        warnings.append(
+            f"批次 payload 声明的 {len(inconsistent)} 条成员在 memory_operations 中不存在"
+            "（归属丢失/数据不一致，需人工核查）"
+        )
+    if skipped:
+        logger.info(
+            "批次 %s：%d 条声明成员已取消/已释放，按设计跳过",
+            operation.operation_id,
+            len(skipped),
+        )
     if not members:
         warnings.append("批次没有任何成员，按 no_change 处理")
     return {
@@ -147,7 +229,8 @@ async def load_batch_members(
         "batch_members": members,
         "batch_index": 0,
         "batch_selected": {},
-        "batch_processed": [],
+        # 跳过的成员直接进 processed：批次结果要能回答"声明的那几条去哪了"
+        "batch_processed": skipped,
         "batch_failed": [],
         "batch_warnings": warnings,
         # 成员循环里每条证据都要重新计数，批次总量单独累计
@@ -363,6 +446,12 @@ async def finalize_batch_result(
       因此**清空** ``errors``；一条都没写时才把成员错误上抛，让批次进入
       dead_letter / needs_review 判定；
     - ``warnings`` 还原为批次级累计（成员循环里它被逐条重置过）。
+
+    **批次级失败信号**（评审新发现 12）：``mutations`` 与 ``review_candidate_ids`` 都为空、
+    而 ``batch_failed`` 非空时，整批成员一个都没写进去——此时抛
+    :class:`BatchAllMembersFailedError`（``retryable=False`` 的域错误，经
+    ``classify_failure`` 落 ``dead_letter``）。单成员失败照旧不拖垮整批（§5.8），只有
+    "全灭"才升级为批次级失败；审核候选（``needs_review``）与"无成员/无变化"不受影响。
     """
     processed = list(state.get("batch_processed") or [])
     failed = list(state.get("batch_failed") or [])
@@ -389,11 +478,17 @@ async def finalize_batch_result(
     # 被成员级隔离捕获、实际没写成功的成员必须**释放回证据池**（review I-9 的重试出口）：
     # 批次 succeeded 时 settle_batch_members 会把归属成员一律置 succeeded，包括这些失败项，
     # 它们就永远不会再被处理。释放（清 batch_operation_id）后它们不再被那条 UPDATE 命中。
-    released = await _release_failed_members(runtime, failed)
+    release = await _release_failed_members(runtime, failed)
     errors = [] if mutations else list(state.get("errors") or [])
     warnings = _cap_warnings(list(state.get("batch_warnings") or []))
-    if released:
-        warnings.append(f"{released} 条失败成员已释放回证据池，等待下一次批量重试")
+    if release.released:
+        warnings.append(f"{release.released} 条失败成员已释放回证据池，等待下一次批量重试")
+    if release.dead_lettered:
+        # 评审新发现 13：这些成员已达到自己的 max_attempts，不再回池子（否则是无终点的
+        # 每晚重试），转 dead_letter 交人工审核。
+        warnings.append(
+            f"{release.dead_lettered} 条失败成员已达 max_attempts，转 dead_letter 交人工审核"
+        )
     if failed:
         # 部分成员没写进去时批次本身仍可成功（§5.8：单成员失败不拖垮整批），
         # 但绝不能让"少写了几条"只藏在诊断字段里——`MemoryOperationResult`
@@ -413,6 +508,13 @@ async def finalize_batch_result(
         # 结构化标记进不了 MemoryOperationResult（公开契约无自由字段），
         # 因此额外写一条可读警告，保证"末段没做"这件事在运维侧可见。
         warnings.append("批次降级标记: " + ", ".join(sorted(set(degraded_flags))))
+    if not mutations and not review_ids and failed:
+        # 整批全灭：不能报 succeeded（见本函数 docstring 与新发现 12）。
+        raise BatchAllMembersFailedError(
+            f"批次内 {len(failed)}/{len(state.get('batch_members') or [])} 条成员全部未能写入"
+            f"（0 条 mutation、0 条审核候选，已释放 {release.released} 条、"
+            f"转死信 {release.dead_lettered} 条）。诊断: " + _failure_digest(failed)
+        )
     return {
         "batch_active": False,
         "operation": state.get("batch_operation") or state["operation"],
@@ -422,16 +524,35 @@ async def finalize_batch_result(
     }
 
 
+def _failure_digest(failed: list[dict[str, Any]]) -> str:
+    """把失败成员摘要压成一行（进 ``public_error.message``，那里只保留 500 字符）。"""
+    parts: list[str] = []
+    for entry in failed[:MAX_BATCH_FAILURE_SUMMARY_ITEMS]:
+        parts.append(
+            f"{entry.get('operation_id')}={entry.get('reason')}"
+            f"@{entry.get('failed_node')}({entry.get('error_type')}: {entry.get('error_message')})"
+        )
+    if len(failed) > MAX_BATCH_FAILURE_SUMMARY_ITEMS:
+        parts.append(f"等共 {len(failed)} 条")
+    return "; ".join(parts) or "无明细"
+
+
+@dataclass
+class _ReleaseSummary:
+    """失败成员释放结果汇总（评审新发现 13：释放计数 + 达上限转死信计数）。"""
+
+    released: int = 0
+    dead_lettered: int = 0
+
+
 async def _release_failed_members(
     runtime: Runtime[MemoryRuntimeContext], failed: list[dict[str, Any]]
-) -> int:
+) -> _ReleaseSummary:
     """把"成员自身问题"导致的失败成员释放回证据池；环境类异常导致的失败不释放。"""
-    from backend.memory.persistence import operations as ops_repo
-
-    released = 0
+    summary = _ReleaseSummary()
     ctx = runtime.context
     for entry in failed:
-        if entry.get("reason") != "member_exception":
+        if entry.get("reason") != MEMBER_FAILURE_REASON:
             continue
         operation_id = entry.get("operation_id")
         if not operation_id:
@@ -439,13 +560,16 @@ async def _release_failed_members(
         try:
             async with ctx.session_factory() as session:
                 async with session.begin():
-                    if await ops_repo.release_batch_member(
+                    outcome = await ops_repo.release_batch_member(
                         session, operation_id=UUID(str(operation_id))
-                    ):
-                        released += 1
+                    )
+            if outcome.released:
+                summary.released += 1
+            elif outcome.status == ops_repo.BATCH_MEMBER_DEAD_LETTERED:
+                summary.dead_lettered += 1
         except Exception:  # 释放失败不能拖垮批次收尾
             logger.warning("失败成员释放回证据池失败: %s", operation_id, exc_info=True)
-    return released
+    return summary
 
 
 #: 批次警告条数上限：超过即折叠成一行摘要（避免 50 条证据的警告把结果行撑大）。
@@ -477,11 +601,6 @@ def route_after_begin_member(state: MemoryManagerState) -> str:
     if int(state.get("batch_index") or 0) < len(state.get("batch_members") or []):
         return "next"
     return "consolidate"
-
-
-def route_after_summary_finalize(state: MemoryManagerState) -> str:
-    """summary 链收尾：批量模式下记成员结果，单条模式下走既有 normalize_result。"""
-    return "batch_member_done" if state.get("batch_active") else "normalize"
 
 
 def route_after_record_member(state: MemoryManagerState) -> str:

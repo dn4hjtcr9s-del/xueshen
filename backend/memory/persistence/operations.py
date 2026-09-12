@@ -17,6 +17,7 @@ memory-rebuild §2.6 / §5.8 追加证据池批次（复用本表，不建新表
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -28,6 +29,26 @@ from backend.memory.contracts.common import max_attempts_for_priority
 from backend.memory.contracts.errors import OperationCancelNotAllowedError
 from backend.memory.contracts.operations import MemoryOperation
 from backend.memory.persistence.database import exec_rowcount
+
+#: 失败成员释放的三种结果（评审新发现 13）：释放回池子 / 升级 dead_letter / 没命中。
+BATCH_MEMBER_RELEASED = "released"
+BATCH_MEMBER_DEAD_LETTERED = "dead_letter"
+BATCH_MEMBER_NOT_FOUND = "not_found"
+
+
+@dataclass(frozen=True)
+class BatchMemberReleaseOutcome:
+    """:func:`release_batch_member` 的结果（含递增后的尝试计数）。"""
+
+    status: str
+    #: 递增后的 ``memory_operations.attempt_count``（``not_found`` 时为 0）。
+    attempt_count: int
+
+    @property
+    def released(self) -> bool:
+        """是否真的回到了证据池（dead_letter / not_found 都不算）。"""
+        return self.status == BATCH_MEMBER_RELEASED
+
 
 INSERT_SQL = text(
     """
@@ -696,6 +717,24 @@ async def list_batch_member_operations(
     return [dict(row) for row in result.mappings().all()]
 
 
+async def list_operations_by_ids(
+    session: AsyncSession, *, operation_ids: list[UUID]
+) -> list[dict[str, Any]]:
+    """按 operation_id 集合批量取行（不分状态）。
+
+    用途（评审新发现 14）：批次收尾要把"payload 声明了但本批不处理"的成员分成两类——
+    行还在（已取消/已释放/已终态）与行不存在（真·归属丢失）。前者是正常语义，后者才是
+    数据不一致，措辞与告警级别都不同，因此需要一次"不管状态"的回查。
+    """
+    if not operation_ids:
+        return []
+    result = await session.execute(
+        text("SELECT * FROM memory_operations WHERE operation_id = ANY(:operation_ids)"),
+        {"operation_ids": list(operation_ids)},
+    )
+    return [dict(row) for row in result.mappings().all()]
+
+
 async def count_pending_batch_evidence(session: AsyncSession, *, now: datetime) -> tuple[int, int]:
     """返回 (待入批总数, 已到点待入批数)，供 gauge 使用（§2.6）。
 
@@ -719,7 +758,9 @@ async def count_pending_batch_evidence(session: AsyncSession, *, now: datetime) 
     return int(row["total"]), int(row["due"])
 
 
-async def release_batch_member(session: AsyncSession, *, operation_id: UUID) -> bool:
+async def release_batch_member(
+    session: AsyncSession, *, operation_id: UUID
+) -> BatchMemberReleaseOutcome:
     """把一个"处理失败"的成员释放回证据池（review I-9 的重试出口）。
 
     批次 `succeeded` 时 `settle_batch_members` 会把**所有**归属成员置 succeeded——包括被
@@ -728,18 +769,82 @@ async def release_batch_member(session: AsyncSession, *, operation_id: UUID) -> 
     于是 `settle_batch_members` 的 `WHERE batch_operation_id = :batch` 自然不再命中它，
     它回到池子里等下一个批次；`next_run_at` 推后到 now()，避免立刻被同一个 run 重新领走
     形成忙循环（真正的重试节奏由 0 点批量任务决定）。
+
+    **尝试计数与终态出口**（评审新发现 13）：成员从未被 claim，`claim_operation` 里那句
+    `attempt_count = attempt_count + 1` 对它永远不生效，因此旧实现的"失败 → 释放"是一条
+    没有计数、没有终点的环：确定性失败的证据会每晚重新入批、每晚失败、每晚再被释放，
+    持续烧 LLM 预算直到人工介入。这里在释放的同一条 UPDATE 里把成员自己的
+    `attempt_count` 加一（复用既有列，**不需要新迁移**），并在达到该行自己的
+    `max_attempts`（证据类 operation 是 P2 → 4 次）时不再释放，而是转 `dead_letter`
+    交人工审核——与任务级重试上限同一把尺子。
+
+    返回 :class:`BatchMemberReleaseOutcome`：调用方据此区分"已释放回池子"
+    "已升级 dead_letter" "没命中（不是本批的可写成员）"。
     """
-    rowcount = await exec_rowcount(
-        session,
+    result = await session.execute(
         text(
             """
-            UPDATE memory_operations
-            SET batch_operation_id = NULL, next_run_at = now(), updated_at = now()
-            WHERE operation_id = :operation_id
-              AND status = :status
-              AND batch_operation_id IS NOT NULL
+            WITH bumped AS (
+                SELECT operation_id, attempt_count + 1 AS attempt_count, max_attempts
+                FROM memory_operations
+                WHERE operation_id = :operation_id
+                  AND status = :status
+                  AND batch_operation_id IS NOT NULL
+                FOR UPDATE
+            )
+            UPDATE memory_operations AS op
+            SET attempt_count = b.attempt_count,
+                status = CASE
+                    WHEN b.attempt_count >= b.max_attempts THEN 'dead_letter'
+                    ELSE op.status
+                END,
+                -- dead_letter 时**保留**归属：保住"它死在哪一批"的可追溯性；
+                -- 释放成功时必须清空，否则 settle_batch_members 会把它一起置 succeeded。
+                batch_operation_id = CASE
+                    WHEN b.attempt_count >= b.max_attempts THEN op.batch_operation_id
+                    ELSE NULL
+                END,
+                public_error = CASE
+                    WHEN b.attempt_count >= b.max_attempts
+                        THEN CAST(:public_error AS jsonb)
+                    ELSE op.public_error
+                END,
+                completed_at = CASE
+                    WHEN b.attempt_count >= b.max_attempts THEN now()
+                    ELSE op.completed_at
+                END,
+                next_run_at = CASE
+                    WHEN b.attempt_count >= b.max_attempts THEN op.next_run_at
+                    ELSE now()
+                END,
+                updated_at = now()
+            FROM bumped AS b
+            WHERE op.operation_id = b.operation_id
+            RETURNING op.status, op.attempt_count
             """
         ),
-        {"operation_id": operation_id, "status": PENDING_BATCH_STATUS},
+        {
+            "operation_id": operation_id,
+            "status": PENDING_BATCH_STATUS,
+            "public_error": json.dumps(
+                {
+                    "code": "OPERATION_DEAD_LETTER",
+                    "message": (
+                        f"证据 operation {operation_id} 连续多批处理失败，已达 max_attempts，"
+                        "转入人工审核（不再自动重新入批）"
+                    ),
+                    "retryable": False,
+                },
+                ensure_ascii=False,
+            ),
+        },
     )
-    return rowcount == 1
+    row = result.mappings().first()
+    if row is None:
+        return BatchMemberReleaseOutcome(status=BATCH_MEMBER_NOT_FOUND, attempt_count=0)
+    attempt_count = int(row["attempt_count"])
+    if str(row["status"]) == "dead_letter":
+        return BatchMemberReleaseOutcome(
+            status=BATCH_MEMBER_DEAD_LETTERED, attempt_count=attempt_count
+        )
+    return BatchMemberReleaseOutcome(status=BATCH_MEMBER_RELEASED, attempt_count=attempt_count)

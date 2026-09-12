@@ -3,7 +3,9 @@
 三组断言：
 
 1. **热缓存删除能力**：Local 真的 unlink 热段路径且幂等，删不掉（权限/IO）必须抛错
-   而不是静默成功；Kodo 之类没有该能力的实现是安全 no-op（由调用方统一处理）。
+   而不是静默成功；**factory 产出的 kodo store 也必须能删本地热段**（review-2 新发现 15：
+   recorder 在 kodo 模式照样写本地热段），未挂载热缓存的 kodo 实现显式报错而不是
+   假装删掉了。
 2. **worker 装配**（I-6/I-7）：对象存储**始终**经 ``build_rollout_object_store``
    构造（不受 ``CONVERSATION_ROLLOUT_ENABLED`` 约束），recorder 仍然只在 flag 打开时
    装配；kodo 缺凭据时启动即失败，绝不静默降级为 local。
@@ -42,6 +44,29 @@ from backend.conversation.worker.main import build_rollout_runtime
 from backend.settings import Settings
 
 _LOGGER = logging.getLogger("test.rollout.assembly")
+
+
+class _StubKodoClient:
+    """最小 Kodo client 门面：本文件不触网，只要构造期不调用 SDK 即可。"""
+
+    def put(self, **kwargs: Any) -> Any:  # pragma: no cover - 不应被调用
+        raise AssertionError("本用例不应触网")
+
+    def fetch(self, **kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("本用例不应触网")
+
+    def stat(self, **kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("本用例不应触网")
+
+    def list_prefix(self, **kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("本用例不应触网")
+
+    def delete(self, **kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("本用例不应触网")
+
+    def private_url(self, **kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("本用例不应触网")
+
 
 _OBJECT_KEY = build_object_key(
     thread_created_at=datetime(2026, 9, 10, 5, 0, tzinfo=UTC),
@@ -93,10 +118,11 @@ def test_delete_hot_segment_helper_records_fake_calls() -> None:
     assert store.hot_segments_deleted == [_OBJECT_KEY]
 
 
-def test_delete_hot_segment_helper_is_noop_for_kodo() -> None:
-    """Kodo 不持有本地热缓存能力 → 安全 no-op，绝不报错、也不假装删了。"""
+def test_factory_built_kodo_store_deletes_local_hot_segments(tmp_path: Path) -> None:
+    """新发现 15：kodo 部署下 recorder 仍写本地热段 → factory 必须挂上清理能力。"""
     store = build_rollout_object_store(
         _worker_settings(
+            conversation_rollout_root=str(tmp_path),
             conversation_rollout_object_store="kodo",
             kodo_bucket="b",
             kodo_region="z0",
@@ -105,8 +131,29 @@ def test_delete_hot_segment_helper_is_noop_for_kodo() -> None:
         )
     )
     assert isinstance(store, QiniuKodoRolloutObjectStore)
-    assert asyncio.run(delete_hot_segment(object_store=store, key=_OBJECT_KEY)) is False
-    # 没有该能力的任意对象同样安全
+    hot_path = local_path_for_object_key(root=tmp_path, object_key=_OBJECT_KEY)
+    hot_path.parent.mkdir(parents=True, exist_ok=True)
+    hot_path.write_text("用户原文", encoding="utf-8")
+
+    assert asyncio.run(delete_hot_segment(object_store=store, key=_OBJECT_KEY)) is True
+    assert not hot_path.exists(), "kodo 模式下本地热段必须真的被删掉"
+    # 幂等：再删一次不报错
+    assert asyncio.run(delete_hot_segment(object_store=store, key=_OBJECT_KEY)) is True
+
+
+def test_kodo_store_without_hot_cache_fails_loudly() -> None:
+    """未挂载热缓存的 kodo 实现必须显式报错，而不是静默 no-op（新发现 15 的病根）。"""
+    store = QiniuKodoRolloutObjectStore(
+        bucket="b", access_key="ak", secret_key="sk", region="z0", client=_StubKodoClient()
+    )
+    with pytest.raises(ObjectStoreNonRetryableError):
+        asyncio.run(store.delete_hot_segment(key=_OBJECT_KEY))
+    with pytest.raises(ObjectStoreNonRetryableError):
+        asyncio.run(store.delete_hot_thread(thread_id=uuid4()))
+
+
+def test_delete_hot_segment_helper_returns_false_without_capability() -> None:
+    """完全没有该能力的任意对象仍是安全 no-op（调用方据此判失败，不假装删了）。"""
     assert asyncio.run(delete_hot_segment(object_store=object(), key=_OBJECT_KEY)) is False
 
 

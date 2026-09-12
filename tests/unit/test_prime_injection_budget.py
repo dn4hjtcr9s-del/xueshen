@@ -107,6 +107,82 @@ def test_trim_prime_is_noop_when_within_budget_or_budget_disabled() -> None:
     assert trim_prime_to_budget(big, budget_tokens=BUDGET, token_counter=None)[1] is False
 
 
+def test_trim_prime_counts_summary_into_the_same_budget() -> None:
+    """新发现 10：summary 与目录**共用**同一预算，两者总量不得超预算。
+
+    旧实现只裁目录、summary 完全不计入，于是"主题多 + 摘要长"的用户仍能把两份内容都
+    塞进首轮提示词，快照里申报的 ``budgets.memory_tokens`` 与实际注入量不一致。
+    """
+    counter = _counter()
+    summary = " ".join(["画像"] * 20)  # 20 token 的摘要
+    prime = _prime(ENTRY_COUNT, summary=summary)
+
+    trimmed, truncated = trim_prime_to_budget(prime, budget_tokens=BUDGET, token_counter=counter)
+
+    assert truncated is True
+    assert trimmed["summary"] == summary, "预算够放 summary 时不得截断它"
+    assert _injected_tokens(trimmed, counter) <= BUDGET
+    # 目录被压到 summary 之后剩余的预算里（而不是各拿一份 BUDGET）
+    kept = trimmed["index_entries"]
+    assert 0 < len(kept) < ENTRY_COUNT
+    assert trimmed["index_entries_truncated"] is True
+
+
+def test_trim_prime_truncates_summary_when_it_alone_exceeds_budget() -> None:
+    """summary 单独超预算：先截断 summary（置 summary_truncated）、目录裁到 0 条。"""
+    counter = _counter()
+    long_summary = " ".join(["画像描述"] * 200)
+    prime = _prime(ENTRY_COUNT, summary=long_summary)
+
+    trimmed, truncated = trim_prime_to_budget(prime, budget_tokens=BUDGET, token_counter=counter)
+
+    assert truncated is True
+    assert trimmed["summary_truncated"] is True, "summary 被截断必须置标记（不静默丢内容）"
+    assert trimmed["summary"] != long_summary
+    assert trimmed["summary"].endswith("…"), "截断后的摘要应有省略标记"
+    assert trimmed["index_entries"] == [], "summary 已占满预算 → 目录必须裁到 0 条"
+    assert trimmed["index_entries_truncated"] is True
+    assert _injected_tokens(trimmed, counter) <= BUDGET
+
+
+def test_trim_prime_truncates_summary_even_without_entries() -> None:
+    """目录为空/缺失时也必须扣 summary 的预算（旧实现在这里提前 return）。"""
+    counter = _counter()
+    long_summary = " ".join(["画像描述"] * 200)
+    for prime in ({"summary": long_summary}, {"summary": long_summary, "index_entries": []}):
+        trimmed, truncated = trim_prime_to_budget(
+            prime, budget_tokens=BUDGET, token_counter=counter
+        )
+        assert truncated is True, f"{prime.keys()} 的 summary 超预算却没有被裁"
+        assert trimmed["summary_truncated"] is True
+        assert _injected_tokens(trimmed, counter) <= BUDGET
+    # 没有 summary 也没有目录时仍然是 no-op（保持原对象）
+    empty: dict[str, Any] = {"index_entries": []}
+    assert trim_prime_to_budget(empty, budget_tokens=BUDGET, token_counter=counter) == (
+        empty,
+        False,
+    )
+
+
+async def test_summary_only_prime_marks_degraded_on_the_node() -> None:
+    """节点侧：summary 被裁也要发 memory_prime_degraded，快照 status 转 degraded。"""
+    counter = _counter()
+    long_summary = " ".join(["画像描述"] * 200)
+    prime = _prime(0, summary=long_summary)
+    prime["index_entries"] = []
+    runtime, writer, _recorder = _node_runtime(prime)
+    runtime.token_counter = counter
+
+    result = await recall_memory(_state(), runtime=runtime)
+
+    assert result["memory_prime"]["summary_truncated"] is True
+    assert result["memory_context"]["status"] == "degraded"
+    assert result["memory_context"]["truncated"] is True
+    assert [write.payload["flags"] for write in writer.writes] == [["memory_prime_degraded"]]
+    TurnDegradedPayload.model_validate(writer.writes[0].payload)
+    assert _injected_tokens(result["memory_prime"], counter) <= BUDGET
+
+
 def test_trim_prime_ignores_empty_or_invalid_entries() -> None:
     counter = _counter()
     for prime in ({}, {"index_entries": []}, {"index_entries": None}, {"index_entries": "x"}):
@@ -280,6 +356,32 @@ def test_snapshot_freezes_bounded_prime_invariant() -> None:
     # 快照的 truncated 一并置位，SSE 的"已读取部分相关记忆"与实际一致
     assert snapshot.memory.truncated is True
     assert _injected_tokens(prime, _counter()) <= BUDGET
+
+
+def test_answer_view_without_prime_keeps_flag_off_shape() -> None:
+    """flag 关闭（快照没有 prime）时：视图里不出现 prime 键，裁剪是零副作用。
+
+    review-2 新发现 10 的修复让 summary 也参与预算，这条断言固定"关闭路径逐字不变"。
+    """
+    service = _context_service()
+    snapshot = TurnContextSnapshot(
+        snapshot_id="s-1",
+        current_message="椭圆",
+        memory=SnapshotMemory(status="available"),
+    )
+
+    view = service.build_answer_view(
+        snapshot=snapshot,
+        standalone_question="椭圆是什么",
+        evidence_summary="",
+        evidence_refs=[],
+        degraded_flags=[],
+    )
+
+    assert "prime" not in view["long_term_memory"]
+    empty: dict[str, Any] = {}
+    trimmed, truncated = trim_prime_to_budget(empty, budget_tokens=BUDGET, token_counter=_counter())
+    assert trimmed is empty and truncated is False
 
 
 def test_answer_view_trims_unbounded_prime_from_old_checkpoint() -> None:

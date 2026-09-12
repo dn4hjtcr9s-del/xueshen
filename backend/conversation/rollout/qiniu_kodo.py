@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
+from uuid import UUID
 
 import anyio
 
@@ -34,6 +35,7 @@ from backend.conversation.contracts.object_store import (
 from backend.conversation.rollout.object_store import (
     ROLLOUT_CONTENT_TYPE,
     ROLLOUT_OBJECT_PREFIX,
+    LocalHotSegmentCache,
     _validate_key,
 )
 
@@ -193,11 +195,17 @@ class QiniuKodoRolloutObjectStore:
         connect_timeout_seconds: int = 10,
         read_timeout_seconds: int = 30,
         client: _KodoClient | None = None,
+        hot_cache: LocalHotSegmentCache | None = None,
     ) -> None:
         if not bucket:
             raise ObjectStoreNonRetryableError("Kodo bucket 未配置")
         self._bucket = bucket
         self._region = region
+        #: review-2 新发现 15：kodo 模式下 recorder **仍然**把热段写在本地
+        #: ``conversation_rollout_root``，因此远端 store 也必须能删这份本地缓存，
+        #: 否则"删了 thread"之后用户原文还留在磁盘上（且 tombstone 后不可发现）。
+        #: factory 会传入与 recorder 同一个 root；直接构造时为 None（只删对象镜像）。
+        self._hot_cache = hot_cache
         self._client: _KodoClient = client or _QiniuKodoClient(
             bucket=bucket,
             access_key=access_key,
@@ -312,6 +320,29 @@ class QiniuKodoRolloutObjectStore:
             return
         if response.status_code is None or response.status_code >= 400:
             raise _classify(response.status_code, action="delete")
+
+    async def delete_hot_segment(self, *, key: str) -> None:
+        """删除与 ``key`` 同构的**本地**热缓存段（新发现 15）。
+
+        没有挂载热缓存时会显式抛错而不是静默 no-op：``HotSegmentDeleter`` 协议一旦
+        实现，调用方（thread_deletion / CLI）就会把"没有异常"当成"热段已清理"。
+        静默成功会让 kodo 部署继续留下用户原文——这正是新发现 15 的症状。
+        """
+        if self._hot_cache is None:
+            raise ObjectStoreNonRetryableError(
+                "kodo 对象存储未挂载本地热缓存清理能力（CONVERSATION_ROLLOUT_ROOT），"
+                "无法删除本机热段"
+            )
+        await self._hot_cache.delete_hot_segment(key=key)
+
+    async def delete_hot_thread(self, *, thread_id: UUID | str) -> int:
+        """按 thread 清理本地热缓存段（未封存段没有 object key，只能按目录清扫）。"""
+        if self._hot_cache is None:
+            raise ObjectStoreNonRetryableError(
+                "kodo 对象存储未挂载本地热缓存清理能力（CONVERSATION_ROLLOUT_ROOT），"
+                "无法清扫本机热段目录"
+            )
+        return await self._hot_cache.delete_hot_thread(thread_id=thread_id)
 
     async def presign_read(self, *, key: str, expires_seconds: int) -> str:
         _validate_key(key)

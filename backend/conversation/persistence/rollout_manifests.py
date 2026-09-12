@@ -218,11 +218,34 @@ async def seal(
     return bool(getattr(result, "rowcount", 0) == 1)
 
 
+async def fence_holds(session: AsyncSession, *, segment_id: UUID, fence: tuple[str, int]) -> bool:
+    """段所属 Turn 的租约是否仍等于 ``(lease_owner, lease_generation)``（review-2 新发现 17）。
+
+    ``seal`` 用同源的 ``EXISTS(...)`` 守卫禁止失租者写 manifest；标废（``mark_deleted``）
+    同属"改 manifest"的动作，必须有同一道守卫——否则一个已失租的 worker 仍能 tombstone
+    当前持有者的活动段并清空其消息指针。
+    """
+    owner, generation = fence
+    row = (
+        await session.execute(
+            text(
+                "SELECT 1 FROM conversation.conversation_rollout_segments AS s "
+                "JOIN conversation.conversation_turns AS t ON t.turn_id = s.turn_id "
+                "WHERE s.segment_id = :segment_id AND t.lease_owner = :lease_owner "
+                "AND t.lease_generation = :lease_generation"
+            ),
+            {"segment_id": segment_id, "lease_owner": owner, "lease_generation": generation},
+        )
+    ).first()
+    return row is not None
+
+
 async def mark_deleted(
     session: AsyncSession,
     *,
     segment_id: UUID,
     deleted_at: datetime | None = None,
+    fence: tuple[str, int] | None = None,
 ) -> bool:
     """把段标记为 ``deleted``（tombstone），保留行以便审计与 reconcile 对账。
 
@@ -230,7 +253,12 @@ async def mark_deleted(
     ``BEFORE DELETE`` 触发器（那只在硬删行时生效），而"重试复用同一序号范围/跨节点
     重建"都会把段标废——留着指针就是一条指向已废段的悬垂引用。四列由 CHECK 约束
     要求同真同假，因此必须一次写全。
+
+    ``fence`` 非空时先校验租约（:func:`fence_holds`）：失租者直接返回 ``False`` 且
+    **不做任何修改**（包括不清指针）——tombstone 一个不属于自己的段是真实的数据损坏。
     """
+    if fence is not None and not await fence_holds(session, segment_id=segment_id, fence=fence):
+        return False
     await session.execute(
         text(
             "UPDATE conversation.conversation_messages "

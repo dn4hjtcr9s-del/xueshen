@@ -338,20 +338,57 @@ async def upsert_graph_link(
 
 
 async def deactivate_graph_links(
-    session: AsyncSession, *, user_id: UUID, memory_id: str, except_node_id: str | None = None
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    memory_id: str,
+    except_node_ids: list[str] | None = None,
 ) -> None:
-    """映射失效或记忆删除时置 active=false（§16.4）。"""
+    """映射失效或记忆删除时置 active=false（§16.4）。
+
+    ``except_node_ids`` 是**一次排除的集合**：集合内的 node_id 保持原状，其余全部置
+    inactive；传 ``None`` 表示"一个不留"（记忆删除路径）。
+
+    为什么必须是集合而不是单个 node_id（评审新发现 1）：本 SQL **没有版本谓词**，
+    调用方若按 node_id 循环调用 ``deactivate(except_node_id=kept)``，"本次要保留"的
+    节点会在后续轮次里被前一轮的调用连带置 false——两个节点就会把两条 link 同时
+    杀掉（实测 active links = 0/2）。集合语义下这段判断只发生一次，不存在轮次之间的
+    相互覆盖。
+    """
     await session.execute(
         text(
             """
             UPDATE memory_graph_links
             SET active = false, updated_at = now()
             WHERE user_id = :user_id AND memory_id = :memory_id
-              AND (CAST(:except_node_id AS varchar) IS NULL OR node_id != :except_node_id)
+              AND (
+                    CAST(:except_node_ids AS text[]) IS NULL
+                    OR node_id <> ALL(CAST(:except_node_ids AS text[]))
+                  )
             """
         ),
-        {"user_id": user_id, "memory_id": memory_id, "except_node_id": except_node_id},
+        {"user_id": user_id, "memory_id": memory_id, "except_node_ids": except_node_ids},
     )
+
+
+async def list_links_for_memory(
+    session: AsyncSession, *, user_id: UUID, memory_id: str
+) -> list[dict[str, Any]]:
+    """该记忆的**全部** link 行（含 inactive 与旧版本），按 node_id 稳定排序。
+
+    供提交路径一次取齐"上一版活动的映射"与"每个节点最近一次的映射来源"：
+    ``memory_graph_links`` 的主键是 ``(user_id, memory_id, node_id)``，同一节点至多
+    一行，因此它天然就是"每个节点最近一行的快照"，不需要两次查询。
+    """
+    result = await session.execute(
+        text(
+            "SELECT * FROM memory_graph_links "
+            "WHERE user_id = :user_id AND memory_id = :memory_id "
+            "ORDER BY node_id ASC"
+        ),
+        {"user_id": user_id, "memory_id": memory_id},
+    )
+    return [dict(r) for r in result.mappings().all()]
 
 
 async def list_active_links_for_memory(

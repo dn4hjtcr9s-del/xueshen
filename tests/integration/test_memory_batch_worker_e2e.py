@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -31,6 +32,7 @@ from backend.memory.contracts.commands import (
 )
 from backend.memory.contracts.evidence import ConversationEvidence, SourceItem
 from backend.memory.contracts.operations import MemoryOperation
+from backend.memory.graph import batch as batch_module
 from backend.memory.graph.llm_schemas import (
     CandidateExtractionResult,
     CandidateMemory,
@@ -39,6 +41,7 @@ from backend.memory.graph.llm_schemas import (
 )
 from backend.memory.graph.openai_client import FakeMemoryLLMClient
 from backend.memory.graph.runner import LocalLangGraphRunner
+from backend.memory.graph.state import MemoryRuntimeContext
 from backend.memory.persistence import operations as ops_repo
 from backend.memory.readers.testing import FakeConversationReader
 from backend.memory.services.memory_service import MemoryService
@@ -376,3 +379,204 @@ async def test_real_worker_isolates_single_member_failure(
     # 成功的成员仍与父批次一致
     assert await _operation_status(session_factory, good.operation_id) == "succeeded"
     assert await _operation_status(session_factory, good.operation_id) == "succeeded"
+
+
+# ---------------------------------------------------------------------------
+# review-2 新发现 12 / 13 / 14：批次级失败信号、失败计数与"已取消/已释放"措辞
+# ---------------------------------------------------------------------------
+
+
+async def _operation_row(
+    session_factory: async_sessionmaker[AsyncSession], operation_id: UUID
+) -> dict[str, Any]:
+    async with session_factory() as session:
+        row = await ops_repo.get_operation(session, operation_id)
+    assert row is not None
+    return dict(row)
+
+
+@pytest.mark.asyncio
+async def test_all_members_failed_batch_goes_dead_letter(
+    runner: LocalLangGraphRunner,
+    session_factory: async_sessionmaker[AsyncSession],
+    memory_service: MemoryService,
+    fake_llm: FakeMemoryLLMClient,
+    fake_conversation_reader: FakeConversationReader,
+) -> None:
+    """新发现 12：**整批全灭**时批次必须进 dead_letter，而不是 succeeded。
+
+    旧实现只把成员失败记进 ``batch_failed`` 与 warnings，``errors`` 为空 →
+    ``normalize_result`` 判 succeeded：operation 状态与实际写入量（0 条）不符。
+    """
+    first = await _persist_evidence(
+        session_factory, user_id=USER, thread_id="t-allfail-1", next_run_at=NOW
+    )
+    second = await _persist_evidence(
+        session_factory,
+        user_id=USER,
+        thread_id="t-allfail-2",
+        next_run_at=NOW + timedelta(seconds=1),
+    )
+    fake_conversation_reader.add_message(
+        "t-allfail-1",
+        SourceItem(source_ref="m1", role="user", content="毒药一", occurred_at=NOW),
+    )
+    fake_conversation_reader.add_message(
+        "t-allfail-2",
+        SourceItem(source_ref="m1", role="user", content="毒药二", occurred_at=NOW),
+    )
+    # 两条成员都抛非致命异常 → 都会被成员级隔离捕获
+    fake_llm.extract_queue.append(RuntimeError("poison-1"))
+    fake_llm.extract_queue.append(RuntimeError("poison-2"))
+    batch = await _build_batch(
+        session_factory, user_id=USER, member_ids=[first.operation_id, second.operation_id]
+    )
+
+    worker = _make_worker(session_factory, runner)
+    row = await _claim_and_execute(session_factory, worker, batch.operation_id)
+
+    assert row["status"] == "dead_letter", (
+        f"整批零写入必须判 dead_letter（人工审），实际 {row['status']}：{row.get('result')}"
+    )
+    error = row["public_error"] or {}
+    assert error.get("code") == batch_module.BATCH_ALL_MEMBERS_FAILED, error
+    assert "2/2" in str(error.get("message")), error
+    # 公开可见面仍有信息量：人数 + 首条失败摘要进 public_error.message
+    assert "member_exception" in str(error.get("message"))
+    # 没有任何事实被写入
+    assert await memory_service.get_mastery(user_id=USER, topic_key="配方法") is None
+    async with session_factory() as session:
+        commits = await session.execute(
+            text("SELECT count(*) FROM memory_commits WHERE user_id = :u"), {"u": USER}
+        )
+        assert int(commits.scalar_one()) == 0
+
+    # 失败成员仍然先被释放回证据池（重试出口不因批次判死而丢），且尝试计数 +1
+    for member in (first, second):
+        member_row = await _operation_row(session_factory, member.operation_id)
+        assert member_row["status"] == "pending_batch"
+        assert member_row["batch_operation_id"] is None, "失败成员必须释放回池子"
+        assert int(member_row["attempt_count"]) == 1, "释放必须留下可观测的尝试计数"
+
+
+@pytest.mark.asyncio
+async def test_failed_member_escalates_to_dead_letter_at_max_attempts(
+    runner: LocalLangGraphRunner,
+    session_factory: async_sessionmaker[AsyncSession],
+    fake_llm: FakeMemoryLLMClient,
+    fake_conversation_reader: FakeConversationReader,
+) -> None:
+    """新发现 13：失败成员达到自己的 max_attempts 后转 dead_letter，不再无限重试。"""
+    member = await _persist_evidence(
+        session_factory, user_id=USER, thread_id="t-escalate", next_run_at=NOW
+    )
+    fake_conversation_reader.add_message(
+        "t-escalate", SourceItem(source_ref="m1", role="user", content="毒药", occurred_at=NOW)
+    )
+    fake_llm.extract_queue.append(RuntimeError("poison"))
+    # 把该成员推到"下一次失败就到上限"的位置（证据 operation 是 P2 → max_attempts=4）
+    async with session_factory() as session:
+        async with session.begin():
+            updated = await session.execute(
+                text(
+                    "UPDATE memory_operations SET attempt_count = max_attempts - 1 "
+                    "WHERE operation_id = :operation_id RETURNING attempt_count, max_attempts"
+                ),
+                {"operation_id": member.operation_id},
+            )
+            before = updated.mappings().one()
+    assert int(before["max_attempts"]) == 4, before
+
+    batch = await _build_batch(session_factory, user_id=USER, member_ids=[member.operation_id])
+    worker = _make_worker(session_factory, runner)
+    row = await _claim_and_execute(session_factory, worker, batch.operation_id)
+
+    # 批次级信号（新发现 12）与成员级终态（新发现 13）同时成立
+    assert row["status"] == "dead_letter", row.get("result")
+    member_row = await _operation_row(session_factory, member.operation_id)
+    assert member_row["status"] == "dead_letter", "达到 max_attempts 必须转人工审核"
+    assert int(member_row["attempt_count"]) == int(before["max_attempts"])
+    assert member_row["batch_operation_id"] == batch.operation_id, "死信保留归属以便追溯"
+    assert (member_row["public_error"] or {}).get("code") == "OPERATION_DEAD_LETTER"
+    # 不再出现在证据池里 → 不会被下一批重复领取
+    async with session_factory() as session:
+        pool = await ops_repo.list_pending_batch_members(
+            session, user_id=USER, now=datetime.now(UTC), limit=10
+        )
+    assert [UUID(str(item["operation_id"])) for item in pool] == []
+
+
+@pytest.mark.asyncio
+async def test_load_batch_members_separates_cancelled_from_missing(
+    session_factory: async_sessionmaker[AsyncSession],
+    runtime_context: MemoryRuntimeContext,
+) -> None:
+    """新发现 14：已取消/已释放的成员是**按设计跳过**，不能报成"归属丢失"。"""
+    cancelled = await _persist_evidence(
+        session_factory, user_id=USER, thread_id="t-declared-cancelled", next_run_at=NOW
+    )
+    kept = await _persist_evidence(
+        session_factory,
+        user_id=USER,
+        thread_id="t-declared-kept",
+        next_run_at=NOW + timedelta(seconds=1),
+    )
+    ghost_id = uuid4()
+    batch_operation_id = uuid4()
+    batch = make_operation(
+        user_id=USER,
+        actor_type="system",
+        input_kind="evidence",
+        operation_type="summarize_user_memory_batch",
+        priority=50,
+        payload=SummarizeUserMemoryBatchCommand(
+            target_user_id=USER,
+            batch_operation_id=batch_operation_id,
+            member_operation_ids=[cancelled.operation_id, ghost_id, kept.operation_id],
+            max_evidence=50,
+        ),
+    ).model_copy(update={"operation_id": batch_operation_id})
+    await persist_operation(session_factory, batch)
+    async with session_factory() as session:
+        async with session.begin():
+            assigned = await ops_repo.assign_batch_members(
+                session,
+                batch_operation_id=batch_operation_id,
+                member_operation_ids=[cancelled.operation_id, kept.operation_id],
+            )
+    assert assigned == 2
+    # 用户取消其中一条（状态 cancelled，归属仍在）
+    async with session_factory() as session:
+        async with session.begin():
+            await ops_repo.request_cancel(session, operation_id=cancelled.operation_id)
+
+    state = {"operation": batch.model_dump(mode="json")}
+    loaded = await batch_module.load_batch_members(state, _runtime(runtime_context))
+
+    assert [m["operation_id"] for m in loaded["batch_members"]] == [str(kept.operation_id)]
+    warnings = loaded["batch_warnings"]
+    # 已取消的成员：中性措辞，不是"归属丢失"
+    assert not any("无归属" in w for w in warnings), warnings
+    assert not any(str(cancelled.operation_id) in w for w in warnings), warnings
+    skipped = [
+        entry
+        for entry in loaded["batch_processed"]
+        if entry["operation_id"] == str(cancelled.operation_id)
+    ]
+    assert len(skipped) == 1, loaded["batch_processed"]
+    assert skipped[0]["outcome"] == batch_module.MEMBER_OUTCOME_UNAVAILABLE
+    assert "已取消/已释放" in skipped[0]["reason"]
+    # 真·不存在的那条：仍然要警告，并点明是不一致
+    assert any("在 memory_operations 中不存在" in w and "数据不一致" in w for w in warnings), (
+        warnings
+    )
+    assert any(str(ghost_id) not in w for w in warnings)
+
+
+def _runtime(runtime_context: MemoryRuntimeContext) -> Any:
+    """把 fixture 的 runtime context 包成 graph 节点要的 Runtime（只用到 .context）。"""
+
+    class _Runtime:
+        context = runtime_context
+
+    return _Runtime()

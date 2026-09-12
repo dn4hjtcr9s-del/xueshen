@@ -31,6 +31,11 @@ from backend.conversation.contracts.object_store import (
     ObjectStat,
     ObjectStoreNonRetryableError,
 )
+from backend.conversation.rollout.file_naming import (
+    iter_thread_dirs,
+    normalize_thread_id,
+    parse_segment_filename,
+)
 
 #: 对象 key 的固定前缀（§5.5）。
 ROLLOUT_OBJECT_PREFIX = "rollouts"
@@ -112,6 +117,36 @@ def delete_hot_segment_file(*, root: str | Path, object_key: str) -> bool:
     return True
 
 
+def delete_hot_thread_files(*, root: str | Path, thread_id: UUID | str) -> int:
+    """删除该 thread 在**所有日期分片**下的热段文件，返回删除个数（review-2 新发现 6/15）。
+
+    为什么需要 **root 级**（而不是继续按 object key 反查路径）：
+
+    - **未封存段没有 object key**（``status='open'`` 行的 ``object_key`` 为 NULL）。
+      按 key 推导的路子对这类行完全失效，删除路径会整段跳过它们，把用户原文留在磁盘上；
+    - 记录器写热段用的日期目录来自**调用方传入的 thread 创建时间**（
+      ``runner`` 在缺 thread 行时取 ``clock.now()``），与 ``conversation_threads.created_at``
+      **不保证同日**；按"thread 行时间 + ordinal + segment_id"现算路径会算到别的日期目录。
+      按 ``<thread_id>`` 目录反查与日期无关，是唯一稳健的定位方式；
+    - kodo 模式下记录器**仍然**把热段写在本地（远端存储只能删对象镜像），
+      这里同时是那条本地缓存的清理入口（新发现 15）。
+
+    目录不存在、thread 目录不存在都返回 0（幂等：重跑删除命令不应报错）。非段文件
+    （``.tmp``、回滚预留命名等，见 :func:`parse_segment_filename`）不动；空的日期/thread
+    目录也不清理（与 :func:`delete_hot_segment_file` 同一理由：避免与其它写者竞态）。
+    """
+    removed = 0
+    for thread_dir in iter_thread_dirs(root=root, thread_id=thread_id):
+        for entry in thread_dir.iterdir():
+            if not entry.is_file():
+                continue
+            if parse_segment_filename(entry.name) is None:
+                continue
+            entry.unlink()
+            removed += 1
+    return removed
+
+
 @runtime_checkable
 class HotSegmentDeleter(Protocol):
     """可选能力：删除 ``object_key`` 对应的**本地热缓存段文件**（§1.5 / §1.8）。
@@ -121,11 +156,26 @@ class HotSegmentDeleter(Protocol):
     之后（``list_by_thread`` 过滤 deleted、``retention-scan`` 只扫 sealed、
     ``reconcile`` 只列 ``rollouts/`` 前缀）残留正文将**永久不可发现、不可清理**。
 
-    远端实现（Kodo）不持有本地文件系统视图，因此不实现本协议——调用方通过
-    :func:`delete_hot_segment` 统一处理，缺该能力时是安全 no-op。
+    factory 产出的 store **都**实现本协议（kodo 也会附带本地热缓存清理能力，
+    见 ``LocalHotSegmentCache``），因此"没有该能力"不是合法状态，只出现在测试替身上。
     """
 
     async def delete_hot_segment(self, *, key: str) -> None: ...
+
+
+@runtime_checkable
+class HotSegmentRootDeleter(Protocol):
+    """可选能力：按 **thread** 清理本地热缓存段目录（review-2 新发现 6/15）。
+
+    与 :class:`HotSegmentDeleter` 的分工：
+
+    - 按 key 删：已封存段的精确清理（retention、逐段删除）；
+    - 按 thread 删：**未封存段**（没有 object key 可推导）与 kodo 模式的本地残留，
+      只能在 thread 级别按目录清扫。调用方必须已经确认该 thread 没有活动 Turn
+      （删除流程的 R4 前置条件），否则会误删正在写入的热段。
+    """
+
+    async def delete_hot_thread(self, *, thread_id: UUID | str) -> int: ...
 
 
 async def delete_hot_segment(*, object_store: Any, key: str) -> bool:
@@ -139,6 +189,44 @@ async def delete_hot_segment(*, object_store: Any, key: str) -> bool:
         return False
     await object_store.delete_hot_segment(key=key)
     return True
+
+
+async def delete_hot_thread_segments(*, object_store: Any, thread_id: UUID | str) -> int | None:
+    """按 thread 清扫本地热段目录；返回删除个数，**能力缺失时返回 ``None``**。
+
+    ``None`` 与 ``0`` 语义严格区分：``0`` = "有能力且确实没有残留"（合规可继续），
+    ``None`` = "这个 store 不会删本机热段"——调用方必须据此**拒绝**把该 thread 标成
+    已删除（与 I-6 "缺对象存储不落 tombstone" 同一原则），否则就是"没删数据却宣称删了"。
+    """
+    if not isinstance(object_store, HotSegmentRootDeleter):
+        return None
+    count = await object_store.delete_hot_thread(thread_id=thread_id)
+    return int(count)
+
+
+class LocalHotSegmentCache:
+    """``{root}/threads/...`` 热缓存目录的清理能力（可挂到任意对象存储实现上）。
+
+    远端对象存储（Kodo）不持有"对象 key → 本地路径"的完整视图，但 recorder 在 kodo
+    模式下**照样**把热段写在本地。把这份能力抽成独立小对象后：
+
+    - :class:`LocalRolloutObjectStore` 直接用它的根目录；
+    - :class:`~backend.conversation.rollout.qiniu_kodo.QiniuKodoRolloutObjectStore` 由
+      factory 挂一个实例，于是"factory 产出的 store 都能删自己写过的热段"（新发现 15）。
+    """
+
+    def __init__(self, *, root: str | Path) -> None:
+        self._root = Path(root)
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    async def delete_hot_segment(self, *, key: str) -> None:
+        delete_hot_segment_file(root=self._root, object_key=key)
+
+    async def delete_hot_thread(self, *, thread_id: UUID | str) -> int:
+        return delete_hot_thread_files(root=self._root, thread_id=thread_id)
 
 
 class LocalRolloutObjectStore:
@@ -254,6 +342,13 @@ class LocalRolloutObjectStore:
         """
         delete_hot_segment_file(root=self._base, object_key=key)
 
+    async def delete_hot_thread(self, *, thread_id: UUID | str) -> int:
+        """按 thread 清理本地热缓存段（未封存段没有 object key，只能按目录清扫）。
+
+        返回删除个数；重跑删除命令是幂等的（没有文件时返回 0）。
+        """
+        return delete_hot_thread_files(root=self._base, thread_id=thread_id)
+
     async def presign_read(self, *, key: str, expires_seconds: int) -> str:
         """Local 无签名概念：返回 file URL，并显式说明不提供真实签名。"""
         _validate_key(key)
@@ -280,6 +375,8 @@ class FakeRolloutObjectStore:
         self.put_calls: int = 0
         #: 删除路径要求删除的热缓存段 key（测试替身不持有文件系统，只记录调用）
         self.hot_segments_deleted: list[str] = []
+        #: 删除路径要求清扫热段目录的 thread（同上，只记录调用）
+        self.hot_threads_swept: list[UUID] = []
 
     def corrupt(self, key: str) -> None:
         """篡改对象内容，用于 reconcile 的 checksum 不一致用例。"""
@@ -352,6 +449,12 @@ class FakeRolloutObjectStore:
     async def delete_hot_segment(self, *, key: str) -> None:
         """测试替身：没有真实文件系统，只记录调用，便于断言删除路径**确实**要求删热段。"""
         self.hot_segments_deleted.append(key)
+
+    async def delete_hot_thread(self, *, thread_id: UUID | str) -> int:
+        """测试替身：记录"按 thread 清扫热段"的调用（未封存段走这条路径）。"""
+        normalized = normalize_thread_id(thread_id)
+        self.hot_threads_swept.append(normalized)
+        return 0
 
     async def presign_read(self, *, key: str, expires_seconds: int) -> str:
         return f"fake://{key}?expires={expires_seconds}"

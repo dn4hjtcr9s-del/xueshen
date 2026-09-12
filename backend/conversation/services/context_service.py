@@ -256,32 +256,87 @@ def _long_term_memory_view(
     return view
 
 
+#: summary 截断后追加的省略标记（只在真的按 token 截断时出现）。
+SUMMARY_TRUNCATION_MARK = "…"
+
+#: summary 二分截断时允许的最小字符数：再小就只剩省略号，等于把摘要清了。
+_MIN_SUMMARY_CHARS = 64
+
+
+def _truncate_text_to_tokens(text: str, *, max_tokens: int, token_counter: TokenCounter) -> str:
+    """按 token 预算二分截断文本（保留前缀 + 省略标记）。``max_tokens <= 0`` → 空串。
+
+    中文文本的 token 与字符不成正比，所以按 token 精确二分而不是按字符比例估算。
+    二分成本是 O(log n) 次 tiktoken 调用，只在 summary 真的超预算时发生。
+    """
+    if max_tokens <= 0:
+        return ""
+    if int(token_counter.count(text)) <= max_tokens:
+        return text
+    low, high = 0, len(text)
+    best = 0
+    while low <= high:
+        mid = (low + high) // 2
+        # 把省略标记一起计入：它在多数分词器里是**独立 token**，
+        # 只按前缀二分会让结果超出预算 1 个 token。
+        candidate = text[:mid] + SUMMARY_TRUNCATION_MARK
+        if int(token_counter.count(candidate)) <= max_tokens:
+            best = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+    if best <= _MIN_SUMMARY_CHARS:
+        # 预算小到只剩几个字符时，宁可返回空串（并置 summary_truncated），
+        # 也不注入一段被切碎的摘要正文。
+        return ""
+    return text[:best] + SUMMARY_TRUNCATION_MARK
+
+
 def trim_prime_to_budget(
     prime: dict[str, Any],
     *,
     budget_tokens: int,
     token_counter: TokenCounter | None,
 ) -> tuple[dict[str, Any], bool]:
-    """按 token 预算裁剪 prime 的注册表目录（review I-5），返回 (prime, 是否裁剪)。
+    """按 token 预算裁剪 prime（**summary 与目录共用同一份预算**），返回 (prime, 是否裁剪)。
 
     预算复用 ``conversation_memory_token_budget``（与旧 memory 读取、memory 工具结果
     同一预算族）：prime 与它们是**同一类"长期记忆进提示词"的内容**，共用一份预算才能
     让快照里申报的 `budgets.memory_tokens` 与实际注入量一致；另开一个 setting 会让两者
     之和超出快照声明的预算。
 
-    - 保留 summary（服务端已单独限长）与目录的**前缀**：条目按服务端固定序
-      （memory_id 升序）逐条计入，计入后超预算的那条连同其后的条目一起不注入；
-    - 一旦发生裁剪必须置 `index_entries_truncated=true`——**不静默丢内容**，
-      调用方据此发 `memory_prime_degraded` 降级标记（服务端的条数上限用同一字段）；
-    - `budget_tokens <= 0`（未配置预算）或没有 token 计数器时不裁剪，与
-      `memory_tool` 的 `_apply_token_budget` 保持同一语义。
+    review-2 新发现 10：I-5 只裁了 ``index_entries``，``summary`` 正文**完全没有计入**
+    这一预算——而服务端对 summary 的上限是 ``PRIME_SUMMARY_MAX_CHARS``（4000 字符），
+    一旦注入就是"预算之外"的量，主题多 + 摘要长的用户仍能把两份内容都塞进首轮提示词。
+    现在的顺序是：
+
+    1. **先扣 summary**：超预算时按 token 二分截断并置 ``summary_truncated=true``；
+    2. **再按剩余预算裁目录前缀**：条目按服务端固定序（memory_id 升序）逐条计入，
+       计入后超预算的那条连同其后的条目一起不注入，并置 ``index_entries_truncated=true``。
+
+    两条截断标记都**不静默**：调用方据此发 `memory_prime_degraded`（沿用既有标记名，
+    不新增 Literal 值）。`budget_tokens <= 0`（未配置预算）或没有 token 计数器时不裁剪，
+    与 `memory_tool` 的 `_apply_token_budget` 保持同一语义；**目录为空/缺失也会先扣
+    summary**（旧实现在这里提前 return，正是新发现 10 的另一半）。
     """
-    entries = prime.get("index_entries")
-    if not isinstance(entries, list) or not entries:
-        return prime, False
     if budget_tokens <= 0 or token_counter is None:
         return prime, False
-    used = int(token_counter.count(str(prime.get("summary") or "")))
+    summary = str(prime.get("summary") or "")
+    trimmed: dict[str, Any] | None = None
+    summary_tokens = int(token_counter.count(summary)) if summary else 0
+    if summary and summary_tokens > budget_tokens:
+        bounded_summary = _truncate_text_to_tokens(
+            summary, max_tokens=budget_tokens, token_counter=token_counter
+        )
+        trimmed = dict(prime)
+        trimmed["summary"] = bounded_summary
+        trimmed["summary_truncated"] = True
+        summary_tokens = int(token_counter.count(bounded_summary))
+    entries = prime.get("index_entries")
+    if not isinstance(entries, list) or not entries:
+        # 目录为空/缺失也不能提前 return：summary 已经扣过预算（新发现 10 的另一半）
+        return (trimmed, True) if trimmed is not None else (prime, False)
+    used = summary_tokens
     kept: list[Any] = []
     for entry in entries:
         cost = int(
@@ -292,8 +347,8 @@ def trim_prime_to_budget(
         used += cost
         kept.append(entry)
     if len(kept) == len(entries):
-        return prime, False
-    trimmed = dict(prime)
-    trimmed["index_entries"] = kept
-    trimmed["index_entries_truncated"] = True
-    return trimmed, True
+        return (trimmed, True) if trimmed is not None else (prime, False)
+    result = trimmed if trimmed is not None else dict(prime)
+    result["index_entries"] = kept
+    result["index_entries_truncated"] = True
+    return result, True

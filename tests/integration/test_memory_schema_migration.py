@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.memory.contracts.commands import MaintenanceCommand
@@ -70,6 +71,42 @@ def _v1_mastery(user_id: UUID, topic_key: str) -> bytes:
             understood=["逐点收敛定义"],
         )
     ).encode()
+
+
+def _v2_mastery(user_id: UUID, topic_key: str) -> bytes:
+    """已经是 v2 的文档（模拟 frontmatter_patch 原生升版 / 早期迁移跑过）。"""
+    return render_mastery(
+        MasteryDocument(
+            user_id=user_id,
+            topic_key=topic_key,
+            topic_title=topic_key,
+            version=1,
+            updated_at=NOW,
+            schema_version=SCHEMA_VERSION_V2,
+            name=topic_key,
+            description="圆锥曲线之一",
+            aliases=["ellipse"],
+            keywords=["焦点", "准线"],
+            links=["抛物线"],
+            overview="与 [[抛物线]] 的焦点性质混淆。",
+        )
+    ).encode()
+
+
+async def _projection_row(
+    session_factory: async_sessionmaker[AsyncSession], user_id: UUID, memory_id: str
+) -> dict[str, Any] | None:
+    async with session_factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT title, summary, aliases, keywords, related_topic_keys, search_text, "
+                "source_version FROM memory_index_entries "
+                "WHERE user_id = :u AND memory_id = :m"
+            ),
+            {"u": user_id, "m": memory_id},
+        )
+        row = result.mappings().first()
+        return dict(row) if row else None
 
 
 async def _seed_document(
@@ -256,6 +293,92 @@ async def test_second_migration_is_idempotent(
     assert second["active_version"] == first_version, "版本号不得抖动"
     assert second["active_checksum"] == first_checksum, "checksum 不得抖动"
     assert second["active_storage_key"] == first_key
+
+
+async def test_second_run_backfills_projection_of_already_v2_documents(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: LocalMarkdownStore,
+    runtime_context: MemoryRuntimeContext,
+) -> None:
+    """review-2 新发现 9：**已是 v2** 的文档也必须被回填投影（无论何时跑迁移）。
+
+    文档升到 v2 有两条路：本任务（v1→v2 追加版本）与 ``frontmatter_patch`` 原生升版。
+    旧实现只在"本次升级了文档"的分支刷新投影，于是后者（以及被更早版本迁移跳过的文档）
+    的 aliases/keywords/related 永远补不上，运维"再跑一次任务"是 no-op。
+    """
+    user_id, mastery_id = uuid4(), "mastery:椭圆"
+    v2_bytes = _v2_mastery(user_id, "椭圆")
+    await _seed_document(
+        session_factory,
+        store,
+        user_id=user_id,
+        memory_id=mastery_id,
+        memory_type="mastery",
+        content=v2_bytes,
+        topic_key="椭圆",
+    )
+    # 模拟"v2 文档但投影从未回填"：投影行缺失
+    assert await _projection_row(session_factory, user_id, mastery_id) is None
+
+    detail = await _run_migration(session_factory, runtime_context, idem_suffix=f"{user_id}-v2")
+    assert detail["migrated"] == 0, "已是 v2：不产生新版本"
+    assert detail["skipped_already_v2"] >= 1
+    assert detail["refreshed_already_v2"] >= 1, "已是 v2 的文档必须被回填投影"
+    assert detail["failures"] == []
+
+    row = await _projection_row(session_factory, user_id, mastery_id)
+    assert row is not None, "迁移必须补齐 memory_index_entries 投影行"
+    assert row["source_version"] == 1
+    assert row["title"] == "椭圆"
+    assert list(row["aliases"]) == ["ellipse"]
+    assert list(row["keywords"]) == ["焦点", "准线"]
+    assert list(row["related_topic_keys"]) == ["抛物线"], "链接必须从正文现算"
+    # 文档本体不受影响：没有新版本、旧版本字节不变
+    doc = await _active(session_factory, user_id, mastery_id)
+    assert doc is not None and doc["active_version"] == 1
+    assert await store.read_version(user_id=user_id, storage_key=doc["active_storage_key"]) == (
+        v2_bytes
+    )
+    # index dirty 被标上（rebuild_index 的触发条件）
+    async with session_factory() as session:
+        dirty = await session.execute(
+            text(
+                "SELECT index_dirty_at FROM memory_documents "
+                "WHERE user_id = :u AND memory_id = 'index'"
+            ),
+            {"u": user_id},
+        )
+        assert dirty.scalar_one() is not None
+
+
+async def test_projection_backfill_is_idempotent_across_runs(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: LocalMarkdownStore,
+    runtime_context: MemoryRuntimeContext,
+) -> None:
+    """回填可重复跑：第二次不报错、投影内容不变（便于运维按需重跑）。"""
+    user_id, mastery_id = uuid4(), "mastery:椭圆"
+    await _seed_document(
+        session_factory,
+        store,
+        user_id=user_id,
+        memory_id=mastery_id,
+        memory_type="mastery",
+        content=_v2_mastery(user_id, "椭圆"),
+        topic_key="椭圆",
+    )
+    await _run_migration(session_factory, runtime_context, idem_suffix=f"{user_id}-first")
+    first = await _projection_row(session_factory, user_id, mastery_id)
+    assert first is not None
+
+    detail = await _run_migration(session_factory, runtime_context, idem_suffix=f"{user_id}-again")
+    assert detail["refreshed_already_v2"] >= 1
+    again = await _projection_row(session_factory, user_id, mastery_id)
+    assert again is not None
+    for key in ("title", "summary", "aliases", "keywords", "related_topic_keys", "search_text"):
+        assert again[key] == first[key], f"{key} 在重跑后发生变化"
+    doc = await _active(session_factory, user_id, mastery_id)
+    assert doc is not None and doc["active_version"] == 1, "回填不得推进版本"
 
 
 # ---------------------------------------------------------------------------

@@ -435,7 +435,7 @@ def _render_bounded(
             if delivered == 0 and lines:
                 # 预算连一行都放不下：回最小结果而不是"0 行的 read"——后者会让模型以为
                 # 该主题是空的、或反复用同一个 line_offset 重试。
-                return _budget_exhausted_stub(""), True, 0
+                return _budget_exhausted_stub(), True, 0
             bounded = dict(payload)
             bounded["content"] = "\n".join(lines[:delivered])
             bounded["truncated"] = True
@@ -503,7 +503,7 @@ def _apply_token_budget(
         return rendered, False
     remaining = budget_tokens - used_tokens
     if remaining <= 0:
-        return _budget_exhausted_stub(rendered), True
+        return _budget_exhausted_stub(), True
     if _count_tokens(rendered, token_counter) <= remaining:
         return rendered, False
     # 粗粒度二分：按字符比例估算，再逐次收敛，避免按 token 精确切分中文时的歧义。
@@ -517,8 +517,12 @@ def _apply_token_budget(
     return rendered[:low], True
 
 
-def _budget_exhausted_stub(rendered: str) -> str:
-    """预算耗尽时的最小结果：保留可解析的 JSON 外壳与提示。"""
+def _budget_exhausted_stub() -> str:
+    """预算耗尽时的最小结果：保留可解析的 JSON 外壳与提示。
+
+    刻意**不带**原结果参数：这个 stub 是"压到最小形态"，任何来自原结果的内容都会
+    把"有界"这条不变量重新打开（也避免留一个永远不用的形参）。
+    """
     return json.dumps(
         {
             "truncated": True,
@@ -551,12 +555,26 @@ def _attach_read_hint(
             returned = delivered_lines
         else:
             returned = len(str(payload.get("content") or "").splitlines())
-        hint["hint"] = {
-            "tool": "memory.read",
-            "memory_id": str(payload.get("memory_id") or arguments.get("memory_id") or ""),
-            "line_offset": consumed + returned,
-            "max_lines": int(arguments.get("max_lines") or READ_MAX_LINES),
-        }
+        memory_id = str(payload.get("memory_id") or arguments.get("memory_id") or "")
+        if delivered_lines == 0:
+            # review-2 新发现 11：预算连一行都放不下时 `_render_bounded` 回最小 stub，
+            # 此时 `consumed + 0` 恰好等于**请求的同一 offset**——提示会变成"再读一次同一
+            # 位置"，模型照着做只会命中幂等缓存、白白消耗剩余轮数。因此这里不给可执行的
+            # offset，改为明确的"本轮预算耗尽、勿重试"语义（仍是合法 JSON + truncated=true）。
+            hinted["reason"] = "memory_tool_budget_exhausted"
+            hint["hint"] = {
+                "tool": "memory.read",
+                "memory_id": memory_id,
+                "retryable": False,
+                "note": ("本轮记忆工具内容预算已耗尽，请勿重复读取同一位置；请基于已有信息作答"),
+            }
+        else:
+            hint["hint"] = {
+                "tool": "memory.read",
+                "memory_id": memory_id,
+                "line_offset": consumed + returned,
+                "max_lines": int(arguments.get("max_lines") or READ_MAX_LINES),
+            }
     else:
         hint["hint"] = {
             "tool": "memory.read",

@@ -1032,6 +1032,57 @@ Phase 0 按 §5.2-B 的配置表往 `.env.example` 写了 5 个 §2.6 D4 参数�
 
 ---
 
+## 第二次复审（REVIEW-2-verification-685bfc6.md）的修复登记
+
+复审确认 3 个 Critical 已修，但指出**由上一轮修复引入的 1 个 Critical 回归**、以及一个
+方法论问题：**「修一处、漏同类」**——新增回归测试只覆盖被点名的那一处。用户据此要求对
+「**封闭枚举 / 多处投影站点 / 多条删除路径**」三类补**全量枚举型元测试**（而非继续逐点补）。
+
+### DEV-058 ★ 多节点提交把所有 KG 映射置为 inactive（Critical，上一轮 I-3 修复引入）
+
+`_sync_graph_links` 用 `for kept in node_ids: deactivate_graph_links(except_node_id=kept)`
+循环，而该 SQL **没有版本谓词** → `[A,B]` 时先把 B 置 false、再把 A 置 false，**全部映射失效**
+（实测 active 0/2）。修复：一次调用 + `node_id <> ALL(CAST(:ids AS text[]))`；排除集合取
+**本次真正 upsert 成功的节点**（不是 brief 里的 `planned ∪ previous`——那会让"删掉一个节点"
+永不生效）。测试断言升级为"每个计划内节点 active=True"，改回循环实现即失败。
+
+### 三类**枚举型元测试**（用户点名的交付）
+
+| 元测试 | 枚举方式 | 变异验证（实跑并撤销） |
+|---|---|---|
+| `tests/unit/test_projection_sites_meta.py`（40 例） | AST 四条互补规则自动枚举出 **27 个投影站点**（含 SQL INSERT/UPDATE/SELECT 列清单），加显式豁免/手动登记/只读消费站点各附理由；断言键清单双向相等、取值来源真值表（唯一哨兵值）、跨站点逐键一致、结构委托 | 4/4 被抓：title 换回 topic_title / 新增投影字段 / restore 自成一套 / 新增未登记站点 |
+| `tests/unit/test_degraded_flag_enum_meta.py`（7 例） | AST 遍历 884 函数 / 91 模块，提取 **17 个写入站点 / 15 个字面量**，按去向分 state(14)/rollout(1)，覆盖 5 种写入形状；双向精确断言（缺失项 + 死值白名单） | 临时加 `meta_demo_unregistered_flag` → 2 failed 并列出缺失项与站点 |
+| `tests/unit/test_rollout_deletion_paths_meta.py` + `tests/integration/test_rollout_deletion_paths.py` | 3 条删除入口 + 4 条触发入口 + 10 项带原因白名单 + CLI `--apply` 守卫 + 集成覆盖守卫；按**传递调用闭包**断言"对象 + 热段 + tombstone"三段齐全（段级入口还反向禁止按 thread 清扫） | 新增只删对象的入口 → 红；retention 顺手 thread 清扫 → 红 |
+
+**方法论结论（值得沿用的纪律）**：凡是"封闭集合"（Literal / 枚举 / 白名单）或"同一语义有多个
+写入/删除站点"的结构，都应当有一条**枚举型元测试**把"集合"与"站点集合"绑定起来；逐点回归测试
+只能证明被点名的那一处修好了，证明不了同类没有第二处。
+
+### 本轮同时修掉的复审新发现
+
+- **DEV-059** `_clear_commit_started` 未传 `fencing_operation_id` → 批次行 `commit_started_at` 残留（顺带对齐 mark/clear 的 CAS 目标）。
+- **DEV-060** I-11③ 只改一半：`restore` 与 index.md 仍用 `topic_title`。新增 `projected_title()` + `index_projection_from_document()` 作为**唯一权威实现**，三条写入路径共用；元测试又抓出第五、第六个站点（`_mastery_view` / `_learner_view`）与 `search_text` 来源问题。
+- **DEV-061** 迁移回填只覆盖"本次升级"的文档 → `skipped_already_v2` 分支也刷新投影（全量回填入口 + `refreshed_already_v2` 计数，代价见报告 §3.4）。
+- **DEV-062** 批次内**全部**成员失败仍报 `succeeded` → `finalize_batch_result` 抛 `BatchAllMembersFailedError`（`OperationDeadLetterError` 子类）→ 批次落 `dead_letter`，**无需改 manager.py**。**待决**：是否把 `BATCH_ALL_MEMBERS_FAILED` 并入 `contracts/errors.py::ERROR_CODES`（该集合当前无人校验）。
+- **DEV-063** 被释放的失败成员没有尝试计数 → `release_batch_member` 复用既有 `attempt_count` +1，达 `max_attempts` 转死信（**无新迁移**）。
+- **DEV-064** 取消/已释放成员被误报"库中无归属" → 新增 `list_operations_by_ids` 回查，行还在（cancelled/已释放/已终态）记 `skipped_not_processable`（中性措辞），行不存在才保留"归属丢失/需人工核查"警告。
+- **DEV-065** `object_key IS NULL` 的未封存段被删除路径整段跳过 → 新增 `rollout/deletion.py` 统一三入口（对象 + 逐 key 热段 + thread 级目录清扫）；未封存段用**目录清扫**而非现算路径（recorder 的 `thread_created_at` 与 `conversation_threads.created_at` 不保证同日）。`thread_deletion` 改为"只要有 rollout 行就必须能删，删除成功即**无条件**落 tombstone"。
+- **DEV-066** `next_ordinal_start` 忽略 open 段（`ordinal_end` 为 NULL）→ 序数范围重叠（实测 `(0,3)`/`(1,2)`）→ 改取**本地热段真实最大 ordinal**；`register_open` 的改名失败改为补偿 + `rename_failed`（不改"改名移到事务前"，那会在失租复用场景把当前持有者的段改名走）。
+- **DEV-067** `recorder._degraded` 是**进程级永不重置**的（一次瞬时 DB 错误静默停掉该 worker 上所有 thread 的 rollout 写入直到重启）→ 收敛到单 turn，且 **turn 内不清零**（被跳过行可能是必须首行的 `thread_meta`）。
+- **DEV-068** 预算连一行都放不下时 read 提示指回**同一** offset → 改为不给可执行 `line_offset`、明确"勿重试"。
+- **DEV-069** `memory.read` 的 prime 预算不覆盖 summary（"共用预算"不成立）→ summary 与目录**共用同一预算**（先扣 summary 再裁目录），并修掉"纯 summary 截断不发标记"的同类缺口。
+- **DEV-070** kodo 模式下热缓存不删（上一轮已登记）→ factory 给远端 store 注入 root 级热删除能力，缺能力**显式报错**而非静默 no-op。
+- **DEV-071** 两个**死枚举值**：`retrieval_partial` / `retrieval_unavailable` 在 backend 里无任何生产者（检索节点不产降级标记，唯一出现处是测试夹具）；`graph_failed` 只进 rollout 审计（开放字段）。已在元测试的 `NEVER_PRODUCED` / `ROLLOUT_ONLY` 白名单里显式登记原因。
+- **DEV-072**（Nit）`resolve_resume` 的 fencing 形参未被使用 → 删掉该形参，改在真正的写路径（`mark_deleted` / `register_open` / `discard_open`）补租约守卫。
+
+### 复审后仍待决/未修（登记）
+
+- **混合批次里"errors-only 成员"**（有 errors、无 mutation、无审核候选）outcome 仍是 `no_change` 且不会被释放 → 批次 succeeded 时被 `settle_batch_members` 标成 succeeded，等于"没写进去却算完成"。本轮只把最坏情形（整批全灭）修成死信；彻底修需要按成员回写终态。
+- `BATCH_ALL_MEMBERS_FAILED` 是否并入 `ERROR_CODES`（见 DEV-062）。
+- 上一轮 §5 的其余 Minor（0-indexed `line_offset`、`list_user_links` 无 LIMIT、`_parse_index_blocks` 的宽容语义、`build_search_sql` 空 query 的非法 SQL、提示词与 frontmatter 通道矛盾、0008 downgrade 守卫口径等）仍未修，登记见 DEV-049~057。
+
+---
+
 ## 外部 review 的修复登记（REVIEW-memory-rebuild-implementation.md）
 
 > 用户提供的独立 review 报告（`REVIEW-memory-rebuild-implementation.md`，2026-09-12）用真实
