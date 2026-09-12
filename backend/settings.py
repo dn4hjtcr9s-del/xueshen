@@ -149,6 +149,13 @@ class Settings(BaseSettings):
     memory_summary_llm_concurrency: int = Field(
         default=8, ge=1, le=64, alias="MEMORY_SUMMARY_LLM_CONCURRENCY"
     )
+    #: memory-rebuild §5.9①：consolidation 通读全文档的输入上限（字符数）。
+    #: 超限时只重写"主题路由"段，画像与偏好沿用旧版（§4.5-② 决议 B 组）。
+    #: 用字符而不是 token：memory 域没有 tokenizer，中文场景 4 字符≈1 token，
+    #: 48000 字符 ≈ 12k token，足够容纳一个活跃用户的全量 mastery 摘要。
+    memory_consolidation_input_max_chars: int = Field(
+        default=48_000, ge=1_000, le=1_000_000, alias="MEMORY_CONSOLIDATION_INPUT_MAX_CHARS"
+    )
 
     # 限流（§18.5）
     rate_limit_write_per_minute: int = Field(default=30)

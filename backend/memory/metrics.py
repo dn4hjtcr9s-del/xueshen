@@ -88,6 +88,13 @@ memory_graph_state_changes_total = Counter(
     "图谱状态变更总数",
     ["from", "to", "source"],
 )
+#: memory-rebuild §5.9：KG 双路更新的投影结果。status="failed" 即告警口径
+#: kg_projection_update_failed（最终一致，不建 reconciler）
+memory_kg_dual_write_total = Counter(
+    "memory_kg_dual_write_total",
+    "KG 双路更新投影结果（applied/skipped/failed）",
+    ["status"],
+)
 memory_storage_checksum_failure_total = Counter(
     "memory_storage_checksum_failure_total",
     "存储 checksum 校验失败总数",

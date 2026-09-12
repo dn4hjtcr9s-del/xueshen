@@ -2971,7 +2971,70 @@
         "type": "object"
       },
       "LearningContextGraphState": {
+        "description": "图谱口径的一条注入状态（§12.4 优先级 3）。\n\nmemory-rebuild §3.5②/§5.9 的双源协调结果附加在既有字段之后的四个**可选**键上：\n``state_source`` / ``conflict`` / ``conflict_reason`` / ``memory_updated_at``\n与 ``kg_updated_at``。既有键的类型与含义不变，未做协调时四个键保持缺省，\n老调用方序列化结果与之前逐字一致。",
         "properties": {
+          "conflict": {
+            "default": false,
+            "title": "Conflict",
+            "type": "boolean"
+          },
+          "conflict_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conflict Reason"
+          },
+          "kg_projected_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kg Projected Version"
+          },
+          "kg_updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kg Updated At"
+          },
+          "memory_updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Updated At"
+          },
+          "memory_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Version"
+          },
           "node_id": {
             "title": "Node Id",
             "type": "string"
@@ -2982,6 +3045,21 @@
             },
             "title": "Reason Codes",
             "type": "array"
+          },
+          "state_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "memory",
+                  "kg"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State Source"
           },
           "status": {
             "anyOf": [

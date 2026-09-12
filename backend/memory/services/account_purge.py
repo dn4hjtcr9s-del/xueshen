@@ -346,6 +346,7 @@ _USER_TABLE_DELETES: tuple[tuple[str, str], ...] = (
     ("memory_graph_links", "user_id"),
     ("memory_deleted_evidence_suppressions", "user_id"),
     ("memory_review_candidates", "user_id"),
+    ("memory_dangling_links", "user_id"),
     ("memory_index_entries", "user_id"),
     ("memory_commits", "user_id"),
     ("memory_documents", "user_id"),

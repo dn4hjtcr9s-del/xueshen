@@ -15,6 +15,8 @@ PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 EXTRACT_CANDIDATES_PROMPT_VERSION = "extract_candidates_v3"
 BUILD_MUTATION_PLAN_PROMPT_VERSION = "build_mutation_plan_v2"
+#: memory-rebuild §5.9①：批次末段 consolidation 的 summary 生成契约（Phase 7 新增）。
+SUMMARY_CONSOLIDATE_PROMPT_VERSION = "summary_consolidate_v1"
 
 #: 当前长期记忆文档 frontmatter 的 schema 版本。
 DOCUMENT_SCHEMA_VERSION = 2

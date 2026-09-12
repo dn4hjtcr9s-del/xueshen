@@ -134,7 +134,6 @@ async def begin_batch_member(
     index = int(state.get("batch_index") or 0)
     processed = list(state.get("batch_processed") or [])
     warnings = list(state.get("batch_warnings") or [])
-    llm_calls = int(state.get("batch_llm_call_count") or 0)
 
     while index < len(members):
         member = members[index]
@@ -167,7 +166,12 @@ async def begin_batch_member(
             "errors": [],
             "warnings": [],
             "replan_count": 0,
-            "llm_call_count": llm_calls,
+            # **每条成员重置 LLM 预算**：`LLMCallBudget` 的上限是"每 operation 4 次"
+            # （policies.LLM_MAX_CALLS_PER_OPERATION），而批量的每个成员本身就是一条
+            # operation——累计计数会让第 3 条成员起全部被判"预算耗尽"
+            # （实测：3 条成员只写出 2 条，且批次仍报 succeeded）。
+            # 批次级总量单独记在 `batch_llm_call_count`（审计用，不参与预算判定）。
+            "llm_call_count": 0,
         }
     return {
         "batch_index": index,
@@ -261,17 +265,11 @@ async def enter_batch_consolidation(
     enabled = bool(getattr(settings, "memory_consolidation_enabled", False))
     if not enabled:
         return {"batch_consolidation": {"status": "disabled"}}
-    warnings = list(state.get("batch_warnings") or [])
-    warnings.append("consolidation 末段尚未实现（Phase 7），本批未执行全局治理")
-    logger.warning("memory_consolidation_enabled 已开启，但 consolidation 末段属 Phase 7")
-    return {
-        "batch_consolidation": {
-            "status": "not_implemented",
-            "deferred_to": "Phase 7",
-            "degraded_flags": ["consolidation_not_implemented"],
-        },
-        "batch_warnings": warnings,
-    }
+    # 末段实现见 graph/consolidation.py（§5.9①）：summary 重写 + keywords/aliases 治理 +
+    # 悬空链接两级制 + KG 双路。失败只告警，不影响循环段已提交的成员。
+    from backend.memory.graph import consolidation
+
+    return await consolidation.consolidate_user_memory(state, runtime)
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +315,10 @@ async def finalize_batch_result(
     }
     errors = [] if mutations else list(state.get("errors") or [])
     warnings = _cap_warnings(list(state.get("batch_warnings") or []))
+    if failed:
+        # 部分成员没写进去时批次本身仍可成功（§5.8：单成员失败不拖垮整批），
+        # 但绝不能让"少写了几条"只藏在诊断字段里——公开 result 只有 warnings 可见。
+        warnings.append(f"本批 {len(failed)} 条成员未直接写入（见批次诊断与成员状态）")
     if degraded_flags:
         # 结构化标记进不了 MemoryOperationResult（公开契约无自由字段），
         # 因此额外写一条可读警告，保证"末段没做"这件事在运维侧可见。

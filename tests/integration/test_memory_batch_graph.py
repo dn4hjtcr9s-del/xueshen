@@ -388,3 +388,32 @@ async def test_other_users_evidence_is_not_dragged_into_the_batch(
     assert other["batch_operation_id"] is None
     assert other["status"] == "pending_batch"
     assert fake_llm.extract_queue == []
+
+
+@pytest.mark.asyncio
+async def test_batch_processes_more_members_than_the_per_operation_llm_budget(
+    runner: LocalLangGraphRunner,
+    session_factory: async_sessionmaker[AsyncSession],
+    fake_llm: FakeMemoryLLMClient,
+    fake_conversation_reader: FakeConversationReader,
+) -> None:
+    """回归：成员数超过单 operation 的 LLM 预算（4 次 = 2 条成员）时仍要全部处理。
+
+    `LLMCallBudget` 的上限是"每 operation 4 次"（extract + plan 各一次/成员），而批量的
+    每个成员本身就是一条 operation。曾把预算跨成员累计 → 第 3 条成员起全部被判
+    "LLM 调用预算耗尽"，3 条只写出 2 条，**且批次仍报 succeeded**。
+    """
+    member_ids = []
+    for index in range(3):
+        thread = f"t-budget-{index}"
+        member = await _persist_evidence(session_factory, user_id=USER, thread_id=thread)
+        await _seed_source(fake_conversation_reader, thread, f"我用配方法解出方程 {index}")
+        _queue_member(fake_llm, f"预算主题{index}")
+        member_ids.append(member.operation_id)  # type: ignore[attr-defined]
+
+    batch = await _build_batch(session_factory, user_id=USER, member_ids=member_ids)
+    result = await runner.run(batch)  # type: ignore[arg-type]
+
+    assert len(result.mutations) == 3, "三条成员都必须写出，不能因预算被累计而丢"
+    assert await _count(session_factory, "memory_commits") == 3
+    assert not any("预算耗尽" in warning for warning in result.warnings), result.warnings

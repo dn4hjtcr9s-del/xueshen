@@ -1034,4 +1034,263 @@ Phase 0 按 §5.2-B 的配置表往 `.env.example` 写了 5 个 §2.6 D4 参数�
 
 ## Phase 7：Consolidation、aliases、dangling links 与 KG 双路更新
 
-（未开始）
+### DEV-020 批量循环的 LLM 预算被跨成员累计（**真实缺陷，Phase 6 遗留**）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 3 条成员的批次只写出 2 条，第 3 条起日志报"LLM 调用预算耗尽，无法提取候选"，而批次仍报 `succeeded` |
+| 根因 | `graph/policies.py::LLM_MAX_CALLS_PER_OPERATION = 4`，而每条成员要 2 次调用（extract + plan）。Phase 6 的 `begin_batch_member` 把 `llm_call_count` 跨成员累计，于是第 3 条成员起 `can_call()` 恒为假 |
+| 为什么 Phase 6 没抓到 | 我的集成测试只用 2 条成员（2×2=4，刚好用满预算）；50 条上限的验收没有真正跑过 |
+| 修法 | `begin_batch_member` **每条成员重置** `llm_call_count=0`——批量的每个成员本身就是一条 operation，"每 operation 4 次"应当按成员计；批次总量单独记 `batch_llm_call_count`（只作审计） |
+| 附带修 | `finalize_batch_result` 在有失败成员时补一条警告（此前"少写了几条"只藏在诊断字段里，公开 result 看不到） |
+| 回归测试 | `tests/integration/test_memory_batch_graph.py::test_batch_processes_more_members_than_the_per_operation_llm_budget`（3 条成员必须全部写出） |
+
+### DEV-021 `frontmatter_patch` 不在 `memory_commits.action` 的 CHECK 约束里（**真实缺陷，Phase 4 遗留**）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 任何真正提交的 `frontmatter_patch` 计划在写审计行时抛 `CheckViolation: new row for relation "memory_commits" violates check constraint "memory_commits_action_check"` |
+| 根因 | Phase 4 把 `frontmatter_patch` 加进了 `CommitMutationPlan.action` / `MutationResult.action` 契约与 v2 planner 提示词，但 0001 迁移里那份 7 值 CHECK 清单**没有同步**。契约、提示词、图节点三层都"支持"，只有数据库层拒绝 |
+| 暴露路径 | Phase 7 consolidation 的 keywords / aliases 治理提交（这是第一个真正发出该动作的代码路径），另见 keywords 专项测试的独立复现 |
+| 修法 | 新增迁移 `0011_memory_commits_frontmatter_action` 扩展约束（按 ADD-044 的规矩：不回头改历史迁移），downgrade 在存在该动作行时拒绝回滚 |
+| 教训 | 与 ADD-044 同源——"新增枚举值要同步 N 处"里的 **DB CHECK 约束只有真实库能发现**。Phase 4 的集成测试没有覆盖 `frontmatter_patch` 的端到端提交，因此漏了一整个 Phase |
+
+### DEV-022 `rebuild_index` 从不把 index 标成 v2（**真实缺陷，Phase 4 遗留**）
+
+`render_index()` 按 `IndexDocument.schema_version` 分派 v1/v2 渲染，而 `rebuild_index`
+构造 `IndexDocument(...)` 时没传 `schema_version`（默认 v1）→ **即使四个字段都填好，
+index.md 也永远走 v1 单行分支**（`- mastery:椭圆 | 椭圆 | v1 | ...`），`- keywords:` /
+`- description:` / `- aliases:` 一行都不会出现。§2.7 决议 A 组已批准 index 升版、
+§5.6 验收也要求"learner → mastery → index 顺序生成 v2"，因此显式传入
+`schema_version=SCHEMA_VERSION_V2` 修复（keywords 专项集成测试第一次跑就撞到）。
+
+### DEV-023 index 的 `description` 是正文 overview，不是 frontmatter 的 description
+
+§3.4 说"description / aliases 从文档 frontmatter **投影**而来"，但提交侧的
+`memory_index_entries.summary` 对 mastery 存的是**正文 overview**（`overview or
+understood 前 3 条`）、对 learner 是 goals 拼接；`rebuild_index` 投影时 `- title` 取
+`memory_documents.topic_title`、`- description` 取该 `summary` 列。
+
+**处置：接受现状并登记**，不改。理由：`memory_index_entries.summary` 同时是
+`memory.search` 工具的 description 匹配域（Phase 5 用户已拍板"纯关键词四列 ILIKE"），
+把它改成 frontmatter 的"一句话 description"会同时改变检索语义与命中权重分档，属独立
+决策；而 index 的 description 用 overview 在"要不要打开这个文档"的判据上信息量更大。
+若要严格对齐文档，应作为一次显式的检索语义变更来做（提交 + restore + 迁移三处同改）。
+
+### DEV-024 keywords 补丁只对 v2 文档生效（迁移必须先跑）
+
+`apply_frontmatter_patch` 只在 name+description 齐备时才把文档升到 v2（Phase 4 决策
+ADD-039），而 `keywords` 是 v2 frontmatter 字段。因此 consolidation 的 keywords 治理
+只能作用在**已经是 v2** 的 mastery 上：用户必须先跑过 `migrate_markdown_schema_v2`
+（或有过 create/merge 提交），否则该主题的 keywords 补丁不会落盘。这是既定升级顺序
+的自然结果，登记以免被误读成"keywords 生产者不工作"。
+
+### ADD-077 keywords 的载体（用户 2026-09-12 裁决 A）
+
+keywords 作为 **v2 frontmatter 字段**（`MasteryDocument.keywords` /
+`LearnerDocument.keywords`）+ `FrontMatterPatch.keywords`（最多 8 条），文档仍是唯一
+事实源：提交路径把 `list(doc.keywords)` 写进 `memory_index_entries.keywords`，
+`rebuild_index` 再投影回 index.md 的 `- keywords:` 行。
+
+**生产者也只有一个**：consolidation（Phase 5 裁决 A 的落地）。planner 提示词
+**不加** keywords，避免两个生产者互相覆盖。
+
+顺带修掉的两个投影缺口：提交/恢复路径原先硬编码 `"keywords": []`；`rebuild_index`
+原先不读 PG 的 `description/aliases/keywords/related_topic_keys`（只查 updated_at），
+因此 index.md 的 v2 块里这四个字段永远是空的。
+
+### ADD-078 悬空链接的计数载体（用户 2026-09-12 裁决 A）
+
+新增 PG 表 `memory_dangling_links`（迁移 `0010_memory_dangling_links`）承载跨批次的
+出现计数，而不是塞进 index.md（index 是 derived 产物，rebuild 会重写）或复用
+`memory_review_candidates`（审核队列语义会变脏）。两级制：`sighting_batches >= 2`
+才 `list_candidates` 命中并正式建档。**幂等键是 `last_batch_operation_id`**：同一批次
+重跑不重复 +1（判定与累加在同一条 upsert 语句里完成，并发重跑也不会多算）。
+
+### ADD-079 summary 的版本化与回滚载体（用户 2026-09-12 裁决 A）
+
+`memory_summary.md` 保持 §2.3 的纯文件格式（无 front matter、首行恰好 `v1`），不走
+`memory_documents` 的不可变版本机制（那会加 front matter 并占用 memory_id）。旧版本
+以同目录 `memory_summary.v{N}.md` 快照保留（最多 10 个），回滚 =
+`summary_file.restore_summary()` 用快照覆盖回去；`memory_summary.meta.json` 记
+`{version, batch_operation_id, checksum, generated_at, degraded}`，同时充当**末段幂等
+凭证**（同一批次重跑直接跳过，§5.9 验收"末段重试不重复写同一 summary 版本"）。
+写入顺序：**先留旧快照，再原子替换当前文件**——快照失败就不动当前摘要。
+
+### ADD-080 consolidation 的输入预算用字符而非 token（文档只说"预算"）
+
+§5.9① 只说"全量输入超过预算时只重写主题路由段"，没给单位与阈值。memory 域没有
+tokenizer（conversation 域的 `TokenCounter` 属另一个域），因此新增
+`memory_consolidation_input_max_chars`（默认 48000，≈12k token）按字符计。
+降级语义按 §4.5-② 决议 B 组：只重写"主题路由"段，`user_profile` /
+`stable_preferences` 从旧摘要里解析回填。
+
+### ADD-081 keywords 与 aliases 归并必须**合并成每文档一次提交**
+
+两者写的是同一份 frontmatter。分成两次提交必然踩乐观并发：第一次成功升版后，第二次
+携带的 `expected_version` 已经过期（实测 `IntegrityError` / 版本冲突），治理静默失败。
+现在按 memory_id 合并成一个 `frontmatter_patch` 计划，既避免冲突也少一个无意义版本。
+
+### ADD-082 治理失败的 reason 带异常摘要
+
+`failed` 里只记异常类型名会让 `IntegrityError` 这类失败无从排查（本次正是靠它才定位到
+DEV-021）。改为 `f"{类型}: {str(exc)[:200]}"`，截断 200 字符避免把 SQL/数据带进结果。
+
+### ADD-091 KG 双路更新的幂等键、失败落点与"无映射是常态"
+
+**幂等键**：`kg-dual-write:{batch_operation_id}:{memory_id}:{version}:{node_id}`
+（`node_id` 必须进键——一个 mastery 可能链到多个 KG node，不带 node 会让第二个节点被
+误判为重放）。键 → `operation_id` 用 `uuid5(固定 namespace, node_key)` 派生。
+
+**双重锚点**（第一版踩过坑）：`graph_state_audit.operation_id` 有 FK 指向真实
+`memory_operations` 行，凭空造的 uuid5 会被 FK 拒绝；因此用**批次 operation** 做审计锚，
+另写一行 `status='cancelled'` 的终态行承载幂等键作**追溯锚**（claim 只认
+queued/retry_wait，worker 永不认领）。重放判定 = 审计里存在
+`operation_id = 批次 operation` 且 `evidence_refs` 覆盖本次全部 ref。
+
+**失败落点**（不新建表、不加迁移）：`logger.warning("kg_projection_update_failed ...")`
++ `metrics.memory_kg_dual_write_total{status}`（新增 counter）+ 返回
+`DualWriteOutcome(status="failed")`，**任何异常都不外抛**；长期记忆侧的
+`memory_projection_update_failed` 由 consolidation 记，两边互不阻塞（决议 D：最终一致 +
+告警，不建 reconciler）。
+
+**来源追溯**：`batch_operation_id` → 审计 `operation_id`；version →
+`graph_user_states.source_memory_id/source_memory_version`；checksum → 编进
+`evidence_snapshot` 的 evidence_ref 前缀（`graph_user_states` / `graph_state_audit`
+**没有 checksum 列**，一等公民字段需要迁移）。
+
+### DEV-028 "无映射"是 KG 双路更新的常态路径，不是异常
+
+`memory_graph_links` 的唯一生产者是长期记忆 commit 路径（extract 阶段给出
+`graph_projection_candidates` 时写）。consolidation 自己**不产生映射**，因此纯
+consolidation 场景下 KG 侧大概率 `skipped / no_graph_mapping`——这是设计使然，不是故障。
+
+要让双路更新真正生效还缺三件事（均未自造）：
+① consolidation 侧"topic_routes → KG node"的映射产出；
+② `changed_topics` 的真实 version/checksum（第一版传的是 0/空串，会让 KG 侧版本匹配
+必失败；**已修**：现在从 `memory_documents.active_checksum` 与文档 version 取真实值）；
+③ mastery 文档缺少状态字段（见 DEV-029）。
+
+### DEV-029 §3.5② 的冲突例子与文档数据模型不对称
+
+§3.5② 举例"长期记忆'熟悉微积分' vs 图谱节点'薄弱'"，但 `MasteryDocument` 只有
+`overview / understood / difficulties / review_advice`，**没有状态字段也没有熟练度枚举**
+（`proficient` 只存在于 index 的 `GraphStatus` 与 KG overlay）。因此读路径无法做对称的
+状态比对，只能用 `difficulties` 非空且无正向证据来单侧推断"learning"。
+
+### ADD-092 并列（tie）的内部裁定：长期记忆侧优先 + 显式冲突标注
+
+决议 D 只规定"更新鲜者优先 + 并列标注"，没说同版本/同刻谁赢。实现取**记忆侧优先**，
+并标 `conflict=True`、`conflict_reason="version_tie:memory=...,kg=...,memory_preferred"`
+（或 `tie_same_time:memory_preferred`），两路版本与时间都输出，另在 `reason_codes`
+追加 `DUAL_SOURCE_CONFLICT` 供 graph/conversation 读取。原计划的"保守权重"
+（learning 优先于 proficient/expert）**未落地**。
+
+`LearningContextGraphState` 的双源协调结果是 6 个**可选**新键
+（`state_source/conflict/conflict_reason/memory_version/kg_projected_version/
+memory_updated_at/kg_updated_at`），既有键类型与含义不变；未传
+`graph_state_tasks` 时逐字透传（既有 18 例 context 单测未改一行断言）。
+
+### ADD-093 `memory_operations` 会多出终态"追溯锚"行
+
+KG 双路更新为幂等键写入的 `status='cancelled'` 行会出现在 `list_user_operations` 的
+查询结果里。它不会被 claim（只认 queued/retry_wait），但若将来有"孤儿 operation 清理"
+任务，需要排除这一类行。
+
+### ADD-083 候选主题区的落点：index v2 新增一节，事实源仍是 PG 表
+
+§5.9④ 说"第一次出现只加入 index 的候选主题区"，但 index v2 渲染里**没有**这一节
+（只有学习者档案 / 掌握档案 / 主题路由），该子句原本无落点。处置：
+
+- `IndexDocument.candidate_topics`（v2 字段）+ `_render_index_v2` 渲染
+  `## 候选主题（悬空链接）` + `parse_index` 往返解析（缺失即空列表，向后兼容）；
+- `rebuild_index` 从 `memory_dangling_links` 取 `status='candidate'` 的行投影成
+  `"<target>（N 批）"`（保留批次数是为了让人工看出它还没到建档门槛）；
+- **候选为空时不渲染这一节**，既有 index 形状与 diff 不变。
+
+这与"index 是可再生派生物"不冲突：计数与来源批次的事实源始终是 PG 表，index 只是它的
+投影（和 learner/mastery 的投影同构）。
+
+### ADD-084 新表必须同步进账号删除的物理删除清单
+
+`memory_dangling_links` 是**用户数据**。若只建表不登记，账号删除会漏删该表 → 删除合规
+缺口（§21 的删除语义要求用户数据物理消失）。已加入
+`services/account_purge.py::_USER_TABLE_DELETES`，并在 `tests/integration/test_account_purge.py`
+的 `PURGE_TEST_TABLES` 与断言里补了该表的一行 seed。
+
+**登记原因**：这是"新增用户数据表"的第 3 个必改点（前两个是 `USER_TABLES` 测试清理清单
+与迁移本身），漏了不会有任何编译期/单测提示。
+
+### DEV-026 promoted 行再次出现时被冻结，没有"重置回候选"的通道
+
+`memory_dangling_links` 的 `dismissed` 与 `promoted` 两种状态都**不再累计**、不进
+`record_sightings` 的 `DO UPDATE`。后果：若正式建档的主题文档后来被删除，同一个
+`[[link]]` 重新悬空时不会回到候选（也没有重置入口）。文档未规定该行为。
+
+当前可接受：删除是用户显式动作，重新收集需要先有"主题被删则释放候选"的规则；登记待决。
+
+### ADD-085 `normalize_topic_title` 的真实语义（悬空链接 key 的行为）
+
+`target_key` 用 `normalize_topic_title` 规范化：**NFKC + strip**，因此
+
+- 全角折半角（`Ｅllipse` → `Ellipse`，同一条记录）；
+- **大小写敏感**（`Ellipse` 与 `ellipse` 是两行）——与 `[[link]]` 解析的大小写敏感一致；
+- 内部空白**不折叠**（区别于 `topic_key_from_title`）；
+- 控制字符检查发生在 strip **之前**，所以 `[[椭圆\n]]` 直接抛
+  `DanglingLinkError` 而不会被 strip 成合法目标。`extract_links` 的正则允许换行，
+  因此上游必须先预筛——`document_dangling_sightings()` 已内置跳过坏链接，
+  `record_sightings()` 本身选择"报错不静默丢弃"。
+
+**建档必须用 `target_key` 而不是展示文本 `target`**：否则 `[[Ｅllipse]]` 会拼出
+`mastery:Ｅllipse`，与已有的 `mastery:Ellipse` 分裂成两个主题。consolidation 已按此实现。
+
+### ADD-086 `memory_dangling_links` 的 downgrade 直接 DROP TABLE
+
+新表的回滚按仓库既有惯例（0001/0004/0006）直接 `DROP TABLE IF EXISTS`，并已实测
+"空库 upgrade / 表内有数据时 downgrade / 再 upgrade / 重复 upgrade 幂等"四种路径。
+代价是累计批次数在回滚时丢失（已写进迁移 docstring）。0007 那种"持数据时拒绝回滚"的
+写法用于**在既有表上收窄 CHECK**，新表场景不适用。
+
+### ADD-087 `search_text` 不含 keywords，因此 pg_trgm 检索召回不到纯 keywords 词
+
+提交侧规则是 keywords 只进 `keywords` 列、不进 `search_text`（restore 侧已按同规则对齐）。
+后果：
+
+- `memory.search` 工具用四列 ILIKE（含 keywords）→ **能**召回；
+- `persistence/index_entries.search_candidates` 用 `similarity(search_text, query)`
+  → 只出现在 keywords 列的词**不能**召回。
+
+要让后者也召回需把 keywords 拼进 `search_text`（提交 + restore 两处同改），属检索规则
+变更，未做。
+
+### DEV-027 restore 侧与提交侧的 `search_text` 组成不一致（既有）
+
+提交侧 mastery 的 `search_text` 含 `aliases`，restore 侧不含。本次只补齐了 restore 的列
+投影（原先连 `aliases`/`related_topic_keys` 两列都缺失），未改 `search_text` 组成以避免
+扩大范围。登记为既有不一致。
+
+### ADD-088 `frontmatter_patch` 动作不要求 `expected_version`（校验层）
+
+`CommitMutationPlan` 的跨字段校验只对 merge/replace/append_evidence/forget 要求
+`expected_version`，`frontmatter_patch` 不在其中。运行期 `expected_version != current`
+仍会抛 `MemoryVersionConflictError`（`None != int` → 失败），**不会静默覆盖**，只是错误
+发生在提交期而不是契约校验期。consolidation 已显式传 `expected_version`。
+
+### ADD-089 keywords/aliases 含 `|` 时在 index 块里不可往返（既有局限）
+
+v2 index 的 `- keywords: a | b` 用竖线分隔，值里本身含 `|` 会破坏往返。frontmatter 走
+JSON 数组不受影响；文档是事实源、index 可重建，因此与 aliases 同款既有局限一并登记。
+
+### ADD-090 悬空计数的幂等只覆盖"同一批次重跑"
+
+`last_batch_operation_id` 判定的语义是"该行上次登记的批次 == 本次批次则不再 +1"。
+因此：**同批次重跑幂等**；但若批次 B 已提交、之后又重放更早的批次 A，则会再 +1（表里
+没有"已计入批次集合"列）。生产路径不会重放更早的批次（batch 幂等键 + 终态不回退），
+故接受；要严格幂等需要加列或子表。
+
+### DEV-025 §5.9① 要求"读取 index v2"，实现中不读
+
+原文把 index 列进 consolidation 的输入清单。实现**不读** index：它是 learner + 全部
+mastery 的**派生物**（§3.4"index 是可再生派生物"），读完两源后重建它的信息等价；
+真正需要"候选主题区"的地方由 `memory_dangling_links` 提供。若将来 index 引入不来自
+文档的信息（例如人工置顶），需要重新评估。

@@ -153,6 +153,9 @@ def apply_frontmatter_patch(
     **只在 name 与 description 齐备时才把文档升到 schema v2**：v2 解析器要求这两个
     字段必填，半套 frontmatter 渲染成 v2 会让文档下一次读不出来。补丁不完整时保持
     原版本——宁可晚一版升级，也不能写出自己解析不了的文档。
+
+    keywords 与 aliases 一样按"追加 + 去重保序"合并（§3.4：文档是唯一事实源，
+    index 与 PG 索引列都只是它的投影）。
     """
     if patch.name:
         doc.name = patch.name
@@ -160,6 +163,8 @@ def apply_frontmatter_patch(
         doc.description = patch.description
     if patch.aliases:
         doc.aliases = normalize_aliases([*doc.aliases, *patch.aliases])
+    if patch.keywords:
+        doc.keywords = normalize_aliases([*doc.keywords, *patch.keywords])
     if doc.name and doc.description:
         doc.schema_version = max(doc.schema_version, SCHEMA_VERSION_V2)
 
@@ -319,7 +324,9 @@ class MemoryService:
             index_data: dict[str, Any] = {
                 "title": "学习者档案",
                 "summary": "；".join((base.goals or base.preferences or ["学习者档案"])[:3]),
-                "keywords": [],
+                # §3.4 + 2026-09-12 裁决 A：keywords 是 v2 frontmatter 字段，文档是唯一
+                # 事实源；这里只做投影，不写死空列表（生产者是 Phase 7 consolidation 节点）。
+                "keywords": list(base.keywords),
                 # §3.4：alias 是检索键、[[link]] 目标是路由依据，都要进投影与 search_text
                 "aliases": list(base.aliases),
                 "related_topic_keys": list(base.links),
@@ -365,7 +372,8 @@ class MemoryService:
         index_data = {
             "title": mbase.topic_title,
             "summary": mbase.overview or "；".join(mbase.understood[:3]),
-            "keywords": [],
+            # 同 learner：keywords 由文档投影，文档是唯一事实源（§3.4 / 裁决 A）
+            "keywords": list(mbase.keywords),
             "aliases": list(mbase.aliases),
             "related_topic_keys": list(mbase.links),
             "search_text": " ".join(
@@ -1071,7 +1079,7 @@ class MemoryService:
                     active_storage_key=stored.storage_key,
                     active_checksum=stored.checksum,
                 )
-                # 重建检索索引
+                # 重建检索索引：keywords/aliases 从恢复出的文档投影（§3.4 / 裁决 A）
                 memory_type = doc["memory_type"]
                 parsed: Any
                 if memory_type == "learner":
@@ -1081,7 +1089,9 @@ class MemoryService:
                         "summary": "；".join(
                             (parsed.goals or parsed.preferences or ["学习者档案"])[:3]
                         ),
-                        "keywords": [],
+                        "keywords": list(parsed.keywords),
+                        "aliases": list(parsed.aliases),
+                        "related_topic_keys": list(parsed.links),
                         "search_text": " ".join(
                             ["学习者档案", *parsed.preferences, *parsed.goals, *parsed.plans]
                         ),
@@ -1092,7 +1102,9 @@ class MemoryService:
                     index_data = {
                         "title": parsed.topic_title,
                         "summary": parsed.overview or "；".join(parsed.understood[:3]),
-                        "keywords": [],
+                        "keywords": list(parsed.keywords),
+                        "aliases": list(parsed.aliases),
+                        "related_topic_keys": list(parsed.links),
                         "search_text": " ".join(
                             [
                                 parsed.topic_title,
@@ -1166,7 +1178,13 @@ class MemoryService:
     # ---------------- index.md 确定性重建（§8.6.1） ----------------
 
     async def rebuild_index(self, *, user_id: UUID, operation_id: UUID) -> dict[str, Any]:
-        """只索引当前未删除活动版本；并发 commit 时不得清除新 dirty 标记。"""
+        """只索引当前未删除活动版本；并发 commit 时不得清除新 dirty 标记。
+
+        §3.4：index 是**可再生的派生物**，条目字段（name/description/aliases/
+        keywords/related）全部由文档投影而来。这里直接读提交时写进 PG 的同一份投影
+        （``memory_index_entries``），投影行缺失时相应字段退化为空——重建宁可少写
+        一个字段，也不能失败或编造内容。
+        """
         now = _now()
         async with self._session_factory() as session:
             async with session.begin():
@@ -1183,15 +1201,10 @@ class MemoryService:
                 for doc in actives:
                     if doc["memory_type"] == "index":
                         continue
-                    updated = await self._doc_updated_at(session, doc)
-                    entry = IndexEntry(
-                        memory_id=doc["memory_id"],
-                        memory_type=doc["memory_type"],
-                        topic_key=doc["topic_key"],
-                        title=doc["topic_title"] or "学习者档案",
-                        version=int(doc["active_version"]),
-                        updated_at=updated,
+                    projection = await self._index_projection(
+                        session, user_id=user_id, memory_id=doc["memory_id"]
                     )
+                    entry = self._index_entry_from_projection(doc, projection)
                     if doc["memory_type"] == "learner":
                         learner_entry = entry
                     else:
@@ -1201,8 +1214,15 @@ class MemoryService:
                     user_id=user_id,
                     version=new_version,
                     updated_at=now,
+                    # §2.7 决议 A 组「接受 index 格式升版」：重建即产出 v2 块结构，
+                    # 否则 render_index 走 v1 单行分支，description/aliases/keywords
+                    # 全部投影不出来（迁移任务明确不处理 index，由本函数负责升版）。
+                    schema_version=SCHEMA_VERSION_V2,
                     learner=learner_entry,
                     mastery_entries=sorted(entries, key=lambda e: e.memory_id),
+                    # §5.9④：悬空 `[[link]]` 的候选主题区——事实源是 PG 的
+                    # memory_dangling_links（跨批次计数），index 只是它的投影。
+                    candidate_topics=await self._candidate_topic_labels(session, user_id=user_id),
                 )
                 content = render_index(index).encode("utf-8")
                 stored = await self._store.write_immutable_version(
@@ -1254,16 +1274,60 @@ class MemoryService:
             pass
         return {"rebuilt": True, "version": new_version, "dirty_cleared": cleared}
 
-    async def _doc_updated_at(self, session: AsyncSession, doc: dict[str, Any]) -> datetime:
+    async def _candidate_topic_labels(self, session: AsyncSession, *, user_id: UUID) -> list[str]:
+        """§5.9④ 候选主题区的投影：还没到建档门槛的悬空链接（带批次数）。"""
+        from backend.memory.persistence import dangling_links as dangling_repo
+
+        rows = await dangling_repo.list_user_links(session, user_id=user_id, status="candidate")
+        return [f"{row['target']}（{int(row['sighting_batches'])} 批）" for row in rows]
+
+    async def _index_projection(
+        self, session: AsyncSession, *, user_id: UUID, memory_id: str
+    ) -> dict[str, Any] | None:
+        """读 ``memory_index_entries`` 的 v2 投影列（§3.4）。
+
+        提交路径在同一事务里把文档渲染结果写进这张表，因此它就是 index.md 需要的
+        那份投影；重建时直接复用，不再解析一遍 Markdown，避免两处规则各自演化。
+        """
         result = await session.execute(
             text(
-                "SELECT updated_at FROM memory_index_entries "
+                "SELECT title, summary, aliases, keywords, related_topic_keys, updated_at "
+                "FROM memory_index_entries "
                 "WHERE user_id = :user_id AND memory_id = :memory_id"
             ),
-            {"user_id": doc["user_id"], "memory_id": doc["memory_id"]},
+            {"user_id": user_id, "memory_id": memory_id},
         )
-        value = result.scalar()
-        if value is not None:
-            return value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
-        result2 = doc["updated_at"]
-        return result2 if isinstance(result2, datetime) else datetime.fromisoformat(str(result2))
+        row = result.mappings().first()
+        return dict(row) if row else None
+
+    @staticmethod
+    def _index_entry_from_projection(
+        doc: dict[str, Any], projection: dict[str, Any] | None
+    ) -> IndexEntry:
+        """由 memory_documents 行 + 索引投影行构造 index.md 条目（§3.4）。
+
+        投影行缺失（例如历史数据未回填）时 v2 字段退化为空、updated_at 退回文档行：
+        重建必须照常产出 index.md，缺字段只是投影不完整，不能变成重建失败。
+        """
+        raw_updated = (projection or {}).get("updated_at") or doc["updated_at"]
+        updated_at = (
+            raw_updated
+            if isinstance(raw_updated, datetime)
+            else datetime.fromisoformat(str(raw_updated))
+        )
+
+        def _strings(key: str) -> list[str]:
+            return [str(item) for item in ((projection or {}).get(key) or [])]
+
+        return IndexEntry(
+            memory_id=doc["memory_id"],
+            memory_type=doc["memory_type"],
+            topic_key=doc["topic_key"],
+            title=doc["topic_title"] or "学习者档案",
+            version=int(doc["active_version"]),
+            updated_at=updated_at,
+            description=str((projection or {}).get("summary") or ""),
+            aliases=_strings("aliases"),
+            related_topic_keys=_strings("related_topic_keys"),
+            keywords=_strings("keywords"),
+        )

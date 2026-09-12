@@ -66,6 +66,7 @@ USER_TABLES = (
     "memory_graph_links",
     "memory_deleted_evidence_suppressions",
     "memory_review_candidates",
+    "memory_dangling_links",
     "memory_index_entries",
     "memory_commits",
     "memory_documents",

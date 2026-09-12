@@ -20,6 +20,11 @@ from backend.memory.contracts.commands import (
 __all__ = [
     "CandidateExtractionResult",
     "CandidateMemory",
+    "ConsolidationAliasMerge",
+    "ConsolidationConflict",
+    "ConsolidationKeywordSet",
+    "ConsolidationResult",
+    "ConsolidationTopicRoute",
     "ExtractedEvidence",
     "LearnerPatch",
     "MasteryPatch",
@@ -75,3 +80,63 @@ class CandidateExtractionResult(BaseModel):
 
     candidates: list[CandidateMemory] = Field(max_length=20)
     ignored_reason_codes: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# consolidation（memory-rebuild §5.9① 末段）
+# ---------------------------------------------------------------------------
+
+
+class ConsolidationTopicRoute(BaseModel):
+    """主题路由行：``<topic_key> | <一句话掌握状态> | 熟练度``。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    topic_key: str = Field(min_length=1, max_length=120)
+    status_line: str = Field(min_length=1, max_length=200)
+    proficiency: Literal["learning", "proficient", "expert"]
+
+
+class ConsolidationAliasMerge(BaseModel):
+    """近义主题归并候选（§5.9③：必须可回滚、可人工纠错，不得静默删除原命名）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    canonical_topic_key: str = Field(min_length=1, max_length=120)
+    merged_topic_keys: list[str] = Field(min_length=1, max_length=8)
+    reason: str = Field(min_length=1, max_length=300)
+
+
+class ConsolidationKeywordSet(BaseModel):
+    """某个主题的判别性检索词（§2.3 index 注册表的 keywords 来源）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    memory_id: str = Field(min_length=1, max_length=160)
+    keywords: list[str] = Field(min_length=1, max_length=8)
+
+
+class ConsolidationConflict(BaseModel):
+    """并列冲突标注（决议 D 组：更新鲜者优先 + 并列标注，不静默覆盖）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    memory_ids: list[str] = Field(min_length=1, max_length=8)
+    description: str = Field(min_length=1, max_length=300)
+
+
+class ConsolidationResult(BaseModel):
+    """``summary_consolidate_v1`` 的结构化输出。
+
+    **只有这三个摘要段 + 四类治理输出**，模型不生成版本号、路径、稳定 ID 或执行动作；
+    落盘与治理动作全部由服务端代码完成（§9.2 转换规则的同一纪律）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_profile: list[str] = Field(default_factory=list, max_length=20)
+    stable_preferences: list[str] = Field(default_factory=list, max_length=20)
+    topic_routes: list[ConsolidationTopicRoute] = Field(default_factory=list, max_length=200)
+    alias_merges: list[ConsolidationAliasMerge] = Field(default_factory=list, max_length=20)
+    keywords: list[ConsolidationKeywordSet] = Field(default_factory=list, max_length=200)
+    conflicts: list[ConsolidationConflict] = Field(default_factory=list, max_length=20)

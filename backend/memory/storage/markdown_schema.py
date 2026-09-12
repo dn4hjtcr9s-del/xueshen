@@ -16,10 +16,10 @@ from uuid import UUID
 
 FRONT_MATTER_BOUNDARY = "---"
 
-#: schema v1：单行 index 条目，frontmatter 无 name/description/aliases。
+#: schema v1：单行 index 条目，frontmatter 无 name/description/aliases/keywords。
 SCHEMA_VERSION_V1 = 1
-#: schema v2：frontmatter 增加 name/description/aliases，index 改为块结构，
-#: 正文支持 `[[link]]` 互链（memory-rebuild §3.2 / §3.4）。
+#: schema v2：frontmatter 增加 name/description/aliases/keywords，index 改为块结构，
+#: 正文支持 `[[link]]` 互链（memory-rebuild §3.2 / §3.4；keywords 为 2026-09-12 裁决 A）。
 SCHEMA_VERSION_V2 = 2
 #: 新建文档使用的版本。历史 versions/ 永不原地迁移（§2.7 决议 A 组）。
 CURRENT_SCHEMA_VERSION = SCHEMA_VERSION_V2
@@ -117,10 +117,13 @@ def document_links(*bodies: list[str] | str) -> list[str]:
 
 
 def _v2_front_matter(doc: object) -> dict[str, object]:
-    """v2 文档额外写入 name/description/aliases；v1 文档返回空 dict。
+    """v2 文档额外写入 name/description/aliases/keywords；v1 文档返回空 dict。
 
     刻意按 ``doc.schema_version`` 分派而不是"有值就写"：v1 历史文件读进来再写回去
     必须仍是 v1（§5.6 明令不得把 v1 序列化成 v2 覆盖原文件）。
+
+    keywords 空列表也照常渲染成 ``keywords: []``：§3.4 要求 index 与文档的投影
+    逐字段确定，省字段会让"没有关键词"和"没升级到该字段"在文本上无法区分。
     """
     if getattr(doc, "schema_version", SCHEMA_VERSION_V1) < SCHEMA_VERSION_V2:
         return {}
@@ -128,6 +131,7 @@ def _v2_front_matter(doc: object) -> dict[str, object]:
         "name": getattr(doc, "name", None) or "",
         "description": getattr(doc, "description", None) or "",
         "aliases": list(getattr(doc, "aliases", []) or []),
+        "keywords": list(getattr(doc, "keywords", []) or []),
     }
 
 
@@ -192,14 +196,18 @@ class V2ParsedFields(TypedDict, total=False):
     name: str
     description: str
     aliases: list[str]
+    keywords: list[str]
     links: list[str]
 
 
 def _v2_parsed_fields(fields: dict[str, object], links: list[str]) -> V2ParsedFields:
-    """v2 文档的 name/description/aliases/links；v1 文档返回空 dict。
+    """v2 文档的 name/description/aliases/keywords/links；v1 文档返回空 dict。
 
     v2 下 name 与 description 都是**必填**（§3.6：create 必须生成它们，否则注册表
     目录无法回答"这个文件里有什么"）；description 还必须是单行。
+
+    keywords 复用 ``normalize_aliases`` 做"去空白 / 丢空串 / 去重保序"：两者都是
+    检索键、都要求确定性往返，规范化语义完全一致，不另起一份实现以免两处漂移。
     """
     if _schema_version_of(fields) < SCHEMA_VERSION_V2:
         return V2ParsedFields()
@@ -211,6 +219,7 @@ def _v2_parsed_fields(fields: dict[str, object], links: list[str]) -> V2ParsedFi
         name=name,
         description=description,
         aliases=normalize_aliases(_optional_str_list(fields, "aliases")),
+        keywords=normalize_aliases(_optional_str_list(fields, "keywords")),
         links=links,
     )
 
@@ -322,10 +331,11 @@ class LearnerDocument:
     #: 原始 schema 版本。**必须保留**：v1 历史文件读进来还是 v1，渲染回去不得变成 v2
     #: （§5.6「不能把 v1 历史文件序列化成 v2 后覆盖原文件」）。
     schema_version: int = SCHEMA_VERSION_V1
-    #: v2 新增：链接显示名 / 一行描述 / 实体别名 / 正文 `[[link]]` 目标。
+    #: v2 新增：链接显示名 / 一行描述 / 实体别名 / 判别性检索词 / 正文 `[[link]]` 目标。
     name: str | None = None
     description: str | None = None
     aliases: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
     links: list[str] = field(default_factory=list)
     preferences: list[str] = field(default_factory=list)
     goals: list[str] = field(default_factory=list)
@@ -345,6 +355,7 @@ class MasteryDocument:
     name: str | None = None
     description: str | None = None
     aliases: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
     links: list[str] = field(default_factory=list)
     overview: str = ""
     understood: list[str] = field(default_factory=list)
@@ -380,6 +391,11 @@ class IndexDocument:
     schema_version: int = SCHEMA_VERSION_V1
     learner: IndexEntry | None = None
     mastery_entries: list[IndexEntry] = field(default_factory=list)
+    #: v2：悬空 `[[link]]` 的**候选主题区**（memory-rebuild §5.9④：第一次出现只进这里，
+    #: 累计 ≥2 批才正式建档）。计数与来源批次的事实源是 PG 的 ``memory_dangling_links``，
+    #: 这里只是它的投影；条目形如 ``"抛物线（1 批）"``——保留批次计数是为了让人工
+    #: 看到"它还没到建档门槛"。
+    candidate_topics: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +569,11 @@ def _render_index_v2(doc: IndexDocument) -> str:
     parts.extend(["## 主题路由", ""])
     routes = sorted({e.topic_key for e in doc.mastery_entries if e.topic_key})
     parts.extend(f"- {route}" for route in routes)
+    # §5.9④ 候选主题区：只列还没到建档门槛的悬空链接（≥2 批的会被正式建档，
+    # 从而出现在上面的"掌握档案"里）。空的时候**不渲染这一节**，保持既有 index 形状。
+    if doc.candidate_topics:
+        parts.extend(["", "## 候选主题（悬空链接）", ""])
+        parts.extend(f"- {item}" for item in doc.candidate_topics)
     return f"{fm}\n\n" + "\n".join(parts).rstrip("\n") + "\n"
 
 
@@ -700,6 +721,8 @@ def parse_index(text: str) -> IndexDocument:
             schema_version=schema_version,
             learner=learner_blocks[0] if learner_blocks else None,
             mastery_entries=mastery_blocks,
+            # §5.9④ 候选主题区：v1 没有这一节，缺失即空列表（向后兼容）
+            candidate_topics=_parse_list_items(sections.get("候选主题（悬空链接）", "")),
         )
     learner_items = _parse_list_items(sections.get("学习者档案", ""))
     mastery_items = _parse_list_items(sections.get("掌握档案", ""))

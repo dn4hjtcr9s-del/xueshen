@@ -22,9 +22,11 @@ from backend.memory.contracts.errors import (
 )
 from backend.memory.graph.llm_schemas import (
     CandidateExtractionResult,
+    ConsolidationResult,
     MutationPlanResult,
 )
 from backend.memory.graph.policies import (
+    CONSOLIDATE_MAX_OUTPUT_TOKENS,
     EXTRACT_MAX_OUTPUT_TOKENS,
     PLAN_MAX_OUTPUT_TOKENS,
     LLMCallBudget,
@@ -32,6 +34,7 @@ from backend.memory.graph.policies import (
 from backend.memory.graph.prompt_loader import (
     BUILD_MUTATION_PLAN_PROMPT_VERSION,
     EXTRACT_CANDIDATES_PROMPT_VERSION,
+    SUMMARY_CONSOLIDATE_PROMPT_VERSION,
     load_prompt,
 )
 from backend.settings import Settings
@@ -45,7 +48,7 @@ class LLMCallRecord:
 
     prompt_version: str
     model_name: str
-    purpose: Literal["extract_candidates", "build_mutation_plan"]
+    purpose: Literal["extract_candidates", "build_mutation_plan", "consolidate_memory"]
 
 
 class MemoryLLMClient(Protocol):
@@ -58,6 +61,12 @@ class MemoryLLMClient(Protocol):
     async def build_mutation_plan(
         self, *, plan_payload: str, budget: LLMCallBudget
     ) -> tuple[MutationPlanResult, LLMCallRecord]: ...
+
+    async def consolidate_memory(
+        self, *, consolidation_payload: str, budget: LLMCallBudget
+    ) -> tuple[ConsolidationResult, LLMCallRecord]:
+        """批次末段 consolidation（§5.9①）：一次通读全文档，产出摘要 + 治理输出。"""
+        ...
 
 
 class RealMemoryLLMClient:
@@ -79,7 +88,7 @@ class RealMemoryLLMClient:
         self,
         *,
         prompt_version: str,
-        purpose: Literal["extract_candidates", "build_mutation_plan"],
+        purpose: Literal["extract_candidates", "build_mutation_plan", "consolidate_memory"],
         user_payload: str,
         text_format: type[TResult],
         max_output_tokens: int,
@@ -139,6 +148,19 @@ class RealMemoryLLMClient:
             budget=budget,
         )
 
+    async def consolidate_memory(
+        self, *, consolidation_payload: str, budget: LLMCallBudget
+    ) -> tuple[ConsolidationResult, LLMCallRecord]:
+        """consolidation 用更大的输出预算：一次产出摘要三段 + 治理四类（§5.9①）。"""
+        return await self._parse(
+            prompt_version=SUMMARY_CONSOLIDATE_PROMPT_VERSION,
+            purpose="consolidate_memory",
+            user_payload=consolidation_payload,
+            text_format=ConsolidationResult,
+            max_output_tokens=CONSOLIDATE_MAX_OUTPUT_TOKENS,
+            budget=budget,
+        )
+
 
 def _json_schema_format(
     text_format: type[BaseModel],
@@ -190,6 +212,7 @@ class FakeMemoryLLMClient:
 
     extract_queue: list[CandidateExtractionResult | Exception] = field(default_factory=list)
     plan_queue: list[MutationPlanResult | Exception] = field(default_factory=list)
+    consolidate_queue: list[ConsolidationResult | Exception] = field(default_factory=list)
     records: list[LLMCallRecord] = field(default_factory=list)
     model_name: str = "fake-memory-model"
 
@@ -198,7 +221,7 @@ class FakeMemoryLLMClient:
         queue: list[TResult | Exception],
         *,
         prompt_version: str,
-        purpose: Literal["extract_candidates", "build_mutation_plan"],
+        purpose: Literal["extract_candidates", "build_mutation_plan", "consolidate_memory"],
         budget: LLMCallBudget,
     ) -> tuple[TResult, LLMCallRecord]:
         budget.consume()
@@ -231,5 +254,15 @@ class FakeMemoryLLMClient:
             self.plan_queue,
             prompt_version=BUILD_MUTATION_PLAN_PROMPT_VERSION,
             purpose="build_mutation_plan",
+            budget=budget,
+        )
+
+    async def consolidate_memory(
+        self, *, consolidation_payload: str, budget: LLMCallBudget
+    ) -> tuple[ConsolidationResult, LLMCallRecord]:
+        return self._pop(
+            self.consolidate_queue,
+            prompt_version=SUMMARY_CONSOLIDATE_PROMPT_VERSION,
+            purpose="consolidate_memory",
             budget=budget,
         )

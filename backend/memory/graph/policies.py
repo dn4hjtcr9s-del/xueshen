@@ -15,6 +15,9 @@ LLM_MAX_CALLS_PER_ATTEMPT = 2
 LLM_MAX_CALLS_PER_OPERATION = 4
 EXTRACT_MAX_OUTPUT_TOKENS = 3000
 PLAN_MAX_OUTPUT_TOKENS = 4000
+#: consolidation 一次要产出摘要三段 + 治理四类（别名归并/关键词/冲突/主题路由），
+#: 输出比单文档计划大得多；上限仍要显式，避免模型无限展开（§5.9① 末段）。
+CONSOLIDATE_MAX_OUTPUT_TOKENS = 6000
 
 CandidateDisposition = Literal["auto_save", "review", "discard"]
 TopicSimilarityDisposition = Literal["auto_merge", "conflict", "distinct"]

@@ -353,6 +353,8 @@ class FrontMatterPatch(BaseModel):
     ``name`` 一般不变：它是 `[[link]]` 的解析键，改名会让既有链接全部失效，因此
     补丁场景省略即表示"保持不变"，只有 create 时必须给。
     ``description`` 必须是**单行**（它要投影进注册表目录的一行里）。
+    ``keywords`` 是**判别性检索词**（§2.3 / §3.4），生产者是 consolidation 节点，
+    planner 提示词不生成它，因此这里只提供补丁通道、不新增第二个生产者。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -360,6 +362,7 @@ class FrontMatterPatch(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     description: str | None = Field(default=None, max_length=500)
     aliases: list[str] = Field(default_factory=list, max_length=8)
+    keywords: list[str] = Field(default_factory=list, max_length=8)
 
     @field_validator("description")
     @classmethod

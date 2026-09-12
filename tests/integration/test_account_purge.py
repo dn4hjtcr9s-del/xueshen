@@ -85,6 +85,7 @@ PURGE_TEST_TABLES = (
     "memory_graph_links",
     "memory_deleted_evidence_suppressions",
     "memory_review_candidates",
+    "memory_dangling_links",
     "memory_index_entries",
     "memory_commits",
     "memory_documents",
@@ -312,6 +313,14 @@ async def _seed_user_data(
             )
             await session.execute(
                 text(
+                    "INSERT INTO memory_dangling_links (link_id, user_id, target, target_key, "
+                    "status, sighting_batches, source_memory_ids) "
+                    "VALUES (:lid, :u, '椭圆', '椭圆', 'candidate', 1, '[\"mastery:a\"]'::jsonb)"
+                ),
+                {"lid": uuid4(), "u": USER},
+            )
+            await session.execute(
+                text(
                     "INSERT INTO memory_deleted_evidence_suppressions "
                     "(user_id, memory_id, evidence_ref_hash, hash_key_version) "
                     "VALUES (:u, 'learner', :h, 'v1')"
@@ -457,6 +466,7 @@ async def _count_user_rows(session: AsyncSession, user_id: UUID) -> dict[str, in
         "memory_commits": "user_id",
         "memory_index_entries": "user_id",
         "memory_review_candidates": "user_id",
+        "memory_dangling_links": "user_id",
         "memory_deleted_evidence_suppressions": "user_id",
         "memory_graph_links": "user_id",
         "graph_user_states": "user_id",
