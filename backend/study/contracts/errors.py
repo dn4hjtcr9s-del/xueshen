@@ -35,6 +35,10 @@ STUDY_ERROR_CODES: frozenset[str] = frozenset(
         # 实现期补充（§12.2 生命周期端点需要区分计划状态转移错误；
         # 与 D21 的 revision 转移错误分离，避免语义混淆）
         "STUDY_INVALID_PLAN_TRANSITION",
+        # 实现期补充（§17 的 429 限流语义：StudyRateLimitedError 的 code 一直是
+        # RATE_LIMITED，但集合漏登记 → 由 tests/unit/test_error_codes_meta.py 的
+        # 跨域同型检查抓出；与 Memory／auth_service 的同名码语义一致）。
+        "RATE_LIMITED",
     }
 )
 

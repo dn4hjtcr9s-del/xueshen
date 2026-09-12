@@ -7,7 +7,19 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-# 第一版错误码全集（§7.3）
+# 第一版错误码全集（§7.3）。
+#
+# 实现期补充（§7.3 未列、但代码里确有生产者与公开可见面的 code；评审 DEV-062 同类项）：
+#   - ``ACCOUNT_PURGE_IN_PROGRESS``：账号删除 manifest 存在时阻止新建 operation（§21.3 步骤 1）；
+#   - ``ACCOUNT_PURGE_NOT_DRAINED``：purge 时仍有运行中的 operation，可重试等待；
+#   - ``BATCH_ALL_MEMBERS_FAILED``：批量总结整批成员一条都没写进去（评审新发现 12），
+#     经 ``public_error`` 落到批次 operation 行上，必须能被运维一眼认出。
+# 三者的对应异常类分别见本文件 ``AccountPurgeInProgressError``、
+# ``services/account_purge.py::AccountPurgeNotDrainedError``、
+# ``graph/batch.py::BatchAllMembersFailedError``。
+#
+# 本集合与"异常类 ``code``"的双向绑定由 ``tests/unit/test_error_codes_meta.py`` 强制：
+# 新增异常类而忘记登记 → 元测试变红（缺失项会连类名一起列出）。
 ERROR_CODES: frozenset[str] = frozenset(
     {
         "AUTH_REQUIRED",
@@ -31,6 +43,8 @@ ERROR_CODES: frozenset[str] = frozenset(
         "NOTIFICATION_NOT_FOUND",
         "IDENTITY_MAPPING_NOT_FOUND",
         "ACCOUNT_PURGE_ALREADY_RUNNING",
+        "ACCOUNT_PURGE_IN_PROGRESS",
+        "ACCOUNT_PURGE_NOT_DRAINED",
         "SOURCE_TOO_LARGE",
         "CURSOR_INVALID",
         "CURSOR_EXPIRED",
@@ -44,6 +58,9 @@ ERROR_CODES: frozenset[str] = frozenset(
         "DATABASE_UNAVAILABLE",
         "OPERATION_NEEDS_REVIEW",
         "OPERATION_DEAD_LETTER",
+        # 批量总结整批成员全部未能写入（评审新发现 12）：批次 operation 落 dead_letter，
+        # ``public_error.code`` 用这个码与"其它死信原因"区分开。
+        "BATCH_ALL_MEMBERS_FAILED",
         "RATE_LIMITED",
         "INTERNAL_ERROR",
     }

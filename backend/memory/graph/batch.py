@@ -27,6 +27,10 @@ load_batch_members
    批次整体仍能走到终态。已 commit 的成员不受影响（它们各自的 operation 绑定保证幂等）。
    致命的"环境不可用"异常（连接失效/超时等）刻意**不**隔离，直接上抛让 Worker 按既有
    retry/backoff 重试——见 ``batch.MEMBER_FATAL_EXCEPTIONS`` 的说明。
+   "没写进去"还有第二种形态（复审遗留 DEV-072）：节点把错误写进 ``state["errors"]``
+   而没有任何 mutation / 审核候选（例如 ``LLM_BUDGET_EXHAUSTED``）。它与异常隔离走**同一
+   条**重试路径（``release_batch_member``：``attempt_count`` +1，达 ``max_attempts`` 转
+   死信），只是证据从"异常摘要"换成"错误码"；真值表见 ``record_batch_member``。
 4. **fencing 归批次**（评审 C-2）：成员 operation 从未被 claim，真正持有 Lease 的是批次
    operation，因此成员的提交统一把批次 operation_id 当 ``fencing_operation_id`` 传下去
    （``commit_fencing_operation_id``），成员 id 只用于重放键与追溯。
@@ -67,6 +71,12 @@ MEMBER_OUTCOME_NEEDS_REVIEW = "needs_review"
 MEMBER_OUTCOME_SKIPPED = "skipped_already_committed"
 #: 成员体抛异常（评审 I-9 隔离）：该成员没有写入，但批次继续处理后续成员。
 MEMBER_OUTCOME_FAILED = "failed"
+#: **有 errors、无 mutation、无审核候选**（复审遗留 DEV-072 的"errors-only 成员"）：
+#: 节点把错误写进了 ``state["errors"]``（例如 ``LLM_BUDGET_EXHAUSTED``），于是这条证据
+#: **一条都没写进去**。它必须与 ``no_change``（真的无事可做：候选被价值策略全量过滤等）
+#: 区分开——旧实现把两者都判 ``no_change``，批次 succeeded 时 ``settle_batch_members``
+#: 会把它们一起置 succeeded：等于"没写进去却算完成"，而且它再也不会被重试。
+MEMBER_OUTCOME_ERRORS_ONLY = "errors_only"
 #: payload 声明了该成员，但它已取消/已释放/已终态，本批按设计不再处理
 #: （评审新发现 14：这不是"归属丢失"，不能与真·数据不一致混为一谈）。
 MEMBER_OUTCOME_UNAVAILABLE = "skipped_not_processable"
@@ -104,6 +114,26 @@ MAX_BATCH_FAILURE_SUMMARY_ITEMS = 2
 #: 成员失败原因（进 ``batch_failed[].reason``）与异常摘要长度上限（评审 I-9）。
 MEMBER_FAILURE_REASON = "member_exception"
 MAX_FAILURE_MESSAGE_CHARS = 200
+
+#: errors-only 成员的失败原因（复审遗留 DEV-072）：没有异常，只有节点写下的 ``errors``。
+#: 与 ``MEMBER_FAILURE_REASON`` 一起构成"未写入成员"的两类证据（异常隔离 / 出错零写入）。
+MEMBER_ERRORS_REASON = "member_errors_without_mutation"
+
+#: 需要走 :func:`_release_failed_members` → ``release_batch_member`` 的 reason 集合。
+#: **这是"哪些失败成员回证据池"的唯一判定处**：两类失败原因语义相同（成员自己没有写入，
+#: 不是环境不可用），因此共用同一条释放路径（含 ``attempt_count`` +1、达 ``max_attempts``
+#: 转 dead_letter），绝不写第二套。
+RELEASABLE_MEMBER_REASONS: frozenset[str] = frozenset({MEMBER_FAILURE_REASON, MEMBER_ERRORS_REASON})
+
+
+def is_releasable_failure(entry: dict[str, Any]) -> bool:
+    """该 ``batch_failed`` 条目是否要走释放路径（重试出口）。
+
+    不释放的两类：``needs_review``（已经有审核候选，人工结论优先）与没有 reason 的纯诊断
+    条目——它们的证据没有"白跑一趟"，不该回到池子里重复消耗 LLM 预算。
+    """
+    return str(entry.get("reason") or "") in RELEASABLE_MEMBER_REASONS
+
 
 #: **不允许**被成员级隔离吞掉的异常：直接上抛，交给 Worker 既有的 retry/backoff/dead_letter。
 #:
@@ -340,9 +370,22 @@ async def record_batch_member(
 ) -> dict[str, Any]:
     """记录刚处理完的成员 outcome，并累计批次级计数。
 
-    两条入口：成员体正常走完（按 commit_result / review 候选判定 outcome），或成员体被
-    守卫短路（``batch_member_error`` 非空，评审 I-9）——后者记一条 ``failed`` 成员并附
-    稳定 reason 与截断到 200 字符的异常摘要，然后清空信号，让循环继续下一条成员。
+    两个入口：成员体正常走完（按 commit_result / review 候选 / errors 判定 outcome），或成员体
+    被守卫短路（``batch_member_error`` 非空，评审 I-9）——后者记一条 ``failed`` 成员并附稳定
+    reason 与截断到 200 字符的异常摘要，然后清空信号，让循环继续下一条成员。
+
+    **成员级真值表**（复审遗留 DEV-072：必须区分"真的无事可做"与"出错导致什么都没写"）：
+
+    | batch_member_error | mutations | review_ids | errors | outcome | 进 batch_failed | 释放回池 |
+    |---|---|---|---|---|---|---|
+    | 有 | 任意 | 任意 | 任意 | ``failed`` | 是（reason=member_exception） | 是 |
+    | 无 | ≥1 | 任意 | 任意 | ``succeeded`` | **否**（它确实写入了） | 否 |
+    | 无 | 0 | ≥1 | 任意 | ``needs_review`` | 是 | 否（人工结论优先） |
+    | 无 | 0 | 0 | 非空 | ``errors_only`` | 是（reason=member_errors_without_mutation） | 是 |
+    | 无 | 0 | 0 | 空 | ``no_change`` | 否 | 否 |
+
+    两个方向的可见性都由 ``finalize_batch_result`` 保证：未写入的成员逐条进公开 warnings；
+    "写了但伴随 errors"的成员不算作未写入，而是单独发一条"请人工确认完整性"的警告。
     """
     selected = state.get("batch_selected") or {}
     if not selected:
@@ -358,6 +401,9 @@ async def record_batch_member(
         outcome = MEMBER_OUTCOME_NEEDS_REVIEW
     elif mutations:
         outcome = MEMBER_OUTCOME_SUCCEEDED
+    elif errors:
+        # 出错导致零写入：与 no_change 必须分开（否则批次 succeeded 时会被 settle 成 succeeded）
+        outcome = MEMBER_OUTCOME_ERRORS_ONLY
     else:
         outcome = MEMBER_OUTCOME_NO_CHANGE
     entry = {
@@ -381,12 +427,20 @@ async def record_batch_member(
         entry["failed_node"] = str(member_error.get("node") or "")
     elif outcome == MEMBER_OUTCOME_NEEDS_REVIEW:
         entry["reason"] = "needs_review"
+    elif outcome == MEMBER_OUTCOME_ERRORS_ONLY:
+        # 稳定 reason：`_release_failed_members` 按 reason 判定是否释放，这里不能只靠 outcome
+        entry["reason"] = MEMBER_ERRORS_REASON
     processed = list(state.get("batch_processed") or [])
     processed.append(entry)
     failed = list(state.get("batch_failed") or [])
-    if outcome in (MEMBER_OUTCOME_NEEDS_REVIEW, MEMBER_OUTCOME_FAILED) or errors:
-        # "未直接写入的成员"：需人工审核或出错。命名沿用 §5.8 的"失败成员"，
-        # 但语义包含 needs_review——它们同样不会在批次结果里出现 mutation。
+    if outcome in (
+        MEMBER_OUTCOME_NEEDS_REVIEW,
+        MEMBER_OUTCOME_FAILED,
+        MEMBER_OUTCOME_ERRORS_ONLY,
+    ):
+        # "未直接写入的成员"= 需人工审核 / 异常隔离 / 出错零写入三类，它们的 mutation 恒为空。
+        # **写入成功但伴随 errors 的成员不在此列**：旧实现用 `or errors` 把它也算进来，
+        # 于是"本批 N 条成员未直接写入"会把已经写进去的成员算进去。
         failed.append({key: value for key, value in entry.items() if key != "mutations"})
     warnings = list(state.get("batch_warnings") or [])
     warnings.extend(str(item) for item in (state.get("warnings") or []))
@@ -447,11 +501,18 @@ async def finalize_batch_result(
       dead_letter / needs_review 判定；
     - ``warnings`` 还原为批次级累计（成员循环里它被逐条重置过）。
 
-    **批次级失败信号**（评审新发现 12）：``mutations`` 与 ``review_candidate_ids`` 都为空、
-    而 ``batch_failed`` 非空时，整批成员一个都没写进去——此时抛
-    :class:`BatchAllMembersFailedError`（``retryable=False`` 的域错误，经
-    ``classify_failure`` 落 ``dead_letter``）。单成员失败照旧不拖垮整批（§5.8），只有
-    "全灭"才升级为批次级失败；审核候选（``needs_review``）与"无成员/无变化"不受影响。
+    **失败成员与批次终态的衔接**（评审新发现 12 / 复审遗留 DEV-072）：
+
+    1. 释放**永远先做**：``batch_failed`` 里 reason 属于 :data:`RELEASABLE_MEMBER_REASONS`
+       的成员（异常隔离 ``member_exception`` 与出错零写入 ``member_errors_without_mutation``）
+       先各自走 ``release_batch_member``（``attempt_count`` +1，达 ``max_attempts`` 转死信）。
+    2. 再看批次：``mutations`` 与 ``review_candidate_ids`` 都空、而 ``batch_failed`` 非空
+       → 整批一个都没写进去 → 抛 :class:`BatchAllMembersFailedError`（``retryable=False``
+       的域错误，经 ``classify_failure`` 落 ``dead_letter``）；否则批次照常 succeeded
+       （§5.8：单成员失败不拖垮整批）。
+
+    两件事互不覆盖：批次 operation 的终态由第 2 步决定，**成员各自的终态只由第 1 步决定**
+    ——整批全灭时成员也已经各自计过尝试次数（回池或转死信），不会因为批次判死而滞留。
     """
     processed = list(state.get("batch_processed") or [])
     failed = list(state.get("batch_failed") or [])
@@ -475,9 +536,10 @@ async def finalize_batch_result(
             "consolidation": consolidation,
         },
     }
-    # 被成员级隔离捕获、实际没写成功的成员必须**释放回证据池**（review I-9 的重试出口）：
-    # 批次 succeeded 时 settle_batch_members 会把归属成员一律置 succeeded，包括这些失败项，
-    # 它们就永远不会再被处理。释放（清 batch_operation_id）后它们不再被那条 UPDATE 命中。
+    # 没写成功的成员必须**释放回证据池**（review I-9 的重试出口 + DEV-072 的 errors-only
+    # 成员）：批次 succeeded 时 settle_batch_members 会把归属成员一律置 succeeded，包括这些
+    # 没写进去的项，它们就永远不会再被处理。释放（清 batch_operation_id）后它们不再被那条
+    # UPDATE 命中。两类失败原因（异常隔离 / 出错零写入）共用这一条路径。
     release = await _release_failed_members(runtime, failed)
     errors = [] if mutations else list(state.get("errors") or [])
     warnings = _cap_warnings(list(state.get("batch_warnings") or []))
@@ -495,15 +557,29 @@ async def finalize_batch_result(
         # （extra="forbid"）**没有**自由诊断字段，公开 result 只有 warnings 可见。
         warnings.append(f"本批 {len(failed)} 条成员未直接写入（见批次诊断与成员状态）")
     for entry in failed:
-        if entry.get("outcome") != MEMBER_OUTCOME_FAILED:
-            continue
-        # I-9 要求"记录 reason"：reason + 节点 + 异常摘要都进公开可见的 warnings，
-        # 否则成员失败在 operation result 里完全不可观测（结构化明细只存在图 state）。
-        warnings.append(
-            f"成员 {entry.get('operation_id')} 处理失败已隔离: "
-            f"{entry.get('reason')} @{entry.get('failed_node')} "
-            f"({entry.get('error_type')}: {entry.get('error_message')})"
-        )
+        if entry.get("outcome") == MEMBER_OUTCOME_FAILED:
+            # I-9 要求"记录 reason"：reason + 节点 + 异常摘要都进公开可见的 warnings，
+            # 否则成员失败在 operation result 里完全不可观测（结构化明细只存在图 state）。
+            warnings.append(
+                f"成员 {entry.get('operation_id')} 处理失败已隔离: "
+                f"{entry.get('reason')} @{entry.get('failed_node')} "
+                f"({entry.get('error_type')}: {entry.get('error_message')})"
+            )
+        elif entry.get("outcome") == MEMBER_OUTCOME_ERRORS_ONLY:
+            # DEV-072：出错导致零写入的成员同样必须逐条可观测——否则运维只看到"少写了一条"，
+            # 看不出是哪条、为什么（结构化明细只存在图 state 与批次诊断字段里）。
+            warnings.append(
+                f"成员 {entry.get('operation_id')} 处理出错且未写入任何变更，"
+                f"已按失败成员处理（错误码: {','.join(entry.get('error_codes') or []) or '未知'}）"
+            )
+    for entry in processed:
+        if entry.get("mutations") and entry.get("error_codes"):
+            # 反向可见性（真值表第 2 行）：写入成功但过程中有 errors 的成员**不算**未写入，
+            # 但它也不能无声无息——旧实现把它塞进 batch_failed，代价是"未直接写入"计数失真。
+            warnings.append(
+                f"成员 {entry.get('operation_id')} 已写入 {len(entry['mutations'])} 条变更，"
+                f"但过程中有错误（{','.join(entry.get('error_codes') or [])}），请人工确认完整性"
+            )
     if degraded_flags:
         # 结构化标记进不了 MemoryOperationResult（公开契约无自由字段），
         # 因此额外写一条可读警告，保证"末段没做"这件事在运维侧可见。
@@ -525,9 +601,16 @@ async def finalize_batch_result(
 
 
 def _failure_digest(failed: list[dict[str, Any]]) -> str:
-    """把失败成员摘要压成一行（进 ``public_error.message``，那里只保留 500 字符）。"""
+    """把失败成员摘要压成一行（进 ``public_error.message``，那里只保留 500 字符）。
+
+    两类失败成员的证据形态不同：异常隔离有节点名/异常类型，errors-only 只有错误码。
+    """
     parts: list[str] = []
     for entry in failed[:MAX_BATCH_FAILURE_SUMMARY_ITEMS]:
+        if entry.get("reason") == MEMBER_ERRORS_REASON:
+            codes = ",".join(entry.get("error_codes") or []) or "未知"
+            parts.append(f"{entry.get('operation_id')}={MEMBER_ERRORS_REASON}(errors: {codes})")
+            continue
         parts.append(
             f"{entry.get('operation_id')}={entry.get('reason')}"
             f"@{entry.get('failed_node')}({entry.get('error_type')}: {entry.get('error_message')})"
@@ -548,11 +631,17 @@ class _ReleaseSummary:
 async def _release_failed_members(
     runtime: Runtime[MemoryRuntimeContext], failed: list[dict[str, Any]]
 ) -> _ReleaseSummary:
-    """把"成员自身问题"导致的失败成员释放回证据池；环境类异常导致的失败不释放。"""
+    """把"成员自身问题"导致的失败成员释放回证据池；环境类异常导致的失败不释放。
+
+    判定只有一个入口 :func:`is_releasable_failure`（reason ∈
+    :data:`RELEASABLE_MEMBER_REASONS`）：异常隔离与 errors-only 两类失败的语义相同
+    （成员自己没有写入、且不是"环境不可用"），因此共用同一条释放路径——含
+    ``attempt_count`` +1、达 ``max_attempts`` 转 ``dead_letter``，不写第二套。
+    """
     summary = _ReleaseSummary()
     ctx = runtime.context
     for entry in failed:
-        if entry.get("reason") != MEMBER_FAILURE_REASON:
+        if not is_releasable_failure(entry):
             continue
         operation_id = entry.get("operation_id")
         if not operation_id:

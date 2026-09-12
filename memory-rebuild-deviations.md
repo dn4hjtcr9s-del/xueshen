@@ -1075,6 +1075,46 @@ Phase 0 按 §5.2-B 的配置表往 `.env.example` 写了 5 个 §2.6 D4 参数�
 - **DEV-071** 两个**死枚举值**：`retrieval_partial` / `retrieval_unavailable` 在 backend 里无任何生产者（检索节点不产降级标记，唯一出现处是测试夹具）；`graph_failed` 只进 rollout 审计（开放字段）。已在元测试的 `NEVER_PRODUCED` / `ROLLOUT_ONLY` 白名单里显式登记原因。
 - **DEV-072**（Nit）`resolve_resume` 的 fencing 形参未被使用 → 删掉该形参，改在真正的写路径（`mark_deleted` / `register_open` / `discard_open`）补租约守卫。
 
+### 两项待裁决项的裁决结果（用户 2026-09-12：「按你的建议进行」）
+
+**① `BATCH_ALL_MEMBERS_FAILED` 并入公开错误码集合** —— 已登记，并顺带抓出同类漏项：
+
+- `backend/memory/contracts/errors.py::ERROR_CODES` 36 → 39：补 `BATCH_ALL_MEMBERS_FAILED`、
+  `ACCOUNT_PURGE_IN_PROGRESS`（`api/dependencies.py` 抛）、`ACCOUNT_PURGE_NOT_DRAINED`
+  （`graph/maintenance.py` 抛）；
+- 跨域同型漏项：`backend/study/contracts/errors.py` 的 `RATE_LIMITED` 不在
+  `STUDY_ERROR_CODES`（§17 要求该码、测试也在断言它）→ 一并登记；
+- 跨域同型漏项：conversation 的 `TURN_ATTEMPT_EXHAUSTED`（`graph_worker` 发 `turn.failed`
+  时用的码，对外可见却不在 `CONVERSATION_ERROR_CODES`）→ **本轮已补登记**；
+- 交付第四条枚举型元测试 `tests/unit/test_error_codes_meta.py`（20 例）：AST 全量枚举
+  四域 **144 个异常类**与 code 字面量，7 条规则（异常 code ⊆ 集合 / 集合 ⊆ 生产者 /
+  无 code 异常类必须登记原因 / `{"code": "X"}` 字面量 ⊆ 集合 / 白名单双向精确 /
+  集合必须是源码字面量 / app 外壳码必须登记）+ 哨兵防空转；变异演示两次（新增未登记 code
+  → 2 failed 带类名与行号；集合塞死值 → 生产者断言 failed）；
+- **约束力结论（用户要求核实）**：登记前 `ERROR_CODES` 全仓**无任何消费者**（无 import），
+  纯文档；这条元测试是它**唯一的强制约束来源**；
+- **app 外壳两个码（`MAINTENANCE_MODE` / `AUDIT_WRITE_FAILED`）的裁决：保持独立命名空间**
+  （不进任何域集合），在元测试的 `APP_SHELL_ONLY_CODES` 里显式登记 + 生产者证据。理由：它们
+  是传输/外壳层语义（中间件与审计写入失败），不属于任何业务域的领域错误集合，塞进域集合会让
+  "域错误码 = 域内可抛出的错误"这条不变量失真。
+
+**② errors-only 成员的终态语义** —— 按"与 I-9 失败成员同一条路径"修正：
+
+| mutations | review_ids | errors | outcome | 是否进 batch_failed | 是否释放 |
+|---|---|---|---|---|---|
+| ≥1 | 任意 | 任意 | `succeeded` | 否（有 errors 时另发"请人工确认完整性"警告） | 否 |
+| 0 | ≥1 | 任意 | `needs_review` | 是 | 否 |
+| 0 | 0 | 有 | **`errors_only`** | **是** | **是**（复用 `release_batch_member`） |
+| 0 | 0 | 无 | `no_change` | 否 | 否 |
+
+- 顺带修掉同类计数失真：旧的 `or errors` 把"**已写入但伴随 errors**"的成员也算进"未直接
+  写入"，`batch_failed` 计数虚高；
+- 释放判定收敛到唯一入口 `is_releasable_failure` / `RELEASABLE_MEMBER_REASONS`，**复用**
+  既有 `release_batch_member`（`attempt_count`+1、达 `max_attempts` 转死信，无新迁移、无第二套）；
+- **衔接语义**：释放永远先做、批次级判定在后。旧行为下 errors-only 成员在"整批全灭"时既不
+  释放又被 settle 成 dead_letter（永久搁浅），现在成员各自计次回池、批次级终态仍由
+  `BatchAllMembersFailedError` 决定（整批 0 mutation / 0 审核候选 → `dead_letter`）。
+
 ### 复审后仍待决/未修（登记）
 
 - **混合批次里"errors-only 成员"**（有 errors、无 mutation、无审核候选）outcome 仍是 `no_change` 且不会被释放 → 批次 succeeded 时被 `settle_batch_members` 标成 succeeded，等于"没写进去却算完成"。本轮只把最坏情形（整批全灭）修成死信；彻底修需要按成员回写终态。

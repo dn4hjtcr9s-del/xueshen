@@ -40,6 +40,7 @@ from backend.memory.graph.llm_schemas import (
     MutationPlanResult,
 )
 from backend.memory.graph.openai_client import FakeMemoryLLMClient
+from backend.memory.graph.policies import LLMBudgetExceededError
 from backend.memory.graph.runner import LocalLangGraphRunner
 from backend.memory.graph.state import MemoryRuntimeContext
 from backend.memory.persistence import operations as ops_repo
@@ -580,3 +581,136 @@ def _runtime(runtime_context: MemoryRuntimeContext) -> Any:
         context = runtime_context
 
     return _Runtime()
+
+
+# ---------------------------------------------------------------------------
+# errors-only 成员的终态语义（复审遗留 DEV-072）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_errors_only_member_is_released_and_visible_in_warnings(
+    runner: LocalLangGraphRunner,
+    session_factory: async_sessionmaker[AsyncSession],
+    memory_service: MemoryService,
+    fake_llm: FakeMemoryLLMClient,
+    fake_conversation_reader: FakeConversationReader,
+) -> None:
+    """DEV-072：混合批次里"有 errors、无 mutation、无审核候选"的成员不能被算作完成。
+
+    旧行为：该成员记 ``no_change`` 且**不释放**，批次 succeeded 时
+    ``settle_batch_members`` 把它一起置 succeeded —— 等于"没写进去却算完成"，
+    而且它再也不会被重试（公开 warnings 里只有一句笼统的"少写了一条"）。
+    """
+    broken = await _persist_evidence(
+        session_factory, user_id=USER, thread_id="t-errsonly-bad", next_run_at=NOW
+    )
+    good = await _persist_evidence(
+        session_factory,
+        user_id=USER,
+        thread_id="t-errsonly-good",
+        next_run_at=NOW + timedelta(seconds=1),
+    )
+    fake_conversation_reader.add_message(
+        "t-errsonly-bad",
+        SourceItem(source_ref="m1", role="user", content="这条会预算耗尽", occurred_at=NOW),
+    )
+    fake_conversation_reader.add_message(
+        "t-errsonly-good",
+        SourceItem(source_ref="m1", role="user", content="我用配方法解出方程", occurred_at=NOW),
+    )
+    # 第一条成员的抽取"预算耗尽"：节点把 LLM_BUDGET_EXHAUSTED 写进 state["errors"]，
+    # 零候选 → 零 mutation、零审核候选（正是 errors-only 形态）；第二条照常成功
+    fake_llm.extract_queue.append(LLMBudgetExceededError("LLM 调用预算耗尽"))
+    _queue_member(fake_llm, "配方法")
+    batch = await _build_batch(
+        session_factory, user_id=USER, member_ids=[broken.operation_id, good.operation_id]
+    )
+
+    worker = _make_worker(session_factory, runner)
+    row = await _claim_and_execute(session_factory, worker, batch.operation_id)
+
+    # 单成员失败不拖垮整批（§5.8）：有写入 → 批次 succeeded
+    assert row["status"] == "succeeded", row.get("result")
+    warnings = (row["result"] or {}).get("warnings") or []
+    # 未写入计数只算真正没写进去的那条（不是把整批都算进去）
+    assert any("本批 1 条成员未直接写入" in item for item in warnings), warnings
+    # 逐条可观测：是哪条成员、为什么（errors-only 的错误码进公开 warnings）
+    assert any(
+        str(broken.operation_id) in item
+        and "未写入任何变更" in item
+        and "LLM_BUDGET_EXHAUSTED" in item
+        for item in warnings
+    ), warnings
+    assert any("1 条失败成员已释放回证据池" in item for item in warnings), warnings
+
+    # 出错那条必须回到证据池（pending_batch + 归属清空 + attempt_count 计数），
+    # **不能**被 settle 成 succeeded —— 否则这条证据永远不会再被处理
+    released = await _operation_row(session_factory, broken.operation_id)
+    assert released["status"] == "pending_batch", released
+    assert released["batch_operation_id"] is None, "errors-only 成员必须释放回池子"
+    assert int(released["attempt_count"]) == 1, "释放必须留下可观测的尝试计数"
+    # 下一批会重新认领它
+    async with session_factory() as session:
+        pool = await ops_repo.list_pending_batch_members(
+            session, user_id=USER, now=datetime.now(UTC), limit=10
+        )
+    assert [UUID(str(item["operation_id"])) for item in pool] == [broken.operation_id]
+
+    # 正常那条：事实真的写进长期记忆，成员与父批次一致
+    assert await memory_service.get_mastery(user_id=USER, topic_key="配方法") is not None
+    assert await _operation_status(session_factory, good.operation_id) == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_errors_only_member_escalates_to_dead_letter_and_batch_stays_dead_letter(
+    runner: LocalLangGraphRunner,
+    session_factory: async_sessionmaker[AsyncSession],
+    fake_llm: FakeMemoryLLMClient,
+    fake_conversation_reader: FakeConversationReader,
+) -> None:
+    """DEV-072 + 新发现 13 的衔接：errors-only 成员达 ``max_attempts`` 转死信；
+
+    同一条路径下"整批全灭"仍然落 ``dead_letter``（既有行为回归，只是失败原因换成 errors-only）。
+    """
+    member = await _persist_evidence(
+        session_factory, user_id=USER, thread_id="t-errsonly-escalate", next_run_at=NOW
+    )
+    fake_conversation_reader.add_message(
+        "t-errsonly-escalate",
+        SourceItem(source_ref="m1", role="user", content="预算耗尽", occurred_at=NOW),
+    )
+    fake_llm.extract_queue.append(LLMBudgetExceededError("LLM 调用预算耗尽"))
+    # 把该成员推到"下一次失败就到上限"的位置（证据 operation 是 P2 → max_attempts=4）
+    async with session_factory() as session:
+        async with session.begin():
+            updated = await session.execute(
+                text(
+                    "UPDATE memory_operations SET attempt_count = max_attempts - 1 "
+                    "WHERE operation_id = :operation_id RETURNING attempt_count, max_attempts"
+                ),
+                {"operation_id": member.operation_id},
+            )
+            before = updated.mappings().one()
+    assert int(before["max_attempts"]) == 4, before
+
+    batch = await _build_batch(session_factory, user_id=USER, member_ids=[member.operation_id])
+    worker = _make_worker(session_factory, runner)
+    row = await _claim_and_execute(session_factory, worker, batch.operation_id)
+
+    # 整批全灭（0 mutation / 0 审核候选）仍是 dead_letter，且 code 能区分"全灭"
+    assert row["status"] == "dead_letter", row.get("result")
+    error = row["public_error"] or {}
+    assert error.get("code") == batch_module.BATCH_ALL_MEMBERS_FAILED, error
+    message = str(error.get("message"))
+    assert "1/1" in message, message
+    # errors-only 的摘要形态：稳定 reason + 错误码（异常摘要在这种失败里不存在）
+    assert batch_module.MEMBER_ERRORS_REASON in message, message
+    assert "LLM_BUDGET_EXHAUSTED" in message, message
+
+    # 成员级终态由释放路径决定（与批次级 dead_letter 互不覆盖）
+    member_row = await _operation_row(session_factory, member.operation_id)
+    assert member_row["status"] == "dead_letter", "达到 max_attempts 必须转人工审核"
+    assert int(member_row["attempt_count"]) == int(before["max_attempts"])
+    assert member_row["batch_operation_id"] == batch.operation_id, "死信保留归属以便追溯"
+    assert (member_row["public_error"] or {}).get("code") == "OPERATION_DEAD_LETTER"

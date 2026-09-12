@@ -35,6 +35,10 @@ CONVERSATION_ERROR_CODES: frozenset[str] = frozenset(
         "KNOWLEDGE_SUMMARY_INVALID_CURSOR",
         "KNOWLEDGE_SUMMARY_SOURCE_SUPPRESSED",
         "KNOWLEDGE_SUMMARY_REVIEW_NOT_FOUND",
+        # review-2 元测试（test_error_codes_meta.py）抓出的同类漏项：
+        # graph_worker 在 turn 重试次数耗尽时发 turn.failed，payload 里用的就是这个码；
+        # 它对外可见却不在集合里。按"封闭集合必须与生产者双向一致"的纪律补登记。
+        "TURN_ATTEMPT_EXHAUSTED",
     }
 )
 

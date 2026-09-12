@@ -218,6 +218,221 @@ async def test_finalize_empty_batch_stays_succeeded(monkeypatch: pytest.MonkeyPa
 
 
 # ---------------------------------------------------------------------------
+# errors-only 成员的终态语义（复审遗留 DEV-072）：真值表 + 释放 + 可见性
+# ---------------------------------------------------------------------------
+
+
+def _member_state(**overrides: Any) -> dict[str, Any]:
+    """``record_batch_member`` 的输入 state（只关心成员级判定的那几个键）。"""
+    state: dict[str, Any] = {
+        "batch_selected": {"operation_id": "a"},
+        "batch_processed": [],
+        "batch_failed": [],
+        "batch_warnings": [],
+        "warnings": [],
+        "batch_member_error": {},
+        "commit_result": {},
+        "review_candidates": [],
+        "errors": [],
+        "llm_call_count": 0,
+        "batch_llm_call_count": 0,
+    }
+    state.update(overrides)
+    return state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("member_error", "mutations", "review_ids", "errors", "expected", "in_failed", "released"),
+    [
+        # 异常隔离：没有写入，走释放路径
+        ({"reason": "member_exception"}, [], [], [], "failed", True, True),
+        # 真的写进去了：不算"未直接写入"（哪怕过程中有 errors）
+        ({}, [{"mutation_id": "m1"}], [], [], "succeeded", False, False),
+        (
+            {},
+            [{"mutation_id": "m1"}],
+            [],
+            [{"code": "LLM_BUDGET_EXHAUSTED"}],
+            "succeeded",
+            False,
+            False,
+        ),
+        # 有审核候选：人工结论优先，不释放
+        ({}, [], [{"candidate_id": "c1"}], [], "needs_review", True, False),
+        # errors-only：出错导致什么都没写 → 与异常隔离同一条释放路径（DEV-072 的核心）
+        ({}, [], [], [{"code": "LLM_BUDGET_EXHAUSTED"}], "errors_only", True, True),
+        # 真的无事可做：正常终态，不释放
+        ({}, [], [], [], "no_change", False, False),
+    ],
+)
+async def test_record_batch_member_truth_table(
+    member_error: dict[str, Any],
+    mutations: list[dict[str, Any]],
+    review_ids: list[dict[str, str]],
+    errors: list[dict[str, str]],
+    expected: str,
+    in_failed: bool,
+    released: bool,
+) -> None:
+    """三个维度的组合各对应什么 outcome、是否进 batch_failed、是否释放（真值表可执行版）。"""
+    result = await batch_module.record_batch_member(
+        _member_state(
+            batch_member_error=member_error,
+            commit_result={"mutations": mutations},
+            review_candidates=review_ids,
+            errors=errors,
+        ),
+        None,
+    )
+    entry = result["batch_processed"][0]
+    assert entry["outcome"] == expected
+    # batch_failed 里的条目是 entry 去掉 mutations 的投影，因此按 operation_id 比较
+    failed_ids = [item["operation_id"] for item in result["batch_failed"]]
+    assert (entry["operation_id"] in failed_ids) == in_failed, result["batch_failed"]
+    assert batch_module.is_releasable_failure(entry) is released
+    assert len(result["batch_failed"]) == (1 if in_failed else 0)
+
+
+class _FakeSession:
+    """``_release_failed_members`` 只需要一个带 ``begin()`` 的 session（不碰数据库）。"""
+
+    def begin(self) -> Any:
+        class _Begin:
+            async def __aenter__(self) -> None:
+                return None
+
+            async def __aexit__(self, *exc: Any) -> bool:
+                return False
+
+        return _Begin()
+
+    async def __aenter__(self) -> _FakeSession:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        return False
+
+
+class _FakeRuntime:
+    class context:
+        @staticmethod
+        def session_factory() -> _FakeSession:
+            return _FakeSession()
+
+
+@pytest.mark.asyncio
+async def test_release_failed_members_covers_errors_only_not_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """释放路径只有一个判定入口：异常隔离 + errors-only 释放，needs_review 不释放。"""
+    from backend.memory.persistence import operations as ops_repo
+
+    released_ids: list[str] = []
+
+    async def fake_release(session: Any, *, operation_id: Any) -> Any:
+        released_ids.append(str(operation_id))
+        return ops_repo.BatchMemberReleaseOutcome(
+            status=ops_repo.BATCH_MEMBER_RELEASED, attempt_count=1
+        )
+
+    monkeypatch.setattr(ops_repo, "release_batch_member", fake_release)
+    ids = {name: uuid4() for name in ("a", "b", "c", "d")}
+    summary = await batch_module._release_failed_members(
+        _FakeRuntime(),  # 只用到 .context.session_factory()，不碰真实数据库
+        [
+            _failed_entry(str(ids["a"])),
+            {
+                "operation_id": str(ids["b"]),
+                "outcome": batch_module.MEMBER_OUTCOME_ERRORS_ONLY,
+                "reason": batch_module.MEMBER_ERRORS_REASON,
+                "error_codes": ["LLM_BUDGET_EXHAUSTED"],
+            },
+            {
+                "operation_id": str(ids["c"]),
+                "outcome": batch_module.MEMBER_OUTCOME_NEEDS_REVIEW,
+                "reason": "needs_review",
+            },
+            {"operation_id": str(ids["d"]), "outcome": batch_module.MEMBER_OUTCOME_NO_CHANGE},
+        ],
+    )
+    # 只放行两类"成员自己没写入"的失败；needs_review 与 no_change 都不释放
+    assert released_ids == [str(ids["a"]), str(ids["b"])]
+    assert summary.released == 2
+    assert summary.dead_lettered == 0
+
+
+@pytest.mark.asyncio
+async def test_finalize_mixed_batch_releases_errors_only_member_and_warns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """混合批次（一条正常 + 一条 errors-only）：批次 succeeded，错误那条被释放且公开可见。"""
+    stub = _ReleaseStub()
+    monkeypatch.setattr(batch_module, "_release_failed_members", stub)
+    errors_only = {
+        "operation_id": "err-member",
+        "outcome": batch_module.MEMBER_OUTCOME_ERRORS_ONLY,
+        "reason": batch_module.MEMBER_ERRORS_REASON,
+        "error_codes": ["LLM_BUDGET_EXHAUSTED"],
+        "mutations": [],
+        "review_candidate_ids": [],
+    }
+    state = _state(
+        batch_processed=[
+            errors_only,
+            {
+                "operation_id": "ok-member",
+                "outcome": batch_module.MEMBER_OUTCOME_SUCCEEDED,
+                "mutations": [{"mutation_id": "m1"}],
+                "review_candidate_ids": [],
+            },
+        ],
+        batch_failed=[errors_only],
+        batch_warnings=[],
+    )
+    result = await batch_module.finalize_batch_result(state, None)
+
+    # 批次本身仍 succeeded（§5.8：单成员失败不拖垮整批），且带上正常成员写入的 mutation
+    assert result["commit_result"]["mutations"] == [{"mutation_id": "m1"}]
+    warnings = result["warnings"]
+    # 计数只算真正没写进去的那一条（旧实现会因为 `or errors` 而虚高）
+    assert any("本批 1 条成员未直接写入" in item for item in warnings), warnings
+    # 逐条可观测：是哪条成员、为什么（错误码）
+    assert any(
+        "err-member" in item and "未写入任何变更" in item and "LLM_BUDGET_EXHAUSTED" in item
+        for item in warnings
+    ), warnings
+    # 释放路径收到的是**全部** batch_failed 条目，由 is_releasable_failure 决定放行谁
+    assert [entry["operation_id"] for entry in stub.calls[0]] == ["err-member"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_written_member_with_errors_is_not_counted_unwritten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """写入成功但伴随 errors 的成员不算"未直接写入"，但要有"请人工确认完整性"的警告。"""
+    stub = _ReleaseStub()
+    monkeypatch.setattr(batch_module, "_release_failed_members", stub)
+    written = {
+        "operation_id": "partial-member",
+        "outcome": batch_module.MEMBER_OUTCOME_SUCCEEDED,
+        "error_codes": ["LLM_BUDGET_EXHAUSTED"],
+        "mutations": [{"mutation_id": "m1"}],
+        "review_candidate_ids": [],
+    }
+    result = await batch_module.finalize_batch_result(
+        _state(batch_processed=[written], batch_failed=[], batch_warnings=[]), None
+    )
+    warnings = result["warnings"]
+    assert not any("未直接写入" in item for item in warnings), warnings
+    assert any(
+        "partial-member" in item and "已写入 1 条变更" in item and "人工确认完整性" in item
+        for item in warnings
+    ), warnings
+    assert stub.calls[0] == []
+
+
+# ---------------------------------------------------------------------------
 # 纯函数
 # ---------------------------------------------------------------------------
 
