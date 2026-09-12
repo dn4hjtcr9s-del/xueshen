@@ -5,14 +5,18 @@
 - ``verify-manifest``：只读扫描五类不一致；发现即退出码 1，空则 0（CI 断言用）；
 - ``reconcile-orphans``：扫描 + :meth:`RolloutReconciler.repair`；默认演练，``--apply`` 才写；
 - ``export-thread``：按 ordinal 顺序把该 thread 的全部段拼成一个 JSONL 导出；
-- ``delete-thread-rollouts``：先写 tombstone，再删除对象；默认演练；
+- ``delete-thread-rollouts``：先删对象与热段、再落 tombstone；默认演练；
 - ``retention-scan``：列出并按需清理超过保留期的 ``sealed`` 段；默认演练。
 
 依赖由 CLI 自己装配，不读任何私有连接配置：``Settings`` 的 ``conversation_database_url``
-与 ``conversation_rollout_root``，对象存储固定用
-:class:`~backend.conversation.rollout.object_store.LocalRolloutObjectStore`。
-七牛 Kodo 适配器尚未落地（§5.5 Phase 3），因此配置成 ``kodo`` 时**显式失败**，
+与 ``conversation_rollout_root``，对象存储按 ``conversation_rollout_object_store``
+经 :func:`~backend.conversation.rollout.factory.build_rollout_object_store` 构造
+（worker / app / CLI 三个装配点共用，I-7）；配置成 ``kodo`` 时只有凭据缺失才失败，
 不静默切回本地——静默降级会让运维以为对象已经上了云。
+
+删除类子命令（``delete-thread-rollouts`` / ``retention-scan``）除对象镜像外还会删除
+**本地热缓存段文件**（``{root}/threads/...``，C-3）：只删 ``objects/`` 会让用户原文
+留在磁盘上，而 tombstone 之后再没有工具能发现它。
 
 退出码：0 成功；1 发现不一致或存在失败的操作；2 前置条件不满足（配置/对象存储不可用）。
 """
@@ -43,6 +47,7 @@ from backend.conversation.persistence.database import (
     create_conversation_session_factory,
 )
 from backend.conversation.rollout.codec import sha256_hex
+from backend.conversation.rollout.object_store import delete_hot_segment
 from backend.conversation.rollout.reconcile import (
     FAILURE_PREFIX,
     ReconcileReport,
@@ -232,7 +237,7 @@ async def _export_thread(args: argparse.Namespace) -> int:
 
 
 async def _delete_thread_rollouts(args: argparse.Namespace) -> int:
-    """先把该 thread 的段全部标 tombstone，再逐个删除对象。"""
+    """逐个删除对象与本地热段，**全部成功后才**落 tombstone。"""
     dry_run = _resolve_dry_run(args)
     async with _open_runtime() as runtime:
         if dry_run:
@@ -241,13 +246,13 @@ async def _delete_thread_rollouts(args: argparse.Namespace) -> int:
             keys = [str(segment["object_key"]) for segment in segments if segment.get("object_key")]
             print(
                 f"[dry-run] 将把 thread {args.thread_id} 的 {len(segments)} 个段标记为 deleted，"
-                f"并删除 {len(keys)} 个对象："
+                f"并删除 {len(keys)} 个对象（含本地热缓存段）："
             )
             for key in keys:
                 print(f"  待删除对象 {key}")
             print("[dry-run] 未产生任何写操作；确认后加 --apply 执行")
             return 0
-        # 顺序（与 thread_deletion 统一）：**先把对象删干净，再落 tombstone**。
+        # 顺序（与 thread_deletion 统一）：**先把对象与热段删干净，再落 tombstone**。
         # 反过来的话，对象删除失败会留下"manifest 已是 deleted、对象还在"的残留；
         # 而 reconcile 的孤儿判定只把**非 deleted** 行的 object_key 当作有效引用，
         # 这种残留对象将永远不被报为孤儿 —— 静默的数据泄漏。
@@ -258,9 +263,11 @@ async def _delete_thread_rollouts(args: argparse.Namespace) -> int:
         for key in keys:
             try:
                 await runtime.object_store.delete(key=key)
-            except ObjectStoreError as exc:
+                # C-3：热缓存段与对象镜像同构，必须一并删除（Kodo 等无热缓存实现 no-op）
+                await delete_hot_segment(object_store=runtime.object_store, key=key)
+            except (ObjectStoreError, OSError) as exc:
                 failed.append(key)
-                print(f"对象删除失败：{key}（{exc}）", file=sys.stderr)
+                print(f"对象/热段删除失败：{key}（{exc}）", file=sys.stderr)
         if failed:
             print(
                 f"有 {len(failed)} 个对象未删除成功；段**未**标 tombstone，"
@@ -271,12 +278,12 @@ async def _delete_thread_rollouts(args: argparse.Namespace) -> int:
         async with runtime.session_factory() as session:
             async with session.begin():
                 await manifests_repo.mark_thread_deleted(session, thread_id=args.thread_id)
-        print(f"thread {args.thread_id}：对象删除 {len(keys)} 个，段已标记 deleted")
+        print(f"thread {args.thread_id}：对象与热段删除 {len(keys)} 个，段已标记 deleted")
         return 0
 
 
 async def _retention_scan(args: argparse.Namespace) -> int:
-    """列出 ``created_at`` 早于阈值的 ``sealed`` 段，``--apply`` 时删除对象并标 tombstone。"""
+    """列出 ``created_at`` 早于阈值的 ``sealed`` 段，``--apply`` 时删对象/热段并标 tombstone。"""
     dry_run = _resolve_dry_run(args)
     cutoff = datetime.now(UTC) - timedelta(days=args.older_than_days)
     async with _open_runtime() as runtime:
@@ -297,7 +304,7 @@ async def _retention_scan(args: argparse.Namespace) -> int:
                 print(f"  {row['object_key']}（segment={row['segment_id']}）")
             print("[dry-run] 未产生任何写操作；确认后加 --apply 执行")
             return 0
-        # 与 delete-thread-rollouts 同序：先删对象，逐个成功后才落 tombstone。
+        # 与 delete-thread-rollouts 同序：先删对象与热段，逐个成功后才落 tombstone。
         marked = 0
         deleted = 0
         failed: list[str] = []
@@ -308,10 +315,12 @@ async def _retention_scan(args: argparse.Namespace) -> int:
                 continue
             try:
                 await runtime.object_store.delete(key=str(object_key))
-            except ObjectStoreError as exc:
+                # C-3：retention 也必须删掉本地热缓存段，否则正文残留在磁盘上
+                await delete_hot_segment(object_store=runtime.object_store, key=str(object_key))
+            except (ObjectStoreError, OSError) as exc:
                 failed.append(str(object_key))
                 print(
-                    f"对象删除失败，段保持 sealed 待下次 retention：{object_key}（{exc}）",
+                    f"对象/热段删除失败，段保持 sealed 待下次 retention：{object_key}（{exc}）",
                     file=sys.stderr,
                 )
                 continue

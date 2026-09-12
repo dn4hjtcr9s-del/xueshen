@@ -9,6 +9,10 @@ delete_thread 是 deleting → deleted 的唯一协调器：
 - 任意 Outbox dead_letter 或本地清理失败时保持 deleting、Job 标记需人工处理并告警；
 - 只有本地清理完成且本 generation 全部 deletion Outbox delivered 时，
   同一事务把 Thread 置为 deleted 并完成自身。
+
+rollout 段清理（memory-rebuild §1.8）：对象镜像、本地热缓存段文件、manifest
+tombstone 三者必须同批落地——缺对象存储时**拒绝**落 tombstone（I-6），
+否则会退化成"没删数据却宣称删了"。
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from backend.conversation.persistence import outbox as outbox_repo
 from backend.conversation.persistence import rollout_manifests as rollout_manifests_repo
 from backend.conversation.persistence import threads as threads_repo
 from backend.conversation.persistence import turns as turns_repo
+from backend.conversation.rollout.object_store import delete_hot_segment
 
 DELETION_WAIT_SECONDS = 15
 REVIEW_WAIT_SECONDS = 60
@@ -73,7 +78,12 @@ async def execute_delete_thread(
     # 反过来的话，对象删除失败会留下"manifest 已删但对象还在"的静默残留；
     # 而这个顺序下若 tombstone 事务回滚，只会留下"manifest 指向已删对象"，
     # 由 reconcile 检出并收敛（fail-safe）。
-    # 任何对象删除失败都不返回 done，让 Job 下轮重试。
+    # 任何一步失败都不返回 done，让 Job 下轮重试。
+    #
+    # C-3：对象镜像之外还有**本地热缓存段**（``{root}/threads/...``，与 object key
+    # 同构）。只删 ``objects/`` 会让用户原文留在磁盘上，而 tombstone 之后
+    # ``list_by_thread`` 过滤 deleted、``retention-scan`` 只扫 sealed、``reconcile``
+    # 只列 ``rollouts/`` 前缀——残留将永久不可发现。必须同时 unlink 热段文件。
     rollout_keys = [
         str(row["object_key"])
         for row in await rollout_manifests_repo.list_by_thread(session, thread_id)
@@ -81,28 +91,41 @@ async def execute_delete_thread(
     ]
     if rollout_keys:
         if object_store is None:
-            logging.getLogger("conversation.worker").warning(
-                "delete_thread 未装配对象存储，跳过 rollout 对象删除: thread_id=%s keys=%d",
+            # I-6：缺少对象存储时**拒绝落 tombstone**。此前只记一行 warning 然后照样
+            # 标 deleted，等于"没删数据却宣称删了"：enable → disable 之后再删 thread，
+            # 对象将永久不可达。这里保持 deleting，让可重试的 Job 下轮再来。
+            logging.getLogger("conversation.worker").error(
+                "delete_thread 未装配对象存储，拒绝落 tombstone: thread_id=%s keys=%d",
                 thread_id,
                 len(rollout_keys),
             )
-        else:
-            try:
-                for key in rollout_keys:
-                    await object_store.delete(key=key)
-            except Exception:
-                logging.getLogger("conversation.worker").exception(
-                    "delete_thread 删除 rollout 对象失败，保持 deleting 待重试: thread_id=%s",
-                    thread_id,
-                )
-                await jobs_repo.wait_job(
-                    session,
-                    job_id,
-                    worker_id=worker_id,
-                    wait_seconds=DELETION_WAIT_SECONDS,
-                    error_code="ROLLOUT_OBJECT_DELETE_FAILED",
-                )
-                return "wait"
+            await jobs_repo.wait_job(
+                session,
+                job_id,
+                worker_id=worker_id,
+                wait_seconds=DELETION_WAIT_SECONDS,
+                error_code="ROLLOUT_OBJECT_STORE_MISSING",
+            )
+            return "wait"
+        try:
+            for key in rollout_keys:
+                await object_store.delete(key=key)
+                # 无热缓存能力的实现（Kodo）是安全 no-op；Local 必须真的删掉文件，
+                # 删不掉（权限/IO）就抛错，走下面的可重试分支——不吞掉失败。
+                await delete_hot_segment(object_store=object_store, key=key)
+        except Exception:
+            logging.getLogger("conversation.worker").exception(
+                "delete_thread 删除 rollout 对象/热段失败，保持 deleting 待重试: thread_id=%s",
+                thread_id,
+            )
+            await jobs_repo.wait_job(
+                session,
+                job_id,
+                worker_id=worker_id,
+                wait_seconds=DELETION_WAIT_SECONDS,
+                error_code="ROLLOUT_OBJECT_DELETE_FAILED",
+            )
+            return "wait"
         await rollout_manifests_repo.mark_thread_deleted(session, thread_id=thread_id)
 
     # 3. 检查本 generation 全部 deletion Outbox（R3/S3）

@@ -22,6 +22,11 @@ checkpoint 不跨轮，而 rollout 的 `memory_prime` 记录按 §1.5「大对�
 hash 与 pin 不一致时再写一条（说明"这个 thread 中途换了摘要"），一致则不写。提示词因此
 以"每轮最新摘要"为准，代价是跨日长 thread 可能换用新摘要——用户已确认接受。
 
+**注入有界（review I-5）**：注册表目录先由服务端按条数上限
+（`memory_tools.PRIME_INDEX_ENTRIES_MAX`）截断，这里再按 `conversation_memory_token_budget`
+裁一次；任一侧发生裁剪都会置 `index_entries_truncated=true` 并发 `memory_prime_degraded`，
+**不静默丢内容**（服务端响应用同名可选字段表达同一事实）。
+
 失败分类（§16.2 / 评审 P1-5）：认证/权限与 4xx 契约错误 → 抛错使 Turn 失败；
 5xx/超时/网络 → unavailable 快照继续本轮对话。
 """
@@ -35,6 +40,7 @@ from uuid import UUID
 from backend.conversation.contracts.errors import MemoryUnavailableError
 from backend.conversation.graph.state import ConversationRuntimeContext
 from backend.conversation.rollout.recorder import record_rollout
+from backend.conversation.services.context_service import trim_prime_to_budget
 
 
 async def recall_memory(
@@ -96,27 +102,64 @@ def is_first_turn(state: dict[str, Any]) -> bool:
 async def _recall_via_prime(
     state: dict[str, Any], *, runtime: ConversationRuntimeContext
 ) -> dict[str, Any]:
-    """prime 模式：每轮取最新 prime；首轮 pin，后续轮按 hash 变化补 pin（见模块 docstring）。"""
+    """prime 模式：每轮取最新 prime；首轮 pin，后续轮按 hash 变化补 pin（见模块 docstring）。
+
+    review I-5：注入前按 token 预算裁剪注册表目录。服务端的条数上限只是第一道界
+    （`PRIME_INDEX_ENTRIES_MAX`），提示词体积必须由这里的预算兜底，否则主题多的用户
+    仍会把首轮注入与 checkpoint 撑大。
+    """
     prime = await _build_prime(runtime, state)
+    prime = _apply_prime_budget(runtime, prime)
     if is_first_turn(state):
         await _pin_prime(runtime, state, prime)
     else:
         await _refresh_pin_if_changed(runtime, state, prime)
-    if prime.get("degraded"):
+    if prime.get("degraded") or prime.get("index_entries_truncated"):
         await _emit_degraded(runtime, state, "memory_prime_degraded")
+    truncated = _is_prime_truncated(prime)
     return {
         "memory_prime": prime,
         "memory_context": {
-            # 快照 status 只表达"注入的内容是否被截断"：summary 缺失（当前没有生产者）
-            # 是空状态而不是内容退化，由 `memory_prime_degraded` 事件标记记录可观测性。
-            "status": "degraded" if prime.get("summary_truncated") else "available",
+            # 快照 status 只表达"注入的内容是否被截断"（summary 或目录）：summary 缺失
+            # （当前没有生产者）是空状态而不是内容退化，由 `memory_prime_degraded`
+            # 事件标记记录可观测性。
+            "status": "degraded" if truncated else "available",
             "prime": prime,
-            "truncated": bool(prime.get("summary_truncated")),
+            "truncated": truncated,
             # prime 模式下不做 query 检索，recommendations 保持为空，
             # 由工具按需下沉（§2.4 D3）
             "recommendations": [],
         },
     }
+
+
+def _apply_prime_budget(
+    runtime: ConversationRuntimeContext, prime: dict[str, Any]
+) -> dict[str, Any]:
+    """按 ``conversation_memory_token_budget`` 裁剪 prime 目录（review I-5）。
+
+    复用与 memory 工具结果、旧 memory 读取同一份预算，而不是新开 setting：三者都是
+    "长期记忆进提示词"的内容，共用预算才能让快照申报的 `budgets.memory_tokens` 与
+    实际注入量一致。裁剪后 `index_entries_truncated=true`，并由调用方发
+    `memory_prime_degraded`——**不静默丢内容**。
+    """
+    budget_tokens = int(getattr(runtime.settings, "conversation_memory_token_budget", 3000) or 0)
+    trimmed, truncated = trim_prime_to_budget(
+        prime, budget_tokens=budget_tokens, token_counter=runtime.token_counter
+    )
+    if truncated:
+        # 用户 id 不入日志（隐私约定）：只记保留条数与预算
+        runtime.logger.warning(
+            "memory_prime_index_truncated: kept=%d budget_tokens=%d",
+            len(trimmed.get("index_entries") or []),
+            budget_tokens,
+        )
+    return trimmed
+
+
+def _is_prime_truncated(prime: dict[str, Any]) -> bool:
+    """prime 注入的内容是否被截断（summary 小预算、目录条数上限或目录预算）。"""
+    return bool(prime.get("summary_truncated")) or bool(prime.get("index_entries_truncated"))
 
 
 async def _build_prime(
@@ -149,7 +192,9 @@ async def _pin_prime(
             "summary_hash": str(prime.get("summary_hash") or _summary_hash(prime)),
             "schema_version": str(prime.get("schema_version") or "v1"),
             "generated_at": prime.get("generated_at"),
-            "truncated": bool(prime.get("summary_truncated")),
+            # truncated 含目录裁剪（review I-5）：pin 里记的条目数是**实际注入**的条数，
+            # 审计时据此能看出这个 thread 的固定提示词是否被裁过
+            "truncated": _is_prime_truncated(prime),
             "index_entry_count": len(prime.get("index_entries") or []),
         },
     )

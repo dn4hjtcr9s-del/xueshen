@@ -64,6 +64,17 @@ class MemoryManagerState(TypedDict, total=False):
     #: 本批使用的提示词版本（§5.8 要求批量 state 保存 prompt version，便于回查"这批是
     #: 哪版提示词产出的"；与 memory_commits.prompt_version 同源）。
     batch_prompt_version: str
+    #: 提交用 fencing operation（评审 C-2）：`begin_batch_member` 把 `operation` 投影成
+    #: **成员** operation 后，唯一还持有 Lease 的是**批次** operation；成员自己的行是
+    #: `pending_batch` 且 `locked_by` 为空，拿它做 commit 标记 CAS 恒 0 行。这个键保存
+    #: 批次 operation_id，提交节点把它作为 `fencing_operation_id` 传给 MemoryService：
+    #: CAS 打批次行（真失租保护），mutation 重放键/`memory_commits.operation_id`/
+    #: evidence 绑定仍用成员 operation_id（可追溯、可重放）。
+    commit_fencing_operation_id: str
+    #: 单成员失败的短路信号（评审 I-9）：批量分支的成员体节点被逐节点守卫包裹，任一节点
+    #: 抛异常就写入 `{"reason", "message", "node"}`，条件边据它直接跳 `record_batch_member`
+    #: （该成员记 `batch_failed`），随后由 `record_batch_member` 清空并继续下一条成员。
+    batch_member_error: dict[str, Any]
 
 
 class Clock(Protocol):

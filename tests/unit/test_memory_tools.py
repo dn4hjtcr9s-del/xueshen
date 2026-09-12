@@ -31,6 +31,7 @@ from backend.memory.contracts.results import (
 )
 from backend.memory.services import memory_tools as tools
 from backend.memory.services.memory_tools import (
+    PRIME_INDEX_ENTRIES_MAX,
     PRIME_SUMMARY_MAX_BYTES,
     PRIME_SUMMARY_MAX_CHARS,
     FilePrimeSummaryReader,
@@ -113,8 +114,13 @@ def _hit_columns(row: dict[str, Any], query: str) -> bool:
     return any(needle in haystack.casefold() for haystack in haystacks)
 
 
-def _install_registry(monkeypatch: Any, registry: FakeRegistry) -> None:
-    """用内存实现替换两个 SQL 边界：语义与 SQL 一致，且严格按 user_id 过滤。"""
+def _install_registry(monkeypatch: Any, registry: FakeRegistry) -> list[int | None]:
+    """用内存实现替换两个 SQL 边界：语义与 SQL 一致，且严格按 user_id 过滤。
+
+    返回目录投影收到的 `limit` 实参序列（供"有界返回"断言：必须只取 上限+1 条，
+    不能把整份注册表读进来）。
+    """
+    projection_limits: list[int | None] = []
 
     async def fake_fetch_search_rows(
         session: Any,
@@ -132,8 +138,13 @@ def _install_registry(monkeypatch: Any, registry: FakeRegistry) -> None:
         rows.sort(key=lambda row: tool_hit_sort_key(row, queries))
         return rows[:limit]
 
-    async def fake_fetch_index_projection(session: Any, *, user_id: UUID) -> list[dict[str, Any]]:
+    async def fake_fetch_index_projection(
+        session: Any, *, user_id: UUID, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        projection_limits.append(limit)
         rows = sorted(registry.rows_for(user_id), key=lambda row: str(row["memory_id"]))
+        if limit is not None:
+            rows = rows[:limit]
         return [
             {
                 "memory_id": row["memory_id"],
@@ -146,6 +157,7 @@ def _install_registry(monkeypatch: Any, registry: FakeRegistry) -> None:
 
     monkeypatch.setattr(tools, "fetch_search_rows", fake_fetch_search_rows)
     monkeypatch.setattr(tools, "fetch_index_projection", fake_fetch_index_projection)
+    return projection_limits
 
 
 class FakeMemoryService:
@@ -524,6 +536,65 @@ async def test_prime_valid_summary_passes_through(monkeypatch: Any) -> None:
     assert response.summary == "## 用户画像\n偏好例题驱动"
     assert response.generated_at == NOW
     assert response.index_entries == []
+    assert response.index_entries_truncated is False
+
+
+def _fill_registry(registry: FakeRegistry, count: int) -> None:
+    """灌入 count 条目录条目（memory_id 升序即注入序）。"""
+    for index in range(count):
+        registry.add(
+            USER_A,
+            _entry(
+                f"mastery:{index:04d}",
+                title=f"主题{index}",
+                summary="条目描述",
+                keywords=["关键词"],
+            ),
+        )
+
+
+async def test_prime_index_entries_are_bounded_with_decidable_signal(monkeypatch: Any) -> None:
+    """review I-5：主题数超过上限时响应**有界**，且用 `index_entries_truncated` 表达截断。
+
+    契约里没有该字段时服务端只能全量返回（ADD-047 的旧行为）；这里锁死新语义：
+    仍是按 memory_id 升序的**确定性前缀**，既有字段一个不少，截断事实可判定。
+    """
+    registry = FakeRegistry()
+    _fill_registry(registry, PRIME_INDEX_ENTRIES_MAX + 5)
+    limits = _install_registry(monkeypatch, registry)
+
+    # 用合法 summary 隔离变量：此时 degraded 只可能来自目录截断
+    summary = StaticSummaryReader("v1\n## 用户画像\n偏好例题驱动".encode(), NOW)
+    response = await _service(registry=registry, summary_reader=summary).prime(user_id=USER_A)
+
+    assert len(response.index_entries) == PRIME_INDEX_ENTRIES_MAX
+    assert response.index_entries_truncated is True
+    # 目录被截断同样算"内容不完整"：既有 degraded 信号一并置位
+    assert response.degraded is True
+    assert response.summary_truncated is False
+    # 确定性前缀：保留的是前 MAX 条，不是随意丢弃
+    assert [entry.memory_id for entry in response.index_entries[:3]] == [
+        "mastery:0000",
+        "mastery:0001",
+        "mastery:0002",
+    ]
+    assert response.index_entries[-1].memory_id == f"mastery:{PRIME_INDEX_ENTRIES_MAX - 1:04d}"
+    # 有界读取：只多取一条判定超限，绝不把整份注册表读进内存
+    assert limits == [PRIME_INDEX_ENTRIES_MAX + 1]
+
+
+async def test_prime_index_entries_at_cap_is_not_marked_truncated(monkeypatch: Any) -> None:
+    """恰好等于上限不算截断：边界正例，避免"永远报截断"的假信号。"""
+    registry = FakeRegistry()
+    _fill_registry(registry, PRIME_INDEX_ENTRIES_MAX)
+    _install_registry(monkeypatch, registry)
+
+    summary = StaticSummaryReader("v1\n## 用户画像\n偏好例题驱动".encode(), NOW)
+    response = await _service(registry=registry, summary_reader=summary).prime(user_id=USER_A)
+
+    assert len(response.index_entries) == PRIME_INDEX_ENTRIES_MAX
+    assert response.index_entries_truncated is False
+    assert response.degraded is False
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +642,8 @@ def test_prime_endpoint_missing_summary_is_200_degraded(tmp_path: Path, monkeypa
     assert body["generated_at"] is None
     assert body["summary_truncated"] is False
     assert [entry["memory_id"] for entry in body["index_entries"]] == ["mastery:椭圆"]
+    assert body["index_entries_truncated"] is False
+    # 既有字段一个不少（review I-5：新增字段只追加，既有形状不变）
     assert set(body) == {
         "summary",
         "schema_version",
@@ -578,6 +651,7 @@ def test_prime_endpoint_missing_summary_is_200_degraded(tmp_path: Path, monkeypa
         "index_entries",
         "summary_truncated",
         "degraded",
+        "index_entries_truncated",
     }
 
 

@@ -50,6 +50,7 @@ from backend.memory.storage.markdown_schema import (
     IndexEntry,
     LearnerDocument,
     MasteryDocument,
+    extract_links,
     normalize_aliases,
     parse_index,
     parse_learner,
@@ -101,6 +102,21 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
             seen.add(item)
             out.append(item)
     return out
+
+
+def _is_v2(doc: LearnerDocument | MasteryDocument) -> bool:
+    """文档是否已升到 schema v2（只有 v2 才有 frontmatter ``name`` 可投影）。"""
+    return int(getattr(doc, "schema_version", 0) or 0) >= SCHEMA_VERSION_V2
+
+
+def _links_of_rendered(content: bytes) -> list[str]:
+    """从**刚渲染出的**正文现算 ``[[link]]`` 目标（评审 I-11②）。
+
+    为什么不读 ``doc.links``：那是上一次解析的产物，patch 路径（mastery /
+    frontmatter）都不重算它，照抄会让投影滞后一个提交、首次写入甚至永远为空。
+    正文是唯一事实源（§3.4），"这一版写了什么"当然以渲染结果为准。
+    """
+    return extract_links(content.decode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +345,10 @@ class MemoryService:
                 "keywords": list(base.keywords),
                 # §3.4：alias 是检索键、[[link]] 目标是路由依据，都要进投影与 search_text
                 "aliases": list(base.aliases),
-                "related_topic_keys": list(base.links),
+                # 评审 I-11②：links 必须从**新渲染正文**现算。`base.links` 是上一版解析
+                # 结果（apply_learner_patch / apply_frontmatter_patch 都不重算它），照抄
+                # 会让"首次写入含 [[链接]] 的正文"投影为空、此后永远滞后一个提交。
+                "related_topic_keys": _links_of_rendered(content),
                 "search_text": " ".join(
                     [
                         "学习者档案",
@@ -369,13 +388,18 @@ class MemoryService:
         mbase.version = after_version
         mbase.updated_at = now
         content = render_mastery(mbase).encode("utf-8")
+        # 评审 I-11③：v2 文档的注册表 title 取 frontmatter `name`（v2 里它就是文档标题），
+        # v1 文档没有 name，保持 topic_title 逐字不变——否则改 name 的 frontmatter_patch
+        # 永远到不了注册表与 search。
+        projected_title = (mbase.name or mbase.topic_title) if _is_v2(mbase) else mbase.topic_title
         index_data = {
-            "title": mbase.topic_title,
+            "title": projected_title,
             "summary": mbase.overview or "；".join(mbase.understood[:3]),
             # 同 learner：keywords 由文档投影，文档是唯一事实源（§3.4 / 裁决 A）
             "keywords": list(mbase.keywords),
             "aliases": list(mbase.aliases),
-            "related_topic_keys": list(mbase.links),
+            # related_topic_keys 同 learner，见上面的 I-11② 说明
+            "related_topic_keys": _links_of_rendered(content),
             "search_text": " ".join(
                 [
                     mbase.topic_title,
@@ -397,22 +421,31 @@ class MemoryService:
         *,
         expected_worker: str | None = None,
         expected_generation: int | None = None,
+        fencing_operation_id: UUID | None = None,
     ) -> None:
         """§11.6 + 评审二轮 #3：独立短事务打 commit 标记（fencing CAS）。
 
         携带 fencing token 且 CAS 失败说明 Lease 已易主：抛 LeaseFencedError，
         调用方（执行层）必须终止该旧执行者，不得进入业务提交路径。
+
+        ``fencing_operation_id``（评审 I/C-2）是**真正持有 Lease 的 operation**：
+        批量总结的成员 operation 从来没有被 claim（状态 ``pending_batch``、
+        ``locked_by`` 为空），CAS 打在成员行上必然 0 行。缺省等于 ``operation_id``，
+        即单条路径行为逐字不变。
         """
+        cas_operation_id = fencing_operation_id or operation_id
         async with self._session_factory() as session:
             async with session.begin():
                 ok = await ops_repo.mark_commit_started(
                     session,
-                    operation_id=operation_id,
+                    operation_id=cas_operation_id,
                     expected_worker=expected_worker,
                     expected_generation=expected_generation,
                 )
         if not ok and expected_worker is not None:
-            raise LeaseFencedError(f"operation {operation_id} commit 标记 CAS 失败（Lease 已易主）")
+            raise LeaseFencedError(
+                f"operation {cas_operation_id} commit 标记 CAS 失败（Lease 已易主）"
+            )
 
     async def _clear_commit_started(
         self,
@@ -420,16 +453,18 @@ class MemoryService:
         *,
         expected_worker: str | None = None,
         expected_generation: int | None = None,
+        fencing_operation_id: UUID | None = None,
     ) -> None:
         """§11.6：独立短事务清除 commit 标记（提交事务结束后调用）。
 
         fencing CAS 失败仅说明 Lease 已易主：标记由新持有者负责，静默忽略。
+        ``fencing_operation_id`` 语义同 :meth:`_mark_commit_started`。
         """
         async with self._session_factory() as session:
             async with session.begin():
                 await ops_repo.clear_commit_started(
                     session,
-                    operation_id=operation_id,
+                    operation_id=fencing_operation_id or operation_id,
                     expected_worker=expected_worker,
                     expected_generation=expected_generation,
                 )
@@ -449,15 +484,23 @@ class MemoryService:
         mapping_confidences_by_plan: list[float | None] | None = None,
         expected_worker: str | None = None,
         expected_generation: int | None = None,
+        fencing_operation_id: UUID | None = None,
     ) -> CommitOutcome:
         """多文档原子提交（§8.6）。任何校验失败整个事务回滚。
 
         评审二轮 #3：经 Lease 领取的执行路径必须携带 expected_worker /
         expected_generation（fencing token）；CAS 失败抛 LeaseFencedError，
         业务副作用不发生。直调路径（测试/内部维护）可不携带，保持原语义。
+
+        ``fencing_operation_id``（评审 C-2）：CAS 打在**真正持有 Lease 的
+        operation** 上，缺省等于 ``operation_id``。批量总结里每个成员的提交都由
+        批次 operation 的 Lease 驱动（成员自己从未被 claim），因此成员路径必须传
+        批次 id；而 mutation 重放键、``memory_commits.operation_id`` 与 evidence
+        绑定**始终**用成员 ``operation_id``，保证"哪条证据写成"可追溯、可重放。
         """
         if len(plans) > MAX_PLANS_PER_OPERATION:
             raise ValueError(f"一个 operation 最多 {MAX_PLANS_PER_OPERATION} 个 CommitMutationPlan")
+        cas_operation_id = fencing_operation_id or operation_id
         now = _now()
         outcome = CommitOutcome()
 
@@ -520,10 +563,12 @@ class MemoryService:
         # 2. 数据库事务
         # §11.6（裁决 2026-08-11）：进入 commit 副作用前用独立短事务打标记，
         # 取消仲裁据此返回 409；事务结束（含回滚）后清除，崩溃残留由执行层清理。
+        # 标记同样打在 fencing operation 上：取消仲裁要拦的正是"持有 Lease 的那一行"。
         await self._mark_commit_started(
             operation_id,
             expected_worker=expected_worker,
             expected_generation=expected_generation,
+            fencing_operation_id=cas_operation_id,
         )
         try:
             async with self._session_factory() as session:
@@ -665,30 +710,28 @@ class MemoryService:
                                     "graph_projection_candidates": node_ids[:20],
                                 },
                             )
-                            # mastery 活动版本提交后 upsert link（§13.8.1）：
-                            # 先把旧 link 全部置 inactive，再按当前映射重建
-                            from backend.memory.persistence import graph_states as gs_repo
-
-                            method = mapping_methods_by_plan[i] if mapping_methods_by_plan else None
-                            confidence = (
-                                mapping_confidences_by_plan[i]
-                                if mapping_confidences_by_plan
-                                else None
+                            # mastery 活动版本提交后维护 link（§13.8.1）。评审 I-3：
+                            # **绝不"先全灭再重建"**——不是每次提交都携带图谱信息
+                            # （frontmatter_patch / keywords 治理 / 悬空候选建档的
+                            # graph_node_ids 为空），全灭会让该主题的 KG 映射整片
+                            # inactive，紧随其后的 `_dual_write_kg` 因
+                            # `active=true AND memory_version=:version` 不成立而必然
+                            # skipped/no_graph_mapping。
+                            await self._sync_graph_links(
+                                session,
+                                user_id=user_id,
+                                memory_id=plan.memory_id,
+                                active_version=after_version,
+                                node_ids=node_ids,
+                                mapping_method=(
+                                    mapping_methods_by_plan[i] if mapping_methods_by_plan else None
+                                ),
+                                mapping_confidence=(
+                                    mapping_confidences_by_plan[i]
+                                    if mapping_confidences_by_plan
+                                    else None
+                                ),
                             )
-                            await gs_repo.deactivate_graph_links(
-                                session, user_id=user_id, memory_id=plan.memory_id
-                            )
-                            for node_id in node_ids:
-                                if method and confidence is not None:
-                                    await gs_repo.upsert_graph_link(
-                                        session,
-                                        user_id=user_id,
-                                        memory_id=plan.memory_id,
-                                        node_id=node_id,
-                                        memory_version=after_version,
-                                        mapping_method=method,
-                                        mapping_confidence=confidence,
-                                    )
                         else:
                             changed_sections = index_data.get("changed_sections") or [
                                 "preferences",
@@ -742,6 +785,80 @@ class MemoryService:
                     f"current 物化失败 {plan.memory_id}: {type(exc).__name__}，维护任务将修复"
                 )
         return outcome
+
+    async def _sync_graph_links(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: UUID,
+        memory_id: str,
+        active_version: int,
+        node_ids: list[str],
+        mapping_method: str | None,
+        mapping_confidence: float | None,
+    ) -> None:
+        """把 ``memory_graph_links`` 推进到新活动版本（评审 I-3，§13.8.1）。
+
+        三种情况，判据都是"这次提交到底知不知道图谱映射"：
+
+        1. 携带节点（``node_ids`` 非空）：这些节点按新版本 upsert（active=true），
+           不再出现的旧 link 置 inactive——这才是"映射被改写"；
+        2. **不携带节点但该记忆已有活动 link**（frontmatter_patch / keywords 治理 /
+           悬空候选建档）：按既有 link 的 node_id 在新版本上重新 upsert，保持 active，
+           **不删除任何映射**。映射没变、只是版本推进了，这正是"先全灭再重建"错杀的场景；
+        3. 两者都没有（该记忆从来没有 KG 映射）：不触碰 ``memory_graph_links``。
+
+        真正"要删除映射"的场景不受影响：``forget`` / purge 各自显式 deactivate 全部
+        link；``restore`` 由调用方重新绑定；调用方给出节点集合时，消失的节点依旧被置
+        inactive（情况 1）。
+        """
+        from backend.memory.persistence import graph_states as gs_repo
+
+        previous_links = await gs_repo.list_active_links_for_memory(
+            session, user_id=user_id, memory_id=memory_id, active_version=active_version - 1
+        )
+        if node_ids:
+            previous_by_node = {str(link["node_id"]): link for link in previous_links}
+            for node_id in node_ids:
+                previous = previous_by_node.get(node_id)
+                # mapping_method 有 CHECK 白名单（explicit_hint/exact_alias/model_candidate），
+                # confidence 有 BETWEEN 0 AND 1：两列都 NOT NULL，既不能留空也不能编造。
+                # 本轮没给就沿用旧行的值；旧行也没有（新映射没带元数据）时只能跳过——
+                # 宁可不建这条 link，也不能写一个违反约束的"未知来源"。
+                method = mapping_method or str((previous or {}).get("mapping_method") or "")
+                if not method:
+                    continue
+                confidence = (
+                    mapping_confidence
+                    if mapping_confidence is not None
+                    else float((previous or {}).get("mapping_confidence") or 0.0)
+                )
+                await gs_repo.upsert_graph_link(
+                    session,
+                    user_id=user_id,
+                    memory_id=memory_id,
+                    node_id=node_id,
+                    memory_version=active_version,
+                    mapping_method=method,
+                    mapping_confidence=min(max(confidence, 0.0), 1.0),
+                )
+            # 节点集合以本次提交为准：不再出现的旧 link 置 inactive（§16.4）
+            for kept_node_id in node_ids:
+                await gs_repo.deactivate_graph_links(
+                    session, user_id=user_id, memory_id=memory_id, except_node_id=kept_node_id
+                )
+            return
+        # 情况 2：本次提交没有图谱信息 —— 既有映射一个都不删，只把版本推上去。
+        for link in previous_links:
+            await gs_repo.upsert_graph_link(
+                session,
+                user_id=user_id,
+                memory_id=memory_id,
+                node_id=str(link["node_id"]),
+                memory_version=active_version,
+                mapping_method=str(link["mapping_method"]),
+                mapping_confidence=float(link["mapping_confidence"]),
+            )
 
     async def _upsert_index_entry(
         self,
@@ -1273,6 +1390,83 @@ class MemoryService:
         except OSError:
             pass
         return {"rebuilt": True, "version": new_version, "dirty_cleared": cleared}
+
+    async def refresh_index_projection(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: UUID,
+        memory_id: str,
+        now: datetime | None = None,
+    ) -> bool:
+        """按当前活动版本重建单个文档的检索投影（§3.4；评审 I-11① 的迁移接线入口）。
+
+        存在的理由：``migrate_markdown_schema_v2`` 直接改文档活动版本（v1→v2），
+        而投影只写在提交路径上——迁移完之后 ``aliases / keywords / related`` 会一直
+        为空，直到下一次记忆提交。0008 迁移的 docstring 把"回填"记在这个任务名下，
+        所以维护路径需要一个**不改文档内容、只刷新投影**的入口。
+
+        语义与提交路径同源：读活动版本正文 → 解析 → 用与 ``_build_new_content``
+        相同的规则组装投影数据 → upsert ``memory_index_entries`` → 标 index dirty。
+        调用方负责事务与提交（迁移处理器与它的 ``set_active_version`` 在同一事务里）。
+        返回是否真的刷新了投影（文档不可读/已删除时 False，由调用方决定怎么记账）。
+        """
+        loaded = await self._load_active_document(session, user_id=user_id, memory_id=memory_id)
+        if loaded is None:
+            return False
+        row, doc = loaded
+        if isinstance(doc, LearnerDocument):
+            index_data: dict[str, Any] = {
+                "title": "学习者档案",
+                "summary": "；".join((doc.goals or doc.preferences or ["学习者档案"])[:3]),
+                "keywords": list(doc.keywords),
+                "aliases": list(doc.aliases),
+                "related_topic_keys": list(doc.links),
+                "search_text": " ".join(
+                    ["学习者档案", *doc.aliases, *doc.preferences, *doc.goals, *doc.plans]
+                ),
+            }
+            evidence_refs = list(doc.evidence_refs)
+            memory_type = "learner"
+            topic_key = None
+        elif isinstance(doc, MasteryDocument):
+            projected_title = (doc.name or doc.topic_title) if _is_v2(doc) else doc.topic_title
+            index_data = {
+                "title": projected_title,
+                "summary": doc.overview or "；".join(doc.understood[:3]),
+                "keywords": list(doc.keywords),
+                "aliases": list(doc.aliases),
+                "related_topic_keys": list(doc.links),
+                "search_text": " ".join(
+                    [
+                        doc.topic_title,
+                        *doc.aliases,
+                        doc.overview,
+                        *doc.understood,
+                        *doc.difficulties,
+                        *doc.review_advice,
+                    ]
+                ),
+            }
+            evidence_refs = list(doc.evidence_refs)
+            memory_type = "mastery"
+            topic_key = doc.topic_key
+        else:  # pragma: no cover - _load_active_document 只返回这两种类型
+            return False
+        active_version = int(row["active_version"])
+        await self._upsert_index_entry(
+            session,
+            user_id=user_id,
+            memory_id=memory_id,
+            memory_type=memory_type,
+            topic_key=topic_key,
+            source_version=active_version,
+            index_data=index_data,
+            evidence_refs=evidence_refs,
+            now=now or _now(),
+        )
+        await docs_repo.mark_index_dirty(session, user_id=user_id, dirty_at=now or _now())
+        return True
 
     async def _candidate_topic_labels(self, session: AsyncSession, *, user_id: UUID) -> list[str]:
         """§5.9④ 候选主题区的投影：还没到建档门槛的悬空链接（带批次数）。"""

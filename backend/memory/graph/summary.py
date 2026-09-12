@@ -11,6 +11,7 @@ load_source_refs → sanitize_and_bound_source → extract_candidates
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from langgraph.runtime import Runtime
 from sqlalchemy import text
@@ -59,6 +60,21 @@ def _operation(state: MemoryManagerState) -> MemoryOperation:
 
 def _budget(state: MemoryManagerState) -> LLMCallBudget:
     return LLMCallBudget(operation_calls=state.get("llm_call_count", 0))
+
+
+def _commit_fencing_operation_id(state: MemoryManagerState) -> UUID | None:
+    """提交 CAS 该打在哪个 operation 上（评审 C-2）。
+
+    批量分支由 ``batch.begin_batch_member`` 写入批次 operation_id（真正持有 Lease 的
+    那一行）；单条路径没有这个键，返回 None 表示"缺省等于 operation_id"，行为逐字不变。
+    """
+    raw = str(state.get("commit_fencing_operation_id") or "")
+    if not raw:
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:  # pragma: no cover - state 由本仓库写入，不会是非法 UUID
+        return None
 
 
 def _warnings(state: MemoryManagerState) -> list[str]:
@@ -806,6 +822,10 @@ async def commit_summary_memories(
     entries = valid_entries
     # 评审二轮 #3：Lease fencing token 传入 commit 入口做 CAS
     fencing = state.get("fencing") or {}
+    # 评审 C-2：批量分支里 `operation` 是**成员** operation，而唯一持有 Lease 的是批次
+    # operation（`begin_batch_member` 把它记在 `commit_fencing_operation_id`）。CAS 打批次行，
+    # mutation 重放键 / `memory_commits.operation_id` / evidence 绑定仍用成员 id。
+    fencing_operation_id = _commit_fencing_operation_id(state)
     outcome = await ctx.memory_service.commit_plans(
         operation_id=operation.operation_id,
         user_id=operation.user_id,
@@ -824,6 +844,7 @@ async def commit_summary_memories(
         ],
         expected_worker=fencing.get("worker_id"),
         expected_generation=fencing.get("generation"),
+        fencing_operation_id=fencing_operation_id,
     )
     return {
         "commit_result": {

@@ -1,17 +1,30 @@
-"""段封存与恢复（memory-rebuild §5.4 Phase 2）。
+"""段封存与恢复（memory-rebuild §5.4 Phase 2；I-1 重试/跨节点恢复修复）。
 
 **封存事务顺序**（§5.4，顺序铁律）：
 
-1. 找热段（本 turn 已存在的 ``open`` 行）；
+1. 找热段（本 turn 已存在的非删除段）；
 2. 追加完成、逐行 flush，算出字节数、ordinal 范围、sha256；
 3. **先上传对象**并确认拿到 object ref；
 4. 再在**同一 PG 事务**内写 manifest（sealed）与 message pointer；
 5. 事务成功后段即 ``sealed``；PG 事务失败时对象暂时是孤儿，由 reconcile 处理
    ——**绝不产生"manifest 指向不存在对象"**。
 
-**崩溃恢复**（Phase 2 决策）：重新 claim 同一 turn 时先查该 turn 的 ``open`` 段；
-本地文件仍在 → 续写（复用 segment_id 与 ordinal_start）；本地文件不在（换节点）→
-把旧 ``open`` 段标 ``deleted`` 并新建段（依赖迁移 0008 的部分唯一索引）。
+**一个 turn 最多一个非删除段**（``uq_rollout_segment_turn_active``）。因此崩溃重跑时
+必须先把该 turn 已有的非删除段处理掉，才能让重试的段被登记：
+
+- 本地热段文件在（同节点重试）→ **复用段的身份**：沿用原 ``ordinal_start`` 继续追加，
+  但**换新的 ``segment_id``**，于是对象 key 也是新的。这不是洁癖：``put_immutable``
+  对"同 key 异内容"必须抛 :class:`ObjectHashMismatchError`（§5.5 不可变语义），
+  续写后字节必然不同，用旧 key 重新上传会直接被对象存储拒绝，封存永远推进不了。
+  旧行由 :func:`supersede` 标 ``deleted``（保留审计与旧对象引用），新行继承其序号范围。
+- 本地热段文件不在（跨节点恢复）→ 同样标废旧行（``open`` 或 ``sealed``）并新建段，
+  新段的 ``ordinal_start`` 由 manifest 给出（所有行含 deleted 的最大末序号 + 1），
+  不会与任何既有段的 ordinal 范围重叠——这正是 ``0009`` 把
+  ``(thread_id, ordinal_start)`` 改成部分唯一索引的原因。
+
+**登记必须可判定**：新建段在写第一行之前就要登记 ``open`` 行；登记失败 ⇒ 直接放弃本
+turn 的记录。否则会走到"对象已上传、manifest ``UPDATE`` 更新 0 行"的孤儿对象 +
+指针全部落空（I-1 的原症状）。
 
 本模块是 rollout 包与 persistence 层之间唯一的桥：recorder 不直接写库，
 repository 不直接碰文件与对象存储。
@@ -24,6 +37,7 @@ import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -47,12 +61,61 @@ class MessagePointer:
 
 @dataclass(slots=True)
 class ResumeInfo:
-    """可续写的未封存段。"""
+    """可续写的段：本地热段文件仍在，沿用其 ``ordinal_start`` 与文件继续追加。
 
+    ``segment_id`` 是本次要用的**新**段 id（换新 id 才有全新的对象 key——``put_immutable``
+    不允许同 key 异内容）。因此在写第一行之前必须把热段文件改名成
+    ``<ordinal_start>-<新 segment_id>.jsonl``：本地路径是按 ``(ordinal_start,
+    segment_id)`` 拼的，路径与 manifest 不同源的话，下一次重试会"找不到本地文件"
+    而把刚写好的段判成跨节点遗留（真实缺陷，已在集成测试固定）。
+    """
+
+    #: 上次尝试用的段行（即将被标废；仅用于日志与审计）。
+    superseded_segment_id: UUID
+    #: 本次要用的**新**段 id（全新对象 key）。
     segment_id: UUID
     ordinal_start: int
     last_ordinal: int
+    #: 旧热段文件路径（改名源）。
     path: Path
+    #: 新热段文件路径（改名的目标，登记事务提交后执行）。
+    target_path: Path
+    #: 新段的 ``ordinal_end`` 下界：上次封存的末序号。重试可能没有新增记录，
+    #: 直接写更小的 ``ordinal_end`` 会违反 ``ordinal_end >= ordinal_start`` 的同族约束。
+    sealed_ordinal_end: int | None = None
+
+
+@dataclass(slots=True)
+class NewSegment:
+    """无可复用段时的新建指令。"""
+
+    ordinal_start: int
+    #: 需要标废的既有非删除段（跨节点：本地文件缺失；无则 None）。
+    supersede_segment_id: UUID | None = None
+
+
+class RegistrationStatus(StrEnum):
+    """``register_open`` 的结果——调用方据此决定"能否继续记录并封存"。"""
+
+    #: 本次真的插入了 open 行。
+    inserted = "inserted"
+    #: 行已存在且就是目标段（重放），可继续。
+    already_open = "already_open"
+    #: 登记失败（约束冲突 / 连接不可用等）：段没有 manifest 行，**必须停止记录**，
+    #: 否则封存时对象已上传却更新 0 行 → 孤儿对象 + 指针落空。
+    failed = "failed"
+
+
+@dataclass(slots=True)
+class RegisterResult:
+    """``register_open`` 的结构化结果（可判定失败 + 原因，供调用方与指标使用）。"""
+
+    status: RegistrationStatus
+    reason: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status is not RegistrationStatus.failed
 
 
 @dataclass(slots=True)
@@ -70,6 +133,8 @@ class SealRequest:
     sha256: str
     message_pointers: list[MessagePointer] = field(default_factory=list)
     fence: tuple[str, int] | None = None
+    #: 复用既有段的序号范围时，上次封存的末序号（``ordinal_end`` 只进不退）。
+    ordinal_end_floor: int | None = None
 
 
 @dataclass(slots=True)
@@ -96,7 +161,7 @@ class RolloutSegmentSealer:
         self._logger = logger or logging.getLogger("conversation.rollout.sealer")
 
     # ------------------------------------------------------------------
-    # 恢复
+    # 恢复 / 复用
     # ------------------------------------------------------------------
 
     async def resolve_resume(
@@ -106,34 +171,63 @@ class RolloutSegmentSealer:
         thread_id: UUID,
         thread_created_at: datetime,
         segment_path_for: Any,
-    ) -> ResumeInfo | None:
-        """判断本 turn 是否有可续写的未封存段。
+        new_segment_id: UUID,
+        fence: tuple[str, int] | None = None,
+    ) -> ResumeInfo | NewSegment | None:
+        """判断本 turn 的段该"续写复用"还是"新建"。
 
         ``segment_path_for(ordinal_start, segment_id) -> Path`` 由调用方提供（recorder
-        持有 thread 创建时间与根目录），避免 sealer 重复拼路径。
+        持有 thread 创建时间与根目录），避免 sealer 重复拼路径；``new_segment_id``
+        是调用方为"本次新建"预生成的 id（恢复路径下它也可能被直接采用）。
+
+        返回：
+
+        - :class:`ResumeInfo`：该 turn 的段本地文件仍在 → 沿用 ``ordinal_start``
+          续写（新 ``segment_id``/新对象 key），旧行由调用方登记时标废；
+        - :class:`NewSegment`：无可用本地段（从无段，或本地文件缺失需跨节点重建）
+          → ``ordinal_start`` 由 manifest 给出，不与任何既有段范围重叠；
+        - ``None``：查询失败等异常情况（rollout 是旁路，调用方放弃本 turn 的记录）。
         """
-        async with self._session_factory() as session:
-            row = await manifests_repo.get_open_by_turn(session, turn_id)
+        async with self._session_factory.begin() as session:
+            row = await manifests_repo.get_active_by_turn(session, turn_id)
             if row is None:
-                return None
-            path: Path = segment_path_for(row["ordinal_start"], row["segment_id"])
-            if not await asyncio.to_thread(path.is_file):
-                # 换节点执行：本地热段不在，按 Phase 2 决策标废并重建
-                async with session.begin():
-                    await manifests_repo.mark_deleted(session, segment_id=row["segment_id"])
+                ordinal_start = await manifests_repo.next_ordinal_start(session, thread_id)
+                return NewSegment(ordinal_start=ordinal_start)
+            segment_id = row["segment_id"]
+            ordinal_start = int(row["ordinal_start"])
+            path: Path = segment_path_for(ordinal_start, segment_id)
+            file_present = await asyncio.to_thread(path.is_file)
+            if file_present:
+                last_ordinal = _read_last_ordinal_or_start(path, ordinal_start)
                 self._logger.warning(
-                    "rollout 未封存段本地文件缺失，标记废弃并重建: turn=%s segment=%s",
+                    "rollout 复用 turn 既有段（重试/续写）：turn=%s 旧段=%s 新段=%s "
+                    "ordinal_start=%s last_ordinal=%s",
                     turn_id,
-                    row["segment_id"],
+                    segment_id,
+                    new_segment_id,
+                    ordinal_start,
+                    last_ordinal,
                 )
-                return None
-            last_ordinal = _read_last_ordinal_or_start(path, row["ordinal_start"])
-            return ResumeInfo(
-                segment_id=row["segment_id"],
-                ordinal_start=int(row["ordinal_start"]),
-                last_ordinal=last_ordinal,
-                path=path,
+                return ResumeInfo(
+                    superseded_segment_id=segment_id,
+                    segment_id=new_segment_id,
+                    ordinal_start=ordinal_start,
+                    last_ordinal=last_ordinal,
+                    path=path,
+                    target_path=segment_path_for(ordinal_start, new_segment_id),
+                    sealed_ordinal_end=_as_optional_int(row.get("ordinal_end")),
+                )
+            # 本地文件不在：换节点执行。旧行（open 或 sealed）标废后重建，
+            # 新段用 manifest 给的序号，保证范围不重叠（0009 的部分唯一索引）。
+            next_start = await manifests_repo.next_ordinal_start(session, thread_id)
+            self._logger.warning(
+                "rollout 段本地文件缺失，标记废弃并重建: turn=%s 旧段=%s status=%s 新起点=%s",
+                turn_id,
+                segment_id,
+                row.get("status"),
+                next_start,
             )
+            return NewSegment(ordinal_start=next_start, supersede_segment_id=segment_id)
 
     async def register_open(
         self,
@@ -142,24 +236,73 @@ class RolloutSegmentSealer:
         thread_id: UUID,
         turn_id: UUID,
         ordinal_start: int,
-    ) -> None:
-        """懒创建 ``open`` manifest 行（首次物化段文件时调用）。
+        supersede_segment_id: UUID | None = None,
+        rename_from: Path | None = None,
+        rename_to: Path | None = None,
+    ) -> RegisterResult:
+        """登记新段的 ``open`` manifest 行（首次物化段文件时调用）。
 
-        失败只告警：没有 manifest 行不影响段本身可写，reconcile 会按"已上传未登记"
-        或"本地有段无登记"识别出来。
+        ``supersede_segment_id`` 非空时，在**同一事务**内把旧行（``open`` 或 ``sealed``）
+        标 ``deleted``——否则新行会撞 ``uq_rollout_segment_turn_active``。
+
+        ``rename_from``/``rename_to`` 非空时在**事务提交后**把热段文件改名，使本地路径
+        与 manifest 的 ``(ordinal_start, segment_id)`` 同源；改名失败视为登记失败
+        （调用方降级），不留下"manifest 指向不存在的热段文件"的错位。
+
+        **失败必须可判定**（I-1）：返回 :class:`RegisterResult`，``status=failed`` 表示
+        该段**没有** manifest 行。调用方据此停止本 turn 的记录，避免"对象已上传但
+        manifest 更新 0 行"的孤儿对象 + 指针落空。异常在这里收敛成返回值并打指标，
+        不让 rollout 的故障冒泡打断 turn（§1.5 降级原则）。
         """
         try:
-            async with self._session_factory() as session:
-                async with session.begin():
-                    await manifests_repo.insert_open(
-                        session,
-                        segment_id=segment_id,
-                        thread_id=thread_id,
-                        turn_id=turn_id,
-                        ordinal_start=ordinal_start,
+            async with self._session_factory.begin() as session:
+                superseded = False
+                if supersede_segment_id is not None:
+                    superseded = await manifests_repo.mark_deleted(
+                        session, segment_id=supersede_segment_id
                     )
+                inserted = await manifests_repo.insert_open(
+                    session,
+                    segment_id=segment_id,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    ordinal_start=ordinal_start,
+                )
+            if rename_from is not None and rename_to is not None and rename_from != rename_to:
+                await asyncio.to_thread(_rename_segment_file, rename_from, rename_to)
         except Exception as exc:
-            self._logger.warning("rollout open manifest 登记失败: %s", exc)
+            self._logger.warning(
+                "rollout open manifest 登记失败（该段无 manifest 行，停止记录）: "
+                "turn=%s segment=%s err=%s",
+                turn_id,
+                segment_id,
+                exc,
+            )
+            _inc_counter("rollout_segment_registration_total", result="failed")
+            return RegisterResult(status=RegistrationStatus.failed, reason=type(exc).__name__)
+        if superseded:
+            self._logger.warning(
+                "rollout 旧段已标废（tombstone）: turn=%s 旧段=%s", turn_id, supersede_segment_id
+            )
+        if inserted:
+            _inc_counter("rollout_segment_registration_total", result="inserted")
+            return RegisterResult(status=RegistrationStatus.inserted)
+        # ON CONFLICT (segment_id) DO NOTHING 命中：行已存在且就是本段 → 幂等成功
+        _inc_counter("rollout_segment_registration_total", result="already_open")
+        return RegisterResult(status=RegistrationStatus.already_open)
+
+    async def discard_open(self, *, segment_id: UUID) -> bool:
+        """标废一个"已登记但从未写入"的空段；返回是否真的改动了行。
+
+        空段没有对象，留在 manifest 只会让 reconcile 报"本地热段缺失"。失败不抛错
+        （rollout 是旁路），但会留下 ``open`` 行由 reconcile 兜底。
+        """
+        try:
+            async with self._session_factory.begin() as session:
+                return await manifests_repo.mark_deleted(session, segment_id=segment_id)
+        except Exception as exc:
+            self._logger.warning("rollout 空段标废失败（留给 reconcile）: %s", exc)
+            return False
 
     # ------------------------------------------------------------------
     # 封存
@@ -194,6 +337,11 @@ class RolloutSegmentSealer:
             self._logger.warning("rollout 对象上传失败，段保持 open 待 reconcile: %s", exc)
             return SealResult(sealed=False, object_key=object_key, reason="upload_failed")
 
+        # ordinal_end 只进不退：复用既有段的序号范围时，重试可能没有产生更多记录。
+        ordinal_end = request.ordinal_end
+        if request.ordinal_end_floor is not None:
+            ordinal_end = max(ordinal_end, request.ordinal_end_floor)
+
         # 步骤 4：同一事务内写 manifest + message pointer
         try:
             async with self._session_factory() as session:
@@ -205,7 +353,7 @@ class RolloutSegmentSealer:
                         object_etag=object_ref.etag,
                         sha256=object_ref.sha256,
                         byte_size=object_ref.size,
-                        ordinal_end=request.ordinal_end,
+                        ordinal_end=ordinal_end,
                         fence=request.fence,
                     )
                     if not sealed:
@@ -224,7 +372,8 @@ class RolloutSegmentSealer:
 async def _write_message_pointers(session: AsyncSession, request: SealRequest) -> None:
     """把消息 → 段坐标写进 conversation_messages 的四个指针列。
 
-    四个指针列由 CHECK 约束保证"同真同假"，因此这里必须一次写全。
+    四个指针列由 CHECK 约束保证"同真同假"，因此这里必须一次写全。重试复用段时
+    这些指针会被重写到新段上，因此不存在"指向已标废段"的长期悬垂。
     """
     from sqlalchemy import text
 
@@ -257,8 +406,39 @@ def _read_last_ordinal_or_start(path: Path, ordinal_start: int) -> int:
     return ordinal_start if last is None else last
 
 
+def _rename_segment_file(source: Path, target: Path) -> None:
+    """把热段改名到新段的路径（同目录、仅文件名不同；目标已存在时保留原文件）。"""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        return
+    source.replace(target)
+
+
+def _as_optional_int(value: Any) -> int | None:
+    return None if value is None else int(value)
+
+
+def _inc_counter(name: str, **labels: str) -> None:
+    """指标写入失败绝不能影响写入链路，因此整体兜底。"""
+    try:
+        from backend.conversation import metrics
+
+        metric = getattr(metrics, name, None)
+        if metric is None:
+            return
+        if labels:
+            metric.labels(**labels).inc()
+        else:
+            metric.inc()
+    except Exception:
+        pass
+
+
 __all__ = [
     "MessagePointer",
+    "NewSegment",
+    "RegisterResult",
+    "RegistrationStatus",
     "ResumeInfo",
     "RolloutSegmentSealer",
     "SealRequest",

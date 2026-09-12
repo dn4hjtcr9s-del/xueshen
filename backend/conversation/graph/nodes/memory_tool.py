@@ -173,18 +173,22 @@ async def run_memory_tools(
             )
             continue
 
-        rendered, was_truncated = _render_result(payload, result_count=result_count)
-        rendered, char_truncated = _apply_char_cap(rendered)
-        rendered, token_truncated = _apply_token_budget(
-            rendered,
+        rendered, truncated, delivered_lines = _render_bounded(
+            payload,
+            tool=tool,
             used_tokens=used_tokens,
             budget_tokens=budget_tokens,
             token_counter=token_counter,
         )
-        truncated = was_truncated or char_truncated or token_truncated
         if truncated:
             truncated_any = True
-            rendered = _attach_read_hint(rendered, tool=tool, arguments=arguments, payload=payload)
+            rendered = _attach_read_hint(
+                rendered,
+                tool=tool,
+                arguments=arguments,
+                payload=payload,
+                delivered_lines=delivered_lines,
+            )
         used_tokens += _count_tokens(rendered, token_counter)
 
         if citation is not None:
@@ -401,6 +405,85 @@ def _render_result(payload: dict[str, Any], *, result_count: int) -> tuple[str, 
     return json.dumps(payload, ensure_ascii=False, sort_keys=True), truncated
 
 
+def _render_bounded(
+    payload: dict[str, Any],
+    *,
+    tool: str,
+    used_tokens: int,
+    budget_tokens: int,
+    token_counter: Any,
+) -> tuple[str, bool, int | None]:
+    """渲染 + 有界裁剪，返回 (文本, 是否被截断, 已投递给模型的正文行数)。
+
+    **read 结果按行裁剪**（review I-4）：`memory.read` 的后续读取位置由 `line_offset`
+    决定，若先按字符/预算把 JSON 截断再"按完整 content 算行数"，提示会指向
+    "服务端取到的末行 +1"，而那些行**从未投递给模型** → 中间整段永远读不到。
+    因此这里先二分出"能放进预算的最大正文行数"，用裁剪后的 content 重新渲染，
+    提示再按**已投递行数**给下一步偏移。非 read 工具保持原有的字符/预算裁剪。
+    """
+    if tool == "memory.read":
+        lines = str(payload.get("content") or "").splitlines()
+        total = len(lines)
+        delivered = _max_deliverable_lines(
+            payload,
+            lines=lines,
+            used_tokens=used_tokens,
+            budget_tokens=budget_tokens,
+            token_counter=token_counter,
+        )
+        if delivered < total:
+            if delivered == 0 and lines:
+                # 预算连一行都放不下：回最小结果而不是"0 行的 read"——后者会让模型以为
+                # 该主题是空的、或反复用同一个 line_offset 重试。
+                return _budget_exhausted_stub(""), True, 0
+            bounded = dict(payload)
+            bounded["content"] = "\n".join(lines[:delivered])
+            bounded["truncated"] = True
+            rendered = json.dumps(bounded, ensure_ascii=False, sort_keys=True)
+            return rendered, True, delivered
+        rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return rendered, bool(payload.get("truncated")), total
+
+    rendered, truncated = _render_result(payload, result_count=0)
+    rendered, char_truncated = _apply_char_cap(rendered)
+    rendered, token_truncated = _apply_token_budget(
+        rendered,
+        used_tokens=used_tokens,
+        budget_tokens=budget_tokens,
+        token_counter=token_counter,
+    )
+    return rendered, truncated or char_truncated or token_truncated, None
+
+
+def _max_deliverable_lines(
+    payload: dict[str, Any],
+    *,
+    lines: list[str],
+    used_tokens: int,
+    budget_tokens: int,
+    token_counter: Any,
+) -> int:
+    """二分出"渲染后同时满足字符上限与剩余 token 预算"的最大正文行数。"""
+    remaining_tokens = budget_tokens - used_tokens if budget_tokens > 0 else None
+    low, high = 0, len(lines)
+    best = 0
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = dict(payload)
+        candidate["content"] = "\n".join(lines[:mid])
+        rendered = json.dumps(candidate, ensure_ascii=False, sort_keys=True)
+        fits_chars = len(rendered) <= RESULT_MAX_CHARS
+        fits_tokens = remaining_tokens is None or _count_tokens(rendered, token_counter) <= (
+            remaining_tokens
+        )
+        if fits_chars and fits_tokens:
+            best = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+    return best
+
+
 def _apply_char_cap(rendered: str) -> tuple[str, bool]:
     """单条结果硬字符上限（防止一次 read 把 checkpoint 撑爆）。"""
     if len(rendered) <= RESULT_MAX_CHARS:
@@ -453,6 +536,7 @@ def _attach_read_hint(
     tool: str,
     arguments: dict[str, Any],
     payload: dict[str, Any],
+    delivered_lines: int | None = None,
 ) -> str:
     """裁剪后附下一步可用的 read hint（§5.7：超限必须给出下一步提示）。"""
     hinted = _parse_json_object(rendered)
@@ -461,7 +545,12 @@ def _attach_read_hint(
     hint: dict[str, Any] = {"truncated": True}
     if tool == "memory.read":
         consumed = int(payload.get("line_offset") or arguments.get("line_offset") or 0)
-        returned = len(str(payload.get("content") or "").splitlines())
+        # **已投递**的行数：`_render_bounded` 按行裁剪后回传，绝不能用完整 content 的行数
+        # （那会把"从未投递的行"算成已读，模型永远跳过它们）。
+        if delivered_lines is not None:
+            returned = delivered_lines
+        else:
+            returned = len(str(payload.get("content") or "").splitlines())
         hint["hint"] = {
             "tool": "memory.read",
             "memory_id": str(payload.get("memory_id") or arguments.get("memory_id") or ""),

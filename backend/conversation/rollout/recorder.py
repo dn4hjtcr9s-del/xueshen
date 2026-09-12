@@ -15,7 +15,10 @@ turn 关键路径；队列把"节点产出"与"落盘"解耦，同时用有界�
 5. 写失败先按"截断到最后一次成功 flush 的偏移 → 重开 → 重试一次"处理，
    仍失败则整体降级：记指标、丢弃后续记录，**绝不拖垮 turn**（此阶段 checkpoint
    与 conversation_messages 仍是恢复/读取权威）；
-6. 同一时刻只允许一个活动段（Phase 1 决策：worker 单并发执行 turn）。
+6. 同一时刻只允许一个活动段（Phase 1 决策：worker 单并发执行 turn）；
+7. **登记先于写入**（I-1）：新段写第一行之前必须先确认 manifest 行存在；登记失败
+   即降级、不写这一行。否则会走到"对象已上传、manifest ``UPDATE`` 更新 0 行"的
+   孤儿对象 + 指针全部落空。
 """
 
 from __future__ import annotations
@@ -41,7 +44,11 @@ from backend.conversation.rollout.file_naming import (
     segment_path,
 )
 from backend.conversation.rollout.policy import ensure_persistable
-from backend.conversation.rollout.sealer import MessagePointer
+from backend.conversation.rollout.sealer import (
+    MessagePointer,
+    RegistrationStatus,
+    ResumeInfo,
+)
 
 #: 队列写满后的等待上限；超时即丢弃该条并计入降级指标。
 #: 理由（§1.5「降级不拖垮 turn」）：磁盘挂起时不能把图执行一起挂住。
@@ -88,6 +95,16 @@ class RolloutSegmentHandle:
     message_pointers: list[Any] = field(default_factory=list)
     #: 段是否已成功封存（对象已上传 + manifest 已登记）。
     sealed: bool = False
+    #: 段行是否**已确认**在 manifest 中。新建段在写第一行前登记；复用段必然为真。
+    #: 为 False 表示登记失败——绝不封存（否则就是"对象已上传但 manifest 更新 0 行"）。
+    registered: bool = False
+    #: 复用既有段时被标废的旧段 id（重试/跨节点重建），用于登记事务内一并 tombstone。
+    superseded_segment_id: UUID | None = None
+    #: 复用既有段的序号范围时，上次封存的末序号；重新封存时 ``ordinal_end`` 不得小于它。
+    sealed_ordinal_end: int | None = None
+    #: 复用热段文件时的改名源（登记事务提交后改到 :attr:`path`）。本地路径必须与
+    #: manifest 的 ``(ordinal_start, segment_id)`` 同源，否则下次重试会找不到文件。
+    rename_from: Path | None = None
 
     def allocate_ordinal(self) -> int:
         """分配下一个 ordinal（同段内由调用方串行保证）。"""
@@ -241,10 +258,10 @@ class RolloutRecorder:
         thread_created_at: datetime,
         fence: tuple[str, int] | None = None,
     ) -> RolloutSegmentHandle | None:
-        """开启本 turn 的段；降级/已关闭/已有活动段时返回 None。
+        """开启本 turn 的段；降级/已关闭/已有活动段/无法安全复用时返回 None。
 
-        ``ordinal_start`` = 该 thread 已有最大 ordinal + 1（thread 级连续，§1.5）。
-        Phase 1 无 manifest，靠扫描本地段目录确定；Phase 2 接入 manifest 后改走索引。
+        ``ordinal_start``：复用既有段时沿用其值；新建时由 manifest 给出（该 thread
+        所有行含 deleted 的最大末序号 + 1），保证与既有段范围不重叠。
         """
         if self._degraded or self._closed:
             return None
@@ -261,6 +278,7 @@ class RolloutRecorder:
         directory = segment_dir(
             root=self._root, thread_created_at=thread_created_at, thread_id=thread_id
         )
+        segment_id = self._ids.new_uuid()
 
         def _path_for(ordinal_start: int, segment_id: UUID) -> Path:
             return segment_path(
@@ -271,51 +289,77 @@ class RolloutRecorder:
                 segment_id=segment_id,
             )
 
-        # §5.4 恢复：本 turn 若已有未封存段且本地文件仍在，直接续写，
-        # 保证一个 turn 只有一个段、ordinal 不重叠。
         if self._sealer is not None:
-            resume = await self._sealer.resolve_resume(
+            decision = await self._sealer.resolve_resume(
                 turn_id=turn_id,
                 thread_id=thread_id,
                 thread_created_at=thread_created_at,
                 segment_path_for=_path_for,
+                new_segment_id=segment_id,
+                fence=fence,
             )
-            if resume is not None:
+            if decision is None:
+                # 既不能安全复用、也拿不到安全的新建序号：放弃本 turn 的记录（旁路）
+                self._logger.warning("rollout 段无法复用也无法新建，本 turn 不记录: %s", turn_id)
+                return None
+            if isinstance(decision, ResumeInfo):
+                # I-1：复用该 turn 既有段的**序号范围与热段文件**——文件在登记事务里
+                # 改名到新段 id（本地路径必须与 manifest 同源），旧行同事务标 deleted。
                 handle = RolloutSegmentHandle(
-                    segment_id=resume.segment_id,
+                    segment_id=decision.segment_id,
                     thread_id=thread_id,
                     user_id=user_id,
                     turn_id=turn_id,
-                    path=resume.path,
-                    ordinal_start=resume.ordinal_start,
-                    next_ordinal=resume.last_ordinal + 1,
+                    path=decision.target_path,
+                    ordinal_start=decision.ordinal_start,
+                    next_ordinal=decision.last_ordinal + 1,
                     thread_created_at=thread_created_at,
                     materialized=True,
+                    registered=False,
+                    superseded_segment_id=decision.superseded_segment_id,
+                    sealed_ordinal_end=decision.sealed_ordinal_end,
+                    rename_from=decision.path,
                     # 续写段已有 thread_meta（就是段内首行），置非 None 抑制重复写入
-                    meta_ordinal=resume.ordinal_start,
+                    meta_ordinal=decision.ordinal_start,
                 )
                 self._active = handle
                 self._committed_bytes = 0
                 return handle
+            # NewSegment：manifest 给出的安全序号（含"跨节点标废旧段后重建"）
+            handle = RolloutSegmentHandle(
+                segment_id=segment_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                path=_path_for(decision.ordinal_start, segment_id),
+                ordinal_start=decision.ordinal_start,
+                next_ordinal=decision.ordinal_start,
+                thread_created_at=thread_created_at,
+                superseded_segment_id=decision.supersede_segment_id,
+            )
+            self._active = handle
+            self._committed_bytes = 0
+            return handle
 
-        ordinal_start = self._next_ordinal_start(directory)
-        segment_id = self._ids.new_uuid()
+        # 未装配 sealer（Phase 1 行为）：退回扫描本地段目录
+        scanned_start = self._next_ordinal_start(directory)
         handle = RolloutSegmentHandle(
             segment_id=segment_id,
             thread_id=thread_id,
             user_id=user_id,
             turn_id=turn_id,
-            path=_path_for(ordinal_start, segment_id),
-            ordinal_start=ordinal_start,
-            next_ordinal=ordinal_start,
+            path=_path_for(scanned_start, segment_id),
+            ordinal_start=scanned_start,
+            next_ordinal=scanned_start,
             thread_created_at=thread_created_at,
+            registered=True,
         )
         self._active = handle
         self._committed_bytes = 0
         return handle
 
     def _next_ordinal_start(self, directory: Path) -> int:
-        """扫描该 thread 已有段，返回"最大 ordinal + 1"。"""
+        """扫描该 thread 已有段，返回"最大 ordinal + 1"（未装配 sealer 时的退路）。"""
         segments = list_segment_paths(directory)
         if not segments:
             return 0
@@ -442,14 +486,34 @@ class RolloutRecorder:
             self._pending_acks.discard(ack)
 
     async def close_turn(self) -> None:
-        """结束本 turn 的段：等 ack → 释放句柄 → （Phase 2）按顺序铁律封存。"""
+        """结束本 turn 的段：等 ack → 释放句柄 → （Phase 2）按顺序铁律封存。
+
+        "登记了行但一行都没有写"的段（重试打开段后什么都没记录）在封存前标废：
+        ``seal()`` 会撞 ``ck_rollout_segment_sealed_fields``（对象为空、字段不全），
+        而留一行空 ``open`` 会让 manifest 与热文件长期不一致。
+        """
         await self.flush()
         await self._close_file()
         handle = self._active
         if handle is not None and self._sealer is not None:
-            await self._seal_segment(handle)
+            if handle.lines_written == 0:
+                await self._discard_empty_segment(handle)
+            else:
+                await self._seal_segment(handle)
         self._active = None
         self._committed_bytes = 0
+
+    async def _discard_empty_segment(self, handle: RolloutSegmentHandle) -> None:
+        """标废"已登记但从未写入"的空段（重试打开段后又失败/无新记录）。"""
+        if not handle.registered:
+            # 从未登记：manifest 里没有这一行，也没什么可标废
+            return
+        self._logger.warning(
+            "rollout 段没有任何记录，标废空段: turn=%s segment=%s",
+            handle.turn_id,
+            handle.segment_id,
+        )
+        await self._sealer.discard_open(segment_id=handle.segment_id)
 
     async def _seal_segment(self, handle: RolloutSegmentHandle) -> None:
         """按 §5.4 顺序封存：先上传对象，再在 PG 事务内写 manifest 与指针。
@@ -459,6 +523,16 @@ class RolloutRecorder:
         """
         if not handle.materialized:
             # 空 turn：从未物化，没有对象可封存，也不该在 manifest 留下痕迹
+            return
+        if not handle.registered:
+            # I-1：段没有 manifest 行时封存必然更新 0 行，而对象已经上传——那正是
+            # "孤儿对象 + 指针全部落空"。宁可不封存：本地热段留给 reconcile 收尾。
+            self._logger.warning(
+                "rollout 段未登记 manifest，跳过封存（避免孤儿对象）: turn=%s segment=%s",
+                handle.turn_id,
+                handle.segment_id,
+            )
+            _inc_counter("rollout_sealed_total", result="skipped_unregistered")
             return
         try:
             data = await asyncio.to_thread(handle.path.read_bytes)
@@ -487,9 +561,11 @@ class RolloutRecorder:
                 for pointer in handle.message_pointers
             ],
             fence=self._fence,
+            ordinal_end_floor=handle.sealed_ordinal_end,
         )
         result = await self._sealer.seal(request)
         handle.sealed = bool(getattr(result, "sealed", False))
+        _inc_counter("rollout_sealed_total", result="sealed" if handle.sealed else "failed")
         if not handle.sealed:
             self._logger.warning(
                 "rollout 段未封存: turn=%s reason=%s",
@@ -508,20 +584,21 @@ class RolloutRecorder:
         *,
         ordinal: int | None = None,
         message_id: UUID | None = None,
+        front: bool = False,
     ) -> bool:
+        envelope = _Envelope(
+            kind="line",
+            line=line,
+            record_type=record_type,
+            ordinal=ordinal,
+            message_id=message_id,
+        )
         try:
-            await asyncio.wait_for(
-                self._queue.put(
-                    _Envelope(
-                        kind="line",
-                        line=line,
-                        record_type=record_type,
-                        ordinal=ordinal,
-                        message_id=message_id,
-                    )
-                ),
-                timeout=QUEUE_PUT_TIMEOUT_SECONDS,
-            )
+            if front:
+                # 登记失败时把当前行放回队首重试：不能丢行，也不能让它插到后续行后面
+                self._queue.put_nowait(envelope)
+            else:
+                await asyncio.wait_for(self._queue.put(envelope), timeout=QUEUE_PUT_TIMEOUT_SECONDS)
         except TimeoutError:
             self._logger.warning("rollout 队列写满超时，丢弃记录: type=%s", record_type)
             _inc_counter("rollout_dropped_total", reason="queue_timeout")
@@ -545,6 +622,8 @@ class RolloutRecorder:
                         self._resolve_ack(envelope)
                         continue
                     if envelope.line is not None:
+                        if not await self._ensure_registered(envelope):
+                            continue
                         await self._write_with_retry(envelope)
                 except Exception:
                     self._logger.warning(
@@ -561,6 +640,42 @@ class RolloutRecorder:
                 if not pending.done():
                     pending.set_result(None)
             self._pending_acks.clear()
+
+    async def _ensure_registered(self, envelope: _Envelope) -> bool:
+        """写第一行**之前**登记 manifest 行；失败即降级（I-1）。
+
+        返回 True 表示可以继续写这一行。登记失败时不写、不封存，本 turn 的 rollout
+        整体降级并留下可观测标记，避免"对象已上传但 manifest 更新 0 行"。
+        """
+        handle = self._active
+        if handle is None or self._sealer is None:
+            return handle is not None
+        if handle.registered:
+            return True
+        registration = await self._sealer.register_open(
+            segment_id=handle.segment_id,
+            thread_id=handle.thread_id,
+            turn_id=handle.turn_id,
+            ordinal_start=handle.ordinal_start,
+            supersede_segment_id=handle.superseded_segment_id,
+            rename_from=handle.rename_from,
+            rename_to=handle.path if handle.rename_from is not None else None,
+        )
+        if getattr(registration, "status", None) is RegistrationStatus.failed:
+            handle.registered = False
+            self._degraded = True
+            self._logger.error(
+                "rollout 段登记失败，本 turn 停止记录（避免未登记段被封存成孤儿对象）: "
+                "turn=%s segment=%s reason=%s",
+                handle.turn_id,
+                handle.segment_id,
+                getattr(registration, "reason", "unknown"),
+            )
+            _inc_counter("rollout_dropped_total", reason="manifest_register_failed")
+            return False
+        handle.registered = True
+        handle.rename_from = None
+        return True
 
     def _resolve_ack(self, envelope: _Envelope) -> None:
         if envelope.ack is not None:
@@ -590,7 +705,11 @@ class RolloutRecorder:
             raise
 
     async def _write_once(self, envelope: _Envelope) -> None:
-        """真正落盘：延迟建文件 → write → flush；随后登记字节坐标与段事实。"""
+        """真正落盘：延迟建文件 → write → flush；随后登记字节坐标与段事实。
+
+        登记由 :meth:`_ensure_registered` 在此之前完成——本方法不再承担
+        "登记失败但照样写入"的风险（I-1）。
+        """
         line = envelope.line
         if line is None:
             return
@@ -598,19 +717,10 @@ class RolloutRecorder:
         if handle is None:
             return
         if self._file is None:
-            first_materialization = not handle.materialized
             await asyncio.to_thread(handle.path.parent.mkdir, parents=True, exist_ok=True)
             self._file = await asyncio.to_thread(handle.path.open, "ab")
             handle.materialized = True
             self._committed_bytes = await asyncio.to_thread(lambda: handle.path.stat().st_size)
-            if first_materialization and self._sealer is not None:
-                # §1.7 步骤 2 依赖"用 manifest 定位热段"，因此首次物化时懒创建 open 行
-                await self._sealer.register_open(
-                    segment_id=handle.segment_id,
-                    thread_id=handle.thread_id,
-                    turn_id=handle.turn_id,
-                    ordinal_start=handle.ordinal_start,
-                )
         file_handle = self._file
         offset_start = self._committed_bytes
 

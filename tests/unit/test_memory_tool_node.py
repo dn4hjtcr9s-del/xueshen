@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -527,3 +528,38 @@ async def test_no_pending_calls_is_a_noop() -> None:
     assert gateway.calls == []
     assert result["memory_tool_outputs"] == []
     assert "memory_tool_records" not in result
+
+
+@pytest.mark.asyncio
+async def test_read_hint_points_at_the_first_line_the_model_did_not_see() -> None:
+    """回归（review I-4）：截断提示必须指向**已投递**的下一行，不能跳过未投递的行。
+
+    曾经的实现用完整 content 的行数算 hint：200 行 read 因字符上限只投递约 70 行，
+    提示却写 `line_offset=200` → 71–200 行**永远不会被读到**且没有任何错误。
+    """
+    gateway = FakeMemoryToolsGateway()
+    # 每行足够长，保证 200 行一定超过 RESULT_MAX_CHARS（否则不触发截断）
+    lines = [f"第 {index} 行正文" + "细节" * 60 for index in range(200)]
+    gateway.read_results = [_read_payload(content="\n".join(lines), line_offset=0, total_lines=200)]
+    runtime = _runtime(memory_gateway=gateway)
+
+    result = await run_memory_tools(
+        _state(
+            memory_pending_tool_calls=[
+                _call("memory.read", {"memory_id": "mastery:椭圆", "max_lines": 200})
+            ]
+        ),
+        runtime=runtime,
+    )
+
+    output = result["memory_tool_outputs"][0]["output"]
+    assert result["memory_truncated"] is True
+    payload = json.loads(output)
+    hint = payload["hint"]
+    delivered = str(payload["content"]).splitlines()
+    # 提示必须等于"服务端起始行 + 真正投递的行数"
+    assert hint["line_offset"] == len(delivered)
+    assert 0 < len(delivered) < 200, "字符上限应当真的裁掉了后面的行"
+    # 未投递的第一行必须正好是 hint 指向的那一行（不漏不跳）
+    assert lines[hint["line_offset"]] not in delivered
+    assert len(delivered) == hint["line_offset"]

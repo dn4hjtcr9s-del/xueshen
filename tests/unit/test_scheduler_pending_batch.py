@@ -68,6 +68,8 @@ class _BatchRecorder:
     cancelled: list[UUID] = field(default_factory=list)
     #: 空列表表示"没有被调用过"；门控关闭测试断言它保持为空。
     calls: list[str] = field(default_factory=list)
+    #: list_open_runs 收到的幂等键后缀实参（review 调度项：过滤必须下推 SQL）。
+    list_open_run_suffixes: list[str | None] = field(default_factory=list)
     #: 非 None 时覆盖 assign_batch_members 的返回值（模拟并发抢走）。
     assign_rowcount: int | None = None
     #: 为 True 时成员查询返回空（模拟"读用户列表之后成员被并发领走"的窗口）。
@@ -176,9 +178,14 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _BatchRecorder:
                 run["cursor"] = kwargs["cursor"]
 
     async def fake_list_open_runs(
-        session: Any, *, maintenance_type: str, limit: int
+        session: Any,
+        *,
+        maintenance_type: str,
+        limit: int,
+        idempotency_suffix: str | None = None,
     ) -> list[dict[str, Any]]:
         rec.calls.append("list_open_runs")
+        rec.list_open_run_suffixes.append(idempotency_suffix)
         rows = []
         for run in rec.runs.values():
             # fresh_run 模拟"并发实例刚写进库的状态"：sweep 读的是库里的真相，
@@ -186,6 +193,12 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _BatchRecorder:
             if rec.fresh_run is not None and run["run_id"] == rec.fresh_run.get("run_id"):
                 run = rec.fresh_run
             if run["maintenance_type"] != maintenance_type or run["status"] != "running":
+                continue
+            # 幂等键后缀过滤已下推到 SQL（review 调度项）：假实现同步该语义，
+            # 且**先过滤再截断**——旧实现先 LIMIT 再在 Python 里筛会让历史残留挤占名额。
+            if idempotency_suffix is not None and not str(run["idempotency_key"]).endswith(
+                idempotency_suffix
+            ):
                 continue
             rows.append(run)
         return rows[:limit]
@@ -574,3 +587,41 @@ class TestBoundaryScanning:
 
         assert len(recorder.inserted) == 1
         assert len(recorder.runs) == 1
+
+
+class TestSweepPagination:
+    """sweep 的分页陷阱（review 调度项）：历史残留不得挤占当天 run 的名额。
+
+    旧实现是"先 ``created_at ASC LIMIT :limit`` 再在 Python 里按 ``:{date}`` 筛"，因此
+    超过 limit 的历史残留 running run 会让当天 run **永远**进不了 sweep 视野。修复把当天
+    过滤下推 SQL（``idempotency_suffix``）：这里用 limit=1 + 一堆更早入账的残留 run 复现，
+    并断言调度器确实只向仓储要"当天那批"。
+    """
+
+    async def test_stale_runs_do_not_crowd_out_todays_run(self, recorder: _BatchRecorder) -> None:
+        user_id = uuid4()
+        # 更早入账的历史残留（先插入 → 旧实现的 LIMIT 1 只会拿到它们）
+        for day in range(1, 11):
+            recorder.add_run(user_id=uuid4(), status="running", date=f"2026-08-{day:02d}")
+        today_run = recorder.add_run(user_id=user_id, status="running")
+        recorder.empty_members = True  # 当天已无待入批证据 → 该收尾
+        scheduler = Scheduler(
+            session_factory=make_session_factory(),
+            config=SchedulerConfig(
+                evidence_batch_enabled=True,
+                batch_max_users_per_run=1,
+                summary_daily_time=time(0, 0),
+            ),
+            clock=lambda: NOW,
+        )
+
+        await scheduler.run_task("summarize_pending_evidence", NOW)
+
+        # 过滤下推：仓储只被要求返回当天的 run（而不是"最早的一批"）
+        assert recorder.list_open_run_suffixes == [f":{TODAY}"]
+        assert [item["run_id"] for item in recorder.completed_runs] == [today_run["run_id"]]
+        assert today_run["status"] == "succeeded"
+        # 历史残留一个都没被误关
+        assert {run["status"] for key, run in recorder.runs.items() if run is not today_run} == {
+            "running"
+        }

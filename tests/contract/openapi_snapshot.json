@@ -3997,6 +3997,11 @@
             "title": "Index Entries",
             "type": "array"
           },
+          "index_entries_truncated": {
+            "default": false,
+            "title": "Index Entries Truncated",
+            "type": "boolean"
+          },
           "schema_version": {
             "title": "Schema Version",
             "type": "string"

@@ -108,6 +108,11 @@ rollout_segment_guard_triggered_total = Counter(
     "conversation_rollout_segment_guard_triggered_total",
     "rollout 段达到防爆阈值（segment_size_guard_triggered）的次数",
 )
+rollout_segment_registration_total = Counter(
+    "conversation_rollout_segment_registration_total",
+    "rollout 段 open manifest 登记结果（inserted / already_open / failed）",
+    ["result"],
+)
 rollout_queue_depth = Gauge(
     "conversation_rollout_queue_depth",
     "rollout 写入队列当前深度",

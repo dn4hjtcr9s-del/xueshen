@@ -73,14 +73,25 @@ def _batch_cursor_tuple(value: str | None) -> tuple[datetime, datetime, UUID] | 
     return (cursor.eligible_at, cursor.created_at, cursor.operation_id)
 
 
+def _batch_run_key_suffix(date: str) -> str:
+    """``BATCH_IDEMPOTENCY_KEY_TEMPLATE`` 里去掉 ``{user_id}`` 后的当天后缀（形如 ``:{date}``）。
+
+    与 :func:`_batch_run_user_id` 同源：模板一旦变化，解析与收尾过滤一起变，不会出现
+    "一边按新模板建 run、一边按旧模板筛"的错配。同时也是下推给
+    ``maintenance_repo.list_open_runs`` 的 SQL 过滤后缀（review 调度项）。
+    """
+    _prefix, _, rest = BATCH_IDEMPOTENCY_KEY_TEMPLATE.partition("{user_id}")
+    return rest.replace("{date}", date)
+
+
 def _batch_run_user_id(idempotency_key: str, *, date: str) -> UUID | None:
     """从 run 幂等键 ``summarize:{user_id}:{date}`` 解析 user_id（解析不了返回 None）。
 
     前缀/后缀都由 :data:`BATCH_IDEMPOTENCY_KEY_TEMPLATE` 现算而不是 ``split(":")``：
     模板一旦变化，这里会**静默失效**成"不收尾"（保守方向），不会误关别的 run。
     """
-    prefix, _, rest = BATCH_IDEMPOTENCY_KEY_TEMPLATE.partition("{user_id}")
-    suffix = rest.replace("{date}", date)
+    prefix, _, _rest = BATCH_IDEMPOTENCY_KEY_TEMPLATE.partition("{user_id}")
+    suffix = _batch_run_key_suffix(date)
     if not idempotency_key.startswith(prefix) or not idempotency_key.endswith(suffix):
         return None
     raw = idempotency_key[len(prefix) : len(idempotency_key) - len(suffix)]
@@ -597,7 +608,10 @@ class Scheduler:
         三个条件全满足才关（顺序即优先级）：
 
         1. **属于当天**：幂等键以 ``:{date}`` 结尾——昨天的 run 不该被今天的 tick 关掉
-           （历史残留交给下一轮 sweep 或人工判断）；
+           （历史残留交给下一轮 sweep 或人工判断）。该过滤**下推到 SQL**
+           （``idempotency_suffix``，review 调度项）：否则先按 ``created_at ASC LIMIT`` 取
+           一批、再在 Python 里筛，历史残留的 running run 一旦超过 limit 就会永久挤占
+           当天 run 的名额；
         2. **最后一批已终态**：在途/待重试的批次不能被判死，否则会把正在跑的批次
            标成成功、断掉该用户的续跑；
         3. **该用户已无待入批证据**：``pending_batch AND batch_operation_id IS NULL AND
@@ -607,11 +621,17 @@ class Scheduler:
         续跑第二批，提前关 run 会让剩余证据等到第二天。
         """
         swept = 0
+        suffix = _batch_run_key_suffix(date)
         runs = await maintenance_repo.list_open_runs(
-            session, maintenance_type="summarize_pending_evidence", limit=limit
+            session,
+            maintenance_type="summarize_pending_evidence",
+            limit=limit,
+            idempotency_suffix=suffix,
         )
         for run in runs:
-            if not str(run["idempotency_key"]).endswith(f":{date}"):
+            # 过滤已下推 SQL；这里再校验一次是保守兜底：后缀算法若与模板错配，宁可不收尾
+            # （下一次 tick 还有机会），也绝不误关别的日期的 run。
+            if not str(run["idempotency_key"]).endswith(suffix):
                 continue
             operation_id = run["operation_id"]
             if operation_id is not None:

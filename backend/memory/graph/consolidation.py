@@ -60,13 +60,26 @@ def _operation(state: MemoryManagerState) -> MemoryOperation:
     return MemoryOperation.model_validate(state["operation"])
 
 
+def _batch_operation(state: MemoryManagerState) -> MemoryOperation:
+    """批次 operation：优先取 `batch_operation`（load_batch_members 保存的那份）。
+
+    只有在单条路径（没有批次上下文）时才退回 `operation`。
+    """
+    saved = state.get("batch_operation")
+    return MemoryOperation.model_validate(saved if saved else state["operation"])
+
+
 async def consolidate_user_memory(
     state: MemoryManagerState, runtime: Runtime[MemoryRuntimeContext]
 ) -> dict[str, Any]:
     """批次末段入口（由 ``batch.enter_batch_consolidation`` 调用）。"""
     ctx = runtime.context
     settings = ctx.settings
-    operation = _operation(state)
+    # **必须用批次自身的 operation**（review I-2）：`begin_batch_member` 会把
+    # `state["operation"]` 投影成"当前成员"，还原发生在 `finalize_batch_result`，而本节点
+    # 在它**之前**执行。若读 `state["operation"]`，末段所有产物的 batch_operation_id
+    # （summary meta 的幂等凭证、悬空链接的幂等键、KG 审计锚）都会错记成最后一个成员。
+    operation = _batch_operation(state)
     user_id = operation.user_id
     batch_operation_id = operation.operation_id
 
@@ -132,17 +145,21 @@ async def consolidate_user_memory(
         degraded=degraded,
     )
     keywords, aliases = await _apply_frontmatter_governance(
-        ctx, state, user_id=user_id, documents=documents, result=result
+        ctx, state, user_id=user_id, documents=documents, result=result, operation=operation
     )
     dangling = await _govern_dangling_links(
-        ctx, session_state=state, user_id=user_id, documents=documents, operation=operation
+        ctx, state, user_id=user_id, documents=documents, operation=operation
     )
+    # 治理提交（keywords/aliases/建档）会把文档升版，因此 KG 双写前必须**重读**
+    # 活动版本与 checksum：否则 `_load_active_links(version=旧值)` 取不到（link 已跟着
+    # 新版本走），双路更新会一直空转（review I-3 附带的 DEV-028 订正）。
+    refreshed = await _refresh_document_versions(ctx, user_id=user_id, documents=documents)
     kg = await _dual_write_kg(
         ctx,
         state,
         user_id=user_id,
         batch_operation_id=batch_operation_id,
-        documents=documents,
+        documents=refreshed,
         result=result,
     )
 
@@ -389,6 +406,7 @@ async def _apply_frontmatter_governance(
     user_id: UUID,
     documents: list[dict[str, Any]],
     result: ConsolidationResult,
+    operation: MemoryOperation,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """keywords 与 aliases 归并**合并成每个文档一次提交**，返回 (keywords, aliases) 结果。
 
@@ -464,7 +482,7 @@ async def _apply_frontmatter_governance(
             )
         )
     outcome: dict[str, Any] = (
-        await _commit(ctx, state, user_id=user_id, plans=plans)
+        await _commit(ctx, state, user_id=user_id, plans=plans, operation=operation)
         if plans
         else {"committed": 0, "failed": []}
     )
@@ -490,6 +508,7 @@ async def _commit(
     *,
     user_id: UUID,
     plans: list[CommitMutationPlan],
+    operation: MemoryOperation | None = None,
 ) -> dict[str, Any]:
     """共用的治理提交入口：走正常不可变版本 + fence（失租则整批中止）。
 
@@ -497,14 +516,15 @@ async def _commit(
     把失败原因收进结果（§5.9："任何一路失败都记录最终一致告警，允许各自幂等重试"）。
     """
     fencing = state.get("fencing") or {}
+    commit_operation = operation or _batch_operation(state)
     committed = 0
     failed: list[dict[str, str]] = []
     for plan in plans:
         try:
             await ctx.memory_service.commit_plans(
-                operation_id=_operation(state).operation_id,
+                operation_id=commit_operation.operation_id,
                 user_id=user_id,
-                actor_type=_operation(state).actor_type,
+                actor_type=commit_operation.actor_type,
                 plans=[plan],
                 prompt_version=SUMMARY_CONSOLIDATE_PROMPT_VERSION,
                 model_name=getattr(ctx.openai_client, "model_name", None),
@@ -534,8 +554,8 @@ async def _commit(
 
 async def _govern_dangling_links(
     ctx: MemoryRuntimeContext,
+    state: MemoryManagerState,
     *,
-    session_state: MemoryManagerState,
     user_id: UUID,
     documents: list[dict[str, Any]],
     operation: MemoryOperation,
@@ -592,7 +612,12 @@ async def _govern_dangling_links(
         logger.warning("悬空链接登记失败: %s", type(exc).__name__)
         return {"sighted": len(sightings), "candidates": 0, "promoted": [], "failed": True}
     promoted = await _promote_dangling_candidates(
-        ctx, session_state, user_id=user_id, candidates=candidates, namespace=namespace
+        ctx,
+        state,
+        user_id=user_id,
+        candidates=candidates,
+        namespace=namespace,
+        operation=operation,
     )
     return {
         "sighted": len(sightings),
@@ -609,6 +634,7 @@ async def _promote_dangling_candidates(
     user_id: UUID,
     candidates: list[dict[str, Any]],
     namespace: dict[str, str],
+    operation: MemoryOperation,
 ) -> list[str]:
     """对达到门槛的候选正式建档（§5.9④：累计 ≥2 批）。
 
@@ -639,7 +665,7 @@ async def _promote_dangling_candidates(
             ),
             mastery_patch=None,
         )
-        outcome = await _commit(ctx, state, user_id=user_id, plans=[plan])
+        outcome = await _commit(ctx, state, user_id=user_id, plans=[plan], operation=operation)
         if outcome.get("committed"):
             promoted.append(memory_id)
             try:
@@ -654,6 +680,28 @@ async def _promote_dangling_candidates(
             except Exception as exc:
                 logger.warning("悬空候选建档回写失败 %s: %s", memory_id, type(exc).__name__)
     return promoted
+
+
+async def _refresh_document_versions(
+    ctx: MemoryRuntimeContext, *, user_id: UUID, documents: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """治理提交之后重读活动版本/checksum，供 KG 双路使用（review I-3 附带项）。"""
+    if not documents:
+        return documents
+    async with ctx.session_factory() as session:
+        rows = await docs_repo.list_active_documents(session, user_id=user_id)
+    active = {str(row["memory_id"]): row for row in rows}
+    refreshed: list[dict[str, Any]] = []
+    for doc in documents:
+        row = active.get(str(doc.get("memory_id")))
+        if row is None:
+            refreshed.append(doc)
+            continue
+        updated = dict(doc)
+        updated["version"] = int(row.get("active_version") or doc.get("version") or 0)
+        updated["checksum"] = str(row.get("active_checksum") or doc.get("checksum") or "")
+        refreshed.append(updated)
+    return refreshed
 
 
 def _topic_version(documents: list[dict[str, Any]], topic_key: str) -> int:

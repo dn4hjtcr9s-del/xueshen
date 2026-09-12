@@ -807,20 +807,25 @@ def create_app(
 
         # memory-rebuild §5.10：读路径独立 flag。开启时按 §5.4 顺序优先读 rollout
         # （本地段 → 对象存储），任何不可用均回退 conversation_messages.content。
+        #
+        # I-7：这里必须用 create_app(settings) 的**入参**而不是全局 get_settings()
+        # （契约测试 / 内嵌 app 注入的 Settings 与进程 env 是两份对象，混用会让
+        # flag 与 rollout root 对不上）；对象存储统一走 factory，否则配 kodo 时
+        # 写入去了 bucket、而这里仍去本地磁盘找。
         rollout_reader = None
-        if get_settings().conversation_rollout_read_enabled:
-            from backend.conversation.rollout.object_store import LocalRolloutObjectStore
+        if settings.conversation_rollout_read_enabled:
+            from backend.conversation.rollout.factory import build_rollout_object_store
             from backend.conversation.rollout.reader import RolloutReader
 
             rollout_reader = RolloutReader(
                 session_factory=reader_db.session_factory,
-                object_store=LocalRolloutObjectStore(root=get_settings().conversation_rollout_root),
-                rollout_root=get_settings().conversation_rollout_root,
+                object_store=build_rollout_object_store(settings),
+                rollout_root=settings.conversation_rollout_root,
             )
         reader_service = ConversationSourceReadService(
             session_factory=reader_db.session_factory,
             rollout_reader=rollout_reader,
-            rollout_read_enabled=get_settings().conversation_rollout_read_enabled,
+            rollout_read_enabled=settings.conversation_rollout_read_enabled,
         )
         app.include_router(build_reader_router(reader_service))
     # Study Router（方案 §21：STUDY_DOMAIN_ENABLED=false 或未配置

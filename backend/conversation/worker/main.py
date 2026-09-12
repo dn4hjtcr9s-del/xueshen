@@ -12,6 +12,7 @@ import logging
 from typing import Any
 from uuid import UUID, uuid4
 
+from backend.auth.context import SCOPE_MEMORY_CONTEXT, SCOPE_MEMORY_READ
 from backend.conversation.graph.state import SystemClock, SystemIdGenerator
 from backend.conversation.persistence.database import ConversationDatabase
 from backend.conversation.worker.graph_worker import (
@@ -21,10 +22,76 @@ from backend.conversation.worker.graph_worker import (
 from backend.conversation.worker.job_worker import JobWorker
 from backend.settings import get_settings
 
+#: 对话 agent 读取长期记忆所需的全部 scope（memory-rebuild §2.4 / §5.7 / §5.10）。
+#:
+#: 必须**同时**请求两个 scope：``memory:context`` 用于既有的上下文读端点，
+#: ``memory:read`` 用于 Phase 5 的三个工具端点（prime/search/read）——它们的
+#: guard 是 ``require(..., scope=SCOPE_MEMORY_READ)``，而 ``AuthContext.has_scope``
+#: 是精确成员判定，缺一个就 403；prime 的 4xx 不可降级（graph/nodes/memory.py）
+#: 会让**每一轮 turn** 直接失败。二者都在 ``AGENT_ALLOWED_SCOPES`` 白名单内。
+MEMORY_AGENT_SCOPES: tuple[str, ...] = (SCOPE_MEMORY_CONTEXT, SCOPE_MEMORY_READ)
+
 
 def graph_thread_id_for_turn(turn_id: UUID) -> str:
     """附录 A.3：graph_thread_id 从 turn_id 确定性派生。"""
     return f"conv-turn:{turn_id}"
+
+
+def issue_memory_context_token(*, settings: Any, user_id: str) -> str:
+    """为当前用户签发短时长期记忆读取 token（``MemoryClient`` 的委托凭证）。
+
+    签发点独立成模块级函数，便于集成测试用**真实签发**的 token 打真实端点
+    （tests/integration/test_memory_tool_token_scope.py）：此前测试全部注入 Fake
+    网关，从未覆盖"真实令牌 → 真实 guard"这条链路。
+    """
+    from backend.auth_service.agent_tokens import issue_agent_token
+
+    return issue_agent_token(
+        agent_subject=f"conversation-agent-{settings.app_env}",
+        delegated_sub=user_id,
+        actor_type="conversation_agent",
+        requested_scopes=list(MEMORY_AGENT_SCOPES),
+    )
+
+
+def build_rollout_runtime(
+    *, settings: Any, session_factory: Any, logger: logging.Logger
+) -> tuple[Any, Any]:
+    """装配 rollout 子系统，返回 ``(object_store, recorder_or_None)``。
+
+    两条装配纪律（评审 I-6 / I-7）：
+
+    - **对象存储不受 ``CONVERSATION_ROLLOUT_ENABLED`` 约束**：delete_thread 的
+      合规语义是"先删对象再落 tombstone"，一旦 enable → disable 之后再删 thread，
+      没有存储就只能"没删数据却宣称删了"。local 模式下与原先逐字一致（同一 root）；
+      kodo 模式由 :func:`build_rollout_object_store` 校验凭据，缺配置显式失败。
+    - **统一走 factory**：worker 不再硬编码 Local，否则配 ``..._OBJECT_STORE=kodo``
+      时段写本地、而 verify/reconcile 去 bucket 找，每条段都报 sealed_object_missing。
+    """
+    from backend.conversation.rollout.factory import build_rollout_object_store
+
+    object_store = build_rollout_object_store(settings)
+    if not settings.conversation_rollout_enabled:
+        # §1.5：recorder 默认关闭 → 不装配，runtime.rollout_recorder 保持 None，
+        # 节点侧 record_rollout 直接 no-op。
+        return object_store, None
+    from backend.conversation.rollout import RolloutRecorder
+    from backend.conversation.rollout.sealer import RolloutSegmentSealer
+
+    recorder = RolloutRecorder(
+        root=settings.conversation_rollout_root,
+        clock=SystemClock(),
+        id_generator=SystemIdGenerator(),
+        logger=logger,
+        queue_size=settings.conversation_rollout_queue_size,
+        segment_max_bytes=settings.conversation_rollout_segment_max_bytes,
+        sealer=RolloutSegmentSealer(
+            session_factory=session_factory,
+            object_store=object_store,
+            logger=logger,
+        ),
+    )
+    return object_store, recorder
 
 
 def _psycopg_conninfo(settings: Any) -> str:
@@ -46,8 +113,6 @@ async def _run() -> None:
     rollout_object_store: Any = None
     try:
         # Gateways
-        from backend.auth.context import SCOPE_MEMORY_CONTEXT
-        from backend.auth_service.agent_tokens import issue_agent_token
         from backend.conversation.gateways.embedding import QueryEmbeddingGateway
         from backend.conversation.gateways.memory import MemoryGateway
         from backend.conversation.gateways.openai import OpenAIGateway
@@ -57,19 +122,14 @@ async def _run() -> None:
 
         openai_gateway = OpenAIGateway(settings=settings, logger=logger)
 
-        def issue_memory_context_token(user_id: str) -> str:
+        def issue_memory_context_token_for_user(user_id: str) -> str:
             """为当前用户签发短时上下文读取 token，避免跨用户复用静态凭证。"""
-            return issue_agent_token(
-                agent_subject=f"conversation-agent-{settings.app_env}",
-                delegated_sub=user_id,
-                actor_type="conversation_agent",
-                requested_scopes=[SCOPE_MEMORY_CONTEXT],
-            )
+            return issue_memory_context_token(settings=settings, user_id=user_id)
 
         memory_client = MemoryClient(
             settings.memory_api_base_url,
             token=settings.memory_agent_token,
-            user_token_provider=issue_memory_context_token,
+            user_token_provider=issue_memory_context_token_for_user,
             timeout=max(settings.memory_context_timeout_seconds, 10.0),
         )
         memory_gateway = MemoryGateway(client=memory_client, logger=logger)
@@ -110,29 +170,13 @@ async def _run() -> None:
         runtime.context_service = context_service
         runtime.settings = settings
         runtime.token_counter = token_counter
-        # memory-rebuild §1.5 / §5.3：装配 rollout recorder（默认关闭 → 不装配，
-        # runtime.rollout_recorder 保持 None，节点侧 record_rollout 直接 no-op）。
-        if settings.conversation_rollout_enabled:
-            from backend.conversation.rollout import RolloutRecorder
-            from backend.conversation.rollout.object_store import LocalRolloutObjectStore
-            from backend.conversation.rollout.sealer import RolloutSegmentSealer
-
-            # Phase 2 只接 Local（目录模拟 bucket）；Kodo 适配器属 Phase 3，
-            # 届时只替换这一处构造函数，recorder/sealer/reader 都不用改。
-            rollout_object_store = LocalRolloutObjectStore(root=settings.conversation_rollout_root)
-            rollout_recorder = RolloutRecorder(
-                root=settings.conversation_rollout_root,
-                clock=SystemClock(),
-                id_generator=SystemIdGenerator(),
-                logger=logger,
-                queue_size=settings.conversation_rollout_queue_size,
-                segment_max_bytes=settings.conversation_rollout_segment_max_bytes,
-                sealer=RolloutSegmentSealer(
-                    session_factory=db.session_factory,
-                    object_store=rollout_object_store,
-                    logger=logger,
-                ),
-            )
+        # memory-rebuild §1.5 / §5.3：装配 rollout 子系统。对象存储**始终**构造
+        # （I-6：delete_thread 必须能物理删除历史对象，与写入 flag 无关）；
+        # recorder 仅在 flag 打开时装配，关闭时节点侧 record_rollout 直接 no-op。
+        rollout_object_store, rollout_recorder = build_rollout_runtime(
+            settings=settings, session_factory=db.session_factory, logger=logger
+        )
+        if rollout_recorder is not None:
             runtime.rollout_recorder = rollout_recorder
             logger.info(
                 "Conversation Rollout 已启用: root=%s queue_size=%s segment_max_bytes=%s",

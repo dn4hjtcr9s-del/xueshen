@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app import create_app
+from backend.memory import metrics
 from backend.memory.api.dependencies import ApiRuntime, _tighten_pending_batch_gate
 from backend.memory.graph.runner import LocalLangGraphRunner
 from backend.memory.services.memory_service import MemoryService
@@ -331,3 +332,44 @@ async def test_tighten_gate_ignores_non_pending_rows(
                 next_run_at=gate - timedelta(hours=1),
             )
     assert (await _row(session_factory, str(operation_id)))["next_run_at"] == gate
+
+
+def _metric_value(*, status: str) -> float:
+    """读 `memory_operations_total{type=conversation_evidence,status=...}` 的当前值。
+
+    prometheus_client 的 Counter 是进程级全局量（跨测试累加），因此断言只比较**增量**。
+    """
+    child = metrics.memory_operations_total.labels(type="conversation_evidence", status=status)
+    return float(child._value.get() or 0.0)
+
+
+@pytest.mark.asyncio
+async def test_operation_metric_label_follows_the_actual_inserted_status(
+    tmp_path: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+    memory_service: MemoryService,
+    runner: LocalLangGraphRunner,
+) -> None:
+    """review 指标项：标签必须等于行实际插入的状态，批量开启后不能再无条件打 queued。"""
+    queued_before, pending_before = (
+        _metric_value(status="queued"),
+        _metric_value(status="pending_batch"),
+    )
+
+    async with _api_client(
+        _settings(tmp_path, memory_batch_enabled=True), session_factory, memory_service, runner
+    ) as client:
+        created = await _submit(client, trigger="turn_boundary", key="k-metric-on")
+    row = await _row(session_factory, str(created["operation_id"]))
+    assert row["status"] == "pending_batch"
+    assert _metric_value(status="pending_batch") == pending_before + 1
+    assert _metric_value(status="queued") == queued_before
+
+    async with _api_client(
+        _settings(tmp_path, memory_batch_enabled=False), session_factory, memory_service, runner
+    ) as client:
+        created_off = await _submit(client, trigger="turn_boundary", key="k-metric-off")
+    row_off = await _row(session_factory, str(created_off["operation_id"]))
+    assert row_off["status"] == "queued"
+    assert _metric_value(status="queued") == queued_before + 1
+    assert _metric_value(status="pending_batch") == pending_before + 1

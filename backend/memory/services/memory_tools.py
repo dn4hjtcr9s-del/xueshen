@@ -62,6 +62,15 @@ PRIME_SUMMARY_MAX_CHARS = 4000
 #: 只读 MAX+1 字节即可判定，绝不把超大文件整份读进内存。
 PRIME_SUMMARY_MAX_BYTES = 1024 * 1024
 
+#: prime 注册表目录的条数上限（review I-5）：`description` 单字段上限 2000 字符，
+#: 主题很多的用户会让整个响应体（进而让 conversation 侧的快照/checkpoint）无界增长。
+#: 这里给服务端一个确定性的**有界返回**：按 `memory_id` 升序取前 N 条，超限时置
+#: `index_entries_truncated=true`（可判定信号，见 `MemoryToolPrimeResponse`），
+#: 让上层知道"目录不是全量、需要走 memory.search 定位"。
+#: 200 是防御性上限（正常用户的主题目录量级在几十条以内），不是产品配额；
+#: 注入提示词的最终体积另由 conversation 侧的 token 预算裁剪兜底。
+PRIME_INDEX_ENTRIES_MAX = 200
+
 
 # ---------------------------------------------------------------------------
 # search：SQL 构造（纯函数）与执行
@@ -232,19 +241,29 @@ def tool_hit_sort_key(row: Mapping[str, Any], queries: list[str]) -> tuple[int, 
 # ---------------------------------------------------------------------------
 
 
-async def fetch_index_projection(session: AsyncSession, *, user_id: UUID) -> list[dict[str, Any]]:
+async def fetch_index_projection(
+    session: AsyncSession, *, user_id: UUID, limit: int | None = None
+) -> list[dict[str, Any]]:
     """prime 的目录投影：只取四列，**不含正文**（§2.4 D1）。
 
     事实源是实时 index 表（§2.4 D3：注入的目录只是提示，search 才是事实源），
     已删除记忆的索引行在 forget 同事务删除，因此这里无需额外过滤。
     排序固定 memory_id 升序，保证同一份注册表注入顺序稳定。
+
+    ``limit`` 供 prime 做"有界返回"（review I-5）：调用方传 ``上限 + 1`` 就能在
+    **不把整份注册表读进内存**的前提下判定是否超限；``None`` 表示不限制（既有语义）。
     """
+    params: dict[str, Any] = {"user_id": user_id}
+    limit_clause = ""
+    if limit is not None:
+        params["limit"] = limit
+        limit_clause = " LIMIT :limit"
     result = await session.execute(
         text(
             "SELECT memory_id, title, summary, keywords FROM memory_index_entries "
-            "WHERE user_id = :user_id ORDER BY memory_id ASC"
+            "WHERE user_id = :user_id ORDER BY memory_id ASC" + limit_clause
         ),
-        {"user_id": user_id},
+        params,
     )
     return [dict(row) for row in result.mappings().all()]
 
@@ -414,7 +433,12 @@ class MemoryToolsService:
         )
 
     async def prime(self, *, user_id: UUID) -> MemoryToolPrimeResponse:
-        """首轮注入输入（§2.4 D1）：summary（可降级为空）+ 注册表目录。"""
+        """首轮注入输入（§2.4 D1）：summary（可降级为空）+ 注册表目录。
+
+        目录**有界返回**（review I-5）：多取一条判定超限，超限时只返回按 memory_id
+        升序的前 :data:`PRIME_INDEX_ENTRIES_MAX` 条，并置 ``index_entries_truncated``
+        作为可判定信号——绝不静默丢条目。既有字段的形状与语义都不变。
+        """
         raw, generated_at = await self._summary_reader.read(user_id=user_id)
         body, schema_version, stamp, degraded, reason = parse_prime_summary(
             raw, generated_at=generated_at
@@ -426,7 +450,13 @@ class MemoryToolsService:
         if summary_truncated:
             body = body[:PRIME_SUMMARY_MAX_CHARS]
         async with self._session_factory() as session:
-            rows = await fetch_index_projection(session, user_id=user_id)
+            rows = await fetch_index_projection(
+                session, user_id=user_id, limit=PRIME_INDEX_ENTRIES_MAX + 1
+            )
+        index_entries_truncated = len(rows) > PRIME_INDEX_ENTRIES_MAX
+        if index_entries_truncated:
+            logger.warning("memory_prime_index_truncated: kept=%d", PRIME_INDEX_ENTRIES_MAX)
+            rows = rows[:PRIME_INDEX_ENTRIES_MAX]
         return MemoryToolPrimeResponse(
             summary=body,
             schema_version=schema_version,
@@ -441,5 +471,8 @@ class MemoryToolsService:
                 for row in rows
             ],
             summary_truncated=summary_truncated,
-            degraded=degraded,
+            # 目录被条数上限截断时同样置 degraded：服务端"内容不完整"的信号保持
+            # 单一入口，节点侧据此发 memory_prime_degraded（见 review I-5）。
+            degraded=degraded or index_entries_truncated,
+            index_entries_truncated=index_entries_truncated,
         )

@@ -56,6 +56,12 @@ DegradedFlag = Literal[
     "memory_tool_degraded",
     "memory_tool_truncated",
     "memory_tool_budget_exceeded",
+    # main 上就存在的缺口（review I-10）：answer 节点会 append 这三个标记，但它们是
+    # 封闭 Literal，`AnswerCompletedPayload` 又是 extra="forbid" → finalize 事务内
+    # validate_event_payload 抛错**回滚整个事务**，已经流出的部分回答丢失。
+    "answer_stream_interrupted",
+    "answer_stream_truncated",
+    "answer_stream_refused",
 ]
 
 

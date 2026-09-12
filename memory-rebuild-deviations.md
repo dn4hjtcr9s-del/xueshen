@@ -1032,6 +1032,151 @@ Phase 0 按 §5.2-B 的配置表往 `.env.example` 写了 5 个 §2.6 D4 参数�
 
 ---
 
+## 外部 review 的修复登记（REVIEW-memory-rebuild-implementation.md）
+
+> 用户提供的独立 review 报告（`REVIEW-memory-rebuild-implementation.md`，2026-09-12）用真实
+> PostgreSQL 复现了 3 个 Critical + 12 个 Important。本节登记**修复**与**订正**：review 指出
+> 的「未登记」项在此补齐，「与代码不符」的条目在此改写。
+
+### DEV-030 `issue_memory_context_token` 没有请求 `memory:read` scope（**Critical，review C-1**）
+
+工具三个端点要求 `SCOPE_MEMORY_READ`，而 worker 签发的委托令牌只请求
+`SCOPE_MEMORY_CONTEXT`，`has_scope` 是精确成员判定 → 403 → prime 的 4xx 走 `raise`
+（不可降级）、工具把 403 判为 turn-fatal → **打开任一 flag 后每轮对话必失败**。
+单测全用 Fake 网关、没有任何测试用真实令牌打真实端点，所以整条链路的"最后一米"没被覆盖。
+
+### DEV-031 真实 Worker 的 lease fencing 使 nightly batch 永不写入（**Critical，review C-2**）
+
+`begin_batch_member` 把 `state["operation"]` 换成成员 operation，却没换 `fencing`（仍是批次
+的 worker/generation）；`mark_commit_started` 的 CAS 谓词要求
+`operation_id=成员 AND locked_by=worker AND lease_generation=gen AND status='running'`，
+而成员行是 `pending_batch` / `locked_by=NULL` → **恒 0 行 → LeaseFencedError**；Worker 对该
+异常不做任何状态写回 → 批次无限重试、成员被两个扫描同时排除 → **证据永久搁浅**。
+
+**测试盲区**：Phase 6 的集成测试全部 `await runner.run(batch)`（不带 fencing），走的是无
+fencing 的直调分支。修复要求：成员的提交用**真正持有 lease 的 operation**（批次）做 fencing，
+成员 id 只用于重放键/可追溯；并补一条**真实 Worker（claim → run → complete）**的端到端测试。
+
+### DEV-032 本地模式下 thread 删除从不删热缓存 JSONL（**Critical，review C-3**）
+
+热段写在 `{root}/threads/...`，而 `LocalRolloutObjectStore` 的 bucket 根是 `{root}/objects`；
+删除只作用于镜像 → **用户原文留在磁盘**，且 tombstone 之后
+`list_by_thread`（过滤 deleted）/`retention-scan`（只扫 sealed）/`reconcile`（只列
+`rollouts/`）都再也发现不了它 → 永久残留。§1.8「删除后数据物理消失」因此不成立。
+测试盲区：既有断言只检查 `object_store.list_prefix("rollouts/") == []`（镜像为空）。
+
+### DEV-033 段重试后新段永远登记不上（**Important，review I-1**）
+
+`uq_rollout_segment_turn_active` 是 `(turn_id) WHERE status <> 'deleted'`，**已封存的段没有
+被排除**；turn 重试时会新建段 → 唯一冲突 → `register_open` 把它吞成一行 warning →
+无 manifest、`seal()` 0 行（`not_transitionable`）而对象**已上传**（孤儿）。
+"跨节点恢复"路径则撞上 `(thread_id, ordinal_start)` 的 UNIQUE（**不排除 deleted 行**），
+说明"标废旧段 + 复用 ordinal_start"这个设计在约束层面不成立。
+ADD-023 曾把"跨节点重建"写成已实现的能力——该路径在约束下不可用。
+
+### DEV-034 consolidation 在 `finalize_batch_result` 之前执行，拿到的是最后一个成员（**Important，review I-2**）
+
+`begin_batch_member` 的投影在 `finalize_batch_result` 才还原，而 consolidation 在它之前跑 →
+末段产物的 `batch_operation_id`（summary meta 幂等凭证、悬空链接幂等键、KG 审计锚）全部
+错记成成员 id；治理提交也会用"成员的 operation_id + 批次的 fencing"。
+
+**订正 ADD-064**：原文称"循环结束由 `finalize_batch_result` 把 operation 还原成批次自身"
+——还原确实存在，但在 consolidation **之后**，该登记掩盖了顺序问题。现已在
+`consolidation.py` 内改为读 `state["batch_operation"]`（不再依赖边的顺序）。
+
+### DEV-035 `frontmatter_patch` 提交摧毁 mastery↔KG 映射（**Important，review I-3**）
+
+mastery 提交路径无条件 `deactivate_graph_links(...)`，再只按 `graph_node_ids_by_plan`
+重建；consolidation 的 keywords/aliases 计划不传 node 信息 → 旧 link 全灭、新的一个不建 →
+紧随其后的 `_dual_write_kg` 必然 `no_graph_mapping`（空转）。
+
+**订正 DEV-028**：原文称"已修为真实 version/checksum"，但那两个值取自 **patch 之前**的
+`documents` 快照，patch 后版本已 +1。
+
+### DEV-036 `memory.read` 的续读提示跳过从未投递的行（**Important，review I-4**）
+
+`returned = len(payload["content"].splitlines())` 用的是**完整切片**的行数，而 `rendered`
+已被字符/token 预算截断 → 提示指向"服务端取到的末行 +1"，中间整段**永远读不到**且无错误。
+既有断言只检查 `"line_offset" in output`，所以没抓到。现改为按行裁剪 + 用**已投递行数**
+推算 `line_offset`。
+
+### DEV-037 `answer_stream_*` 不在封闭 `DegradedFlag` 里（**Important，review I-10，main 上既有**）
+
+answer 节点会 append `answer_stream_interrupted/truncated/refused`，但它们是封闭 Literal 且
+`AnswerCompletedPayload` 是 `extra="forbid"` → `validate_event_payload` 在 **finalize 事务内**
+抛错且没有 try/except → **整个事务回滚**、已流出的部分回答丢失。方向是 fail-closed 而非
+数据损坏，但工具循环把 answer 节点最多跑 6 次，触发概率上升。已补齐三个标记。
+
+### 其余 review 项的登记订正（**第 10 项**）
+
+| 条目 | 订正 |
+|---|---|
+| **ADD-020** | 声称 rollout 指标已实现——`rollout_queue_depth` / `rollout_flush_latency_seconds` / `rollout_sealed_total` 三个指标**零发射点**；封存失败只有一行日志 |
+| **ADD-031** | 声称 worker/app/CLI 三处共用 `build_rollout_object_store`——**对 app.py 与 worker 都不成立**（两处硬编码 Local），配置 `kodo` 后段写本地、verify/reconcile 去 bucket 找 → 每条段都报 `sealed_object_missing` |
+| **ADD-047** | 声称 prime 的条数上限"交由 conversation 侧的 token 预算裁剪负责"——**那段代码不存在**（conversation 域全量 grep 找不到 prime 裁剪），首轮注入与 checkpoint 体积因此无界 |
+| **ADD-056** | 声称"直接复用 `MEMORY_TOOL_CALL_BUDGET` 契约常量"且缓存键"去重、边界裁剪"——实际重新声明了常量（会漂移且漂移后**静默丢 rollout 记录**）；`_normalize_arguments` 只 strip 空白，不去重、不裁剪 9 条 query / >200 字符 |
+| **ADD-064** | 见 DEV-034 |
+| **ADD-066** | 声称"cancelled → 释放成员"——只有 `complete_operation` 实现了它；`request_cancel`（API/管理路径）**没有**，且被取消的成员仍会被批次 `SELECT *` 捞出来处理（用户取消了的证据照样写入长期记忆） |
+| **DEV-011** | 称"keywords 档是死代码"——Phase 7 已补上生产者，该登记**已过时** |
+| **DEV-015** | 描述的"pin hash 变化补记"依赖 `runtime.rollout_reader`，而它在**任何 composition root 都不赋值** → 该路径在生产**不可达**（单测靠注入 Fake 才过）。见 DEV-045 |
+| **DEV-027** | 只登记了 mastery 的 `search_text` 差异——**learner 侧同样存在**（提交侧含 `*base.aliases`，restore 侧不含） |
+| **OPEN-005** | 称"reconcile/CLI 没有仓库内集成测试"——同分支 Phase 3 已补 `test_rollout_cli_integration.py` / `test_rollout_reconcile_integration.py`，**已关闭**（对照 OPEN-003 的处置） |
+
+### 其余 review 指出的「未登记」项（补齐登记）
+
+- **DEV-038** `turn_started` 记录类型从未被任何代码写入（12 种 rollout 类型里的死类型）。
+- **DEV-039** `CONVERSATION_ROLLOUT_RETENTION_DAYS` 全仓库无人读取——retention 必须每次手工
+  传 `--older-than-days`，§1.8 的自动化 retention 实际未接线。
+- **DEV-040** `MEMORY_SUMMARY_LLM_CONCURRENCY` 无人读取（`EvidenceBatchLimits.llm_concurrency`
+  无生产构造方），批内成员实际是**串行** while 循环 → §2.6 D4 的"有界认领三件套"缺一件。
+- **DEV-041** `runtime.rollout_reader` 在任何 composition root 都不赋值 → `graph/nodes/memory.py`
+  恒得 None，DEV-015 描述的 pin 补记路径生产不可达（`app.py` 只为 source-read 服务构造了一个
+  局部 reader）。
+- **DEV-042** `MEMORY_SCHEMA_V2_READ_ENABLED` 无人读取（解析器始终双读）——flag 名与实际语义
+  相反，属误导性死配置。启动时的 `validate_schema_prompt_binding()` 是同模块两个常量的自洽
+  检查（永真），发现不了真实部署错配。
+- **DEV-043** 索引投影的三处既有缺陷：① v1→v2 迁移处理器从不调 `_upsert_index_entry` /
+  `mark_index_dirty`（0008 docstring 声称会回填）→ 迁移后 `aliases/keywords/related` 一直为空；
+  ② `related_topic_keys` 取上一版解析结果的 `.links` → 首次为空并**滞后一个提交**；
+  ③ 注册表 `title` 取 `topic_title` 而非 v2 frontmatter `name` → 改 `name` 的补丁到不了
+  注册表与 search（DEV-023 只登记了 `description` 的同类差异）。
+- **DEV-044** `line_offset` 是 **0-indexed**，而 §2.4 D3② 要求对齐 codex 的 1-indexed
+  （内部自洽、无数据损坏，但契约与文档不符）。
+- **DEV-045** 成员级失败隔离缺失（§5.8 要求"单成员失败记录 reason 并按既有语义处理"）：
+  实现只隔离了 LLM 预算耗尽，其它异常会让**整批 50 条**（含从未尝试的）一起进死信。
+- **DEV-046** `local` 模式下 `request_cancel` 不释放批次成员 + 已取消成员仍被处理（见 ADD-066
+  订正）；`_sweep_batch_runs` 还会把这种 run 收尾成 `succeeded`，掩盖问题。
+- **DEV-047** `memory_operations_total{status}` 在批量路径仍打 `queued` 标签（行实际以
+  `pending_batch` 插入）→ 开批量后该指标失真。
+- **DEV-048** `list_open_runs` 先 `ORDER BY created_at ASC LIMIT :limit` **再**按日期后缀过滤 →
+  超过 limit 的历史残留会**永久挤占**当天 sweep 的名额。
+- **DEV-049** `conversation_rollout_segments` 的 `BEFORE DELETE` 触发器在应用层全走软删的前提下
+  不可达（也无测试）；`rollout.private_url` 无调用方、`kodo_cdn_domain` 不影响运行时。
+- **DEV-050** `0008_rollout_segment_turn_uq.downgrade` 的守卫只检查**非 deleted** 重复行，随后
+  却重建覆盖全部行的 `UNIQUE (turn_id)` → 在它本要允许的"1 deleted + 1 活跃"状态下回滚必然
+  `UniqueViolation`（复核者已在临时库复现），而不是给出设计的 `RAISE EXCEPTION` 提示。
+- **DEV-051** recorder resume 时不截断崩溃留下的**半行**（`open("ab")` + `st_size`），下一次
+  append 会与之粘成损坏记录（`iter_records` 因此中止整段）；只有写失败重试路径做了截断。
+- **DEV-052** `build_mutation_plan_v2.md` 要求模型"不得自行输出 frontmatter 字段"，而应用层
+  只读结构化 `frontmatter_patch` → 服从指令的模型会产出"v1 文档 + 空 v2 frontmatter"。
+- **DEV-053** `.env.example` 缺 `MEMORY_CONSOLIDATION_INPUT_MAX_CHARS`（ADD-076 修过同类的
+  `MEMORY_BATCH_ENABLED` 遗漏）与 `MEMORY_SCHEDULER_TIMEZONE`。
+- **DEV-054** ADD-054 声称"关闭 tools 时 `answer.completed` 形状不变"，但
+  `build_answer_completed_payload` **无条件**输出 `memory_citations: []`。
+- **DEV-055** `markdown_schema._parse_index_blocks` 的宽容语义与模块承诺矛盾：未知行静默跳过、
+  `version` 非数字回退 0、缺 `updated_at` 回退 `datetime.now(UTC)`（**解析不确定**），而 v1 路径
+  抛 `MarkdownParseError`。
+- **DEV-056** `build_search_sql` 在 `queries` 为空时会拼出非法 SQL（`AND (\n \n )`），只靠唯一
+  调用方的提前返回保护。
+- **DEV-057** `tests/unit/test_markdown_schema_migration.py` 的 docstring 仍说 DB 集成测试
+  "尚未补（见 PHASE4-HANDOFF.md 第 8 项）"，而该测试早已存在、OPEN-007 已关闭；
+  `cli/rollout.py` 的 docstring 说"对象存储固定用 Local、配置 kodo 时显式失败"，与代码不符。
+
+> **本轮实际修复的是 review §7 的 10 项必改清单**；上面 DEV-049~057 属于 Minor/待决，登记
+> 但未在本轮修改（其中 DEV-050/051/055 已在对应子任务中被顺带评估）。
+
+---
+
 ## Phase 7：Consolidation、aliases、dangling links 与 KG 双路更新
 
 ### DEV-020 批量循环的 LLM 预算被跨成员累计（**真实缺陷，Phase 6 遗留**）

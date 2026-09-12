@@ -403,11 +403,20 @@ async def recover_expired_leases(session: AsyncSession) -> int:
 
 
 async def request_cancel(session: AsyncSession, *, operation_id: UUID) -> dict[str, Any] | None:
-    """取消规则（§11.6）。返回更新后的行；不可取消返回 None（调用方区分 409）。"""
+    """取消规则（§11.6）。返回更新后的行；不可取消返回 None（调用方区分 409）。
+
+    批次 operation 被立即取消时（``queued`` / ``retry_wait`` / ``pending_batch`` /
+    ``needs_review``），**同一事务内**把成员释放回证据池（review I-8）：不释放的话成员
+    会停在 ``pending_batch AND batch_operation_id IS NOT NULL``——批次已取消不再处理它，
+    证据池扫描又只取 ``batch_operation_id IS NULL``，于是永久搁浅，`_sweep_batch_runs`
+    还会把该 run 收尾成 succeeded 掩盖问题。释放语义直接复用
+    :func:`settle_batch_members`（成员状态仍 ``pending_batch``、归属置 NULL），不写第二套。
+    """
     row = await get_operation(session, operation_id)
     if row is None:
         return None
     status = row["status"]
+    immediate_cancel = False
     if status in ("queued", "retry_wait", "pending_batch"):
         # pending_batch 与 queued/retry_wait 同属"尚未开始执行"的在途态
         # （memory-rebuild §2.6）：账号删除必须能取消它，否则待批量证据
@@ -423,13 +432,16 @@ async def request_cancel(session: AsyncSession, *, operation_id: UUID) -> dict[s
             ),
             {"operation_id": operation_id},
         )
+        immediate_cancel = True
     elif status == "running":
         if row.get("commit_started_at") is not None:
             # 已进入 commit 副作用，不允许取消（§11.6，裁决 2026-08-11）
             raise OperationCancelNotAllowedError(
                 "operation 已进入 commit，不允许取消", field="status"
             )
-        # 协作取消：Runner 在节点入口/commit 前检查 cancel_requested_at
+        # 协作取消：Runner 在节点入口/commit 前检查 cancel_requested_at。
+        # running 的批次**不在此处释放成员**：它在跑，成员仍归它；终态取消由
+        # complete_operation(status='cancelled') 走同一套 settle。
         await session.execute(
             text(
                 "UPDATE memory_operations SET cancel_requested_at = now(), "
@@ -448,8 +460,12 @@ async def request_cancel(session: AsyncSession, *, operation_id: UUID) -> dict[s
             ),
             {"operation_id": operation_id},
         )
+        immediate_cancel = True
     else:
         return None
+    if immediate_cancel:
+        # 非批次 operation 恒为 0 行（WHERE 命中不到成员）；批次则把成员放回池子
+        await settle_batch_members(session, batch_operation_id=operation_id, status="cancelled")
     return await get_operation(session, operation_id)
 
 
@@ -658,17 +674,24 @@ async def settle_batch_members(
 async def list_batch_member_operations(
     session: AsyncSession, *, batch_operation_id: UUID
 ) -> list[dict[str, Any]]:
-    """读取批次成员（供批量图逐条处理）；按稳定序返回，保证可重放。"""
+    """读取**可处理**的批次成员（供批量图逐条处理）；按稳定序返回，保证可重放。
+
+    review I-8：只返回 ``status='pending_batch'`` 的成员。``request_cancel`` 明确允许
+    取消处于 ``pending_batch`` 的证据，被取消的成员行状态是 ``cancelled``，但**归属字段
+    仍在**——若这里不过滤，批次会把它照常捞出来处理，用户取消掉的证据照样写进长期记忆。
+    这同时是 ``begin_batch_member`` 的防线：它拿到的成员一定处于可写（未被取消/未终结）态。
+    """
     result = await session.execute(
         text(
             """
             SELECT *
             FROM memory_operations
             WHERE batch_operation_id = :batch_operation_id
+              AND status = :status
             ORDER BY next_run_at ASC, created_at ASC, operation_id ASC
             """
         ),
-        {"batch_operation_id": batch_operation_id},
+        {"batch_operation_id": batch_operation_id, "status": PENDING_BATCH_STATUS},
     )
     return [dict(row) for row in result.mappings().all()]
 
@@ -694,3 +717,29 @@ async def count_pending_batch_evidence(session: AsyncSession, *, now: datetime) 
     )
     row = result.mappings().one()
     return int(row["total"]), int(row["due"])
+
+
+async def release_batch_member(session: AsyncSession, *, operation_id: UUID) -> bool:
+    """把一个"处理失败"的成员释放回证据池（review I-9 的重试出口）。
+
+    批次 `succeeded` 时 `settle_batch_members` 会把**所有**归属成员置 succeeded——包括被
+    成员级隔离捕获、实际没写成功的那些。那样它们永远不会再被处理。因此批量图在收尾前
+    先对失败成员调用本函数：清掉 `batch_operation_id`（状态仍是 `pending_batch`），
+    于是 `settle_batch_members` 的 `WHERE batch_operation_id = :batch` 自然不再命中它，
+    它回到池子里等下一个批次；`next_run_at` 推后到 now()，避免立刻被同一个 run 重新领走
+    形成忙循环（真正的重试节奏由 0 点批量任务决定）。
+    """
+    rowcount = await exec_rowcount(
+        session,
+        text(
+            """
+            UPDATE memory_operations
+            SET batch_operation_id = NULL, next_run_at = now(), updated_at = now()
+            WHERE operation_id = :operation_id
+              AND status = :status
+              AND batch_operation_id IS NOT NULL
+            """
+        ),
+        {"operation_id": operation_id, "status": PENDING_BATCH_STATUS},
+    )
+    return rowcount == 1

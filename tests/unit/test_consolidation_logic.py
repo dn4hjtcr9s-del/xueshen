@@ -197,3 +197,34 @@ def test_index_v2_omits_candidate_section_when_empty() -> None:
     )
 
     assert "候选主题" not in text
+
+
+def test_answer_completed_accepts_stream_degraded_flags() -> None:
+    """回归（review I-10）：`answer_stream_*` 必须在封闭 `DegradedFlag` 里。
+
+    它们由 answer 节点在流式中断/截断/拒绝时 append，而 `AnswerCompletedPayload` 是
+    `extra="forbid"` + 封闭 Literal；一旦缺失，`validate_event_payload` 会在 **finalize
+    事务内**抛错 → 整个事务回滚、已经流出的部分回答丢失。
+    """
+    from backend.conversation.contracts.events import validate_event_payload
+    from backend.conversation.graph.nodes.finalize import build_answer_completed_payload
+
+    payload = build_answer_completed_payload(
+        assistant_message_id="00000000-0000-0000-0000-000000000003",
+        thread_version=1,
+        answer="半截回答",
+        citations=[],
+        followups=[],
+        degraded_flags=[
+            "answer_stream_interrupted",
+            "answer_stream_truncated",
+            "answer_stream_refused",
+        ],
+    )
+    validated = validate_event_payload("answer.completed", payload)
+
+    assert validated["degraded_flags"] == [
+        "answer_stream_interrupted",
+        "answer_stream_truncated",
+        "answer_stream_refused",
+    ]

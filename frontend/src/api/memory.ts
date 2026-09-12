@@ -169,7 +169,15 @@ export interface GraphRecommendation {
 export interface MutationResult {
   mutation_id: string;
   memory_id: string;
-  action: "create" | "merge" | "replace" | "append_evidence" | "forget" | "restore";
+  // memory-rebuild §3.6①：后端已新增 v2 frontmatter 补丁动作，前端类型镜像同步补齐
+  action:
+    | "create"
+    | "merge"
+    | "replace"
+    | "append_evidence"
+    | "frontmatter_patch"
+    | "forget"
+    | "restore";
   before_version: number | null;
   after_version: number | null;
 }

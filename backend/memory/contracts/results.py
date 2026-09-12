@@ -237,3 +237,8 @@ class MemoryToolPrimeResponse(BaseModel):
     #: summary 超过独立小预算被截断
     summary_truncated: bool
     degraded: bool
+    #: 目录被服务端条数上限（``PRIME_INDEX_ENTRIES_MAX``）截断——**可判定信号**：
+    #: true 表示 ``index_entries`` 只是按 memory_id 升序的前缀、不是全量注册表，
+    #: 需要更多主题时走 memory.search 定位（review I-5）。
+    #: 追加在末尾的可选新增字段，默认 False：既有字段的名字、顺序与语义都不变。
+    index_entries_truncated: bool = False

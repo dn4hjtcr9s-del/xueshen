@@ -463,10 +463,14 @@ async def test_thread_deletion_removes_objects_and_tombstones_manifests(
 async def test_reader_refuses_tombstoned_segment_even_if_object_exists(
     conversation_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
-    """软删（tombstone）不清 message 指针，因此 reader 必须自己查 status 拒绝回读。
+    """软删（tombstone）后 reader 必须拒绝回读——即使对象还在。
 
     §5.4 验收："删除后的 message 永不从 rollout 回读"。若只依赖对象被物理删除，
     在"已 tombstone 但对象尚未删除"的窗口里就会把已删数据当正文返回。
+
+    ``mark_deleted`` 现在同时清空四列指针（软删不触发 0007 的清指针触发器，留着就是
+    指向已废段的悬垂引用），因此本用例的两道防线都要验：指针已被清空，且即便手工
+    把指针写回去，reader 也会按 ``status='deleted'`` 拒绝。
     """
     factory = conversation_session_factory
     ids = await _seed_thread_and_turn(factory)
@@ -484,7 +488,28 @@ async def test_reader_refuses_tombstoned_segment_even_if_object_exists(
         session_factory=factory, object_store=object_store, rollout_root=tmp_path
     )
     row = await _load_message(factory, ids["user_message_id"])
-    # 指针仍在（软删不清指针），对象也仍在，但必须拒绝
-    assert row["segment_id"] is not None
+    assert row["segment_id"] is None, "软删必须同时清空指针（不留悬垂引用）"
     assert len(await object_store.list_prefix(prefix="rollouts/")) == 1
     assert await reader.read_message_content(message_row=row) is None
+
+    # 第二道防线：把指针手工写回已删段，reader 仍必须按 status 拒绝
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                text(
+                    "UPDATE conversation.conversation_messages "
+                    "SET segment_id = :segment_id, rollout_ordinal = :ordinal, "
+                    "    rollout_byte_offset_start = :start, rollout_byte_offset_end = :end "
+                    "WHERE message_id = :message_id"
+                ),
+                {
+                    "segment_id": segments[0]["segment_id"],
+                    "ordinal": 1,
+                    "start": 0,
+                    "end": 1,
+                    "message_id": ids["user_message_id"],
+                },
+            )
+    restored = await _load_message(factory, ids["user_message_id"])
+    assert restored["segment_id"] is not None
+    assert await reader.read_message_content(message_row=restored) is None

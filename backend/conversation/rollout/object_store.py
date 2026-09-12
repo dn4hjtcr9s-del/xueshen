@@ -21,6 +21,7 @@ import os
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from backend.conversation.contracts.object_store import (
@@ -94,11 +95,60 @@ def _validate_key(key: str) -> str:
     return key
 
 
+def delete_hot_segment_file(*, root: str | Path, object_key: str) -> bool:
+    """删除与 ``object_key`` 同构的本地热缓存段文件（幂等）。
+
+    返回是否真的删掉了文件（文件本就不存在时返回 ``False``）。文件系统错误（权限、
+    IO）照常抛出：删除是合规动作，**不允许**退化成"只 warning 然后照样宣称删干净"。
+
+    只删段文件本身，不清理空的日期目录——目录名不含用户数据，且清理目录会引入
+    "删掉别的写者正在使用的目录"这种竞态。
+    """
+    path = local_path_for_object_key(root=root, object_key=object_key)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+@runtime_checkable
+class HotSegmentDeleter(Protocol):
+    """可选能力：删除 ``object_key`` 对应的**本地热缓存段文件**（§1.5 / §1.8）。
+
+    recorder 把热段写在 ``conversation_rollout_root`` 下，与对象存储后端解耦；
+    删除 thread / retention 必须让"对象镜像"与"热缓存"同时消失，否则 tombstone
+    之后（``list_by_thread`` 过滤 deleted、``retention-scan`` 只扫 sealed、
+    ``reconcile`` 只列 ``rollouts/`` 前缀）残留正文将**永久不可发现、不可清理**。
+
+    远端实现（Kodo）不持有本地文件系统视图，因此不实现本协议——调用方通过
+    :func:`delete_hot_segment` 统一处理，缺该能力时是安全 no-op。
+    """
+
+    async def delete_hot_segment(self, *, key: str) -> None: ...
+
+
+async def delete_hot_segment(*, object_store: Any, key: str) -> bool:
+    """调用对象存储的本地热缓存删除能力；实现不具备该能力时返回 ``False``。
+
+    返回 ``False`` 只表示"该实现没有热缓存能力"，**不等于**"本机磁盘上没有热文件"
+    （Kodo 模式下 recorder 仍会在 ``conversation_rollout_root`` 写本地热段），
+    因此调用方不要把它当成"磁盘已无残留"的证明。
+    """
+    if not isinstance(object_store, HotSegmentDeleter):
+        return False
+    await object_store.delete_hot_segment(key=key)
+    return True
+
+
 class LocalRolloutObjectStore:
     """本地目录模拟对象存储（开发与 Phase 2/3 的默认实现）。"""
 
     def __init__(self, *, root: str | Path) -> None:
-        self._root = Path(root) / _OBJECTS_DIRNAME
+        #: 对象镜像根 ``{root}/objects``；热缓存段则直接落在 ``{root}/threads/...``
+        #: （路径由 rollout/file_naming.segment_path 决定），因此需要同时持有 base。
+        self._base = Path(root)
+        self._root = self._base / _OBJECTS_DIRNAME
 
     # -- 内部 --------------------------------------------------------------
 
@@ -195,6 +245,15 @@ class LocalRolloutObjectStore:
         except FileNotFoundError:
             return
 
+    async def delete_hot_segment(self, *, key: str) -> None:
+        """删除与 ``key`` 同构的本地热缓存段文件（C-3：合规删除必须删正文）。
+
+        热段写在 ``{root}/threads/YYYY/MM/DD/<thread>/<ordinal>-<seg>.jsonl``，与对象
+        镜像同构；只删 ``objects/`` 会让用户原文留在磁盘上，而 tombstone 之后再没有
+        任何工具能发现它。文件不存在视为成功（幂等），其它 OSError 照常抛出。
+        """
+        delete_hot_segment_file(root=self._base, object_key=key)
+
     async def presign_read(self, *, key: str, expires_seconds: int) -> str:
         """Local 无签名概念：返回 file URL，并显式说明不提供真实签名。"""
         _validate_key(key)
@@ -219,6 +278,8 @@ class FakeRolloutObjectStore:
         #: 置非 None 时 put_immutable 抛该异常，用于测试"上传成功但 PG 失败"的相邻分支
         self.put_error: Exception | None = None
         self.put_calls: int = 0
+        #: 删除路径要求删除的热缓存段 key（测试替身不持有文件系统，只记录调用）
+        self.hot_segments_deleted: list[str] = []
 
     def corrupt(self, key: str) -> None:
         """篡改对象内容，用于 reconcile 的 checksum 不一致用例。"""
@@ -287,6 +348,10 @@ class FakeRolloutObjectStore:
 
     async def delete(self, *, key: str) -> None:
         self._objects.pop(key, None)
+
+    async def delete_hot_segment(self, *, key: str) -> None:
+        """测试替身：没有真实文件系统，只记录调用，便于断言删除路径**确实**要求删热段。"""
+        self.hot_segments_deleted.append(key)
 
     async def presign_read(self, *, key: str, expires_seconds: int) -> str:
         return f"fake://{key}?expires={expires_seconds}"

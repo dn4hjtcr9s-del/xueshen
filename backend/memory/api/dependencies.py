@@ -259,7 +259,9 @@ async def submit_operation(
                     next_run_at=evidence_next_run_at,
                 )
                 return existing
-    metrics.memory_operations_total.labels(type=kind, status="queued").inc()
+    # review 指标项：标签必须反映**行实际以什么状态插入**——批量门控开启时证据落
+    # pending_batch，无条件打 "queued" 会让 memory_operations_total 在批量链路上失真。
+    metrics.memory_operations_total.labels(type=kind, status=evidence_status).inc()
     if priority >= PRIORITY_P1:
         await _try_fast_path(runtime, operation_id)
     async with runtime.session_factory() as session:

@@ -221,6 +221,24 @@ async def test_search_and_projection_are_user_scoped(
     )
 
 
+async def test_projection_limit_is_bounded_deterministic_prefix(
+    session_factory: async_sessionmaker[AsyncSession], seeded: None
+) -> None:
+    """review I-5：目录投影的 LIMIT 由 SQL 执行，且取的是 memory_id 升序的确定性前缀。
+
+    prime 用「上限 + 1」判定截断——超出部分绝不能进内存；顺序必须与不带 LIMIT 时一致，
+    否则"保留前 N 条"的语义在 Python 侧无法复现。
+    """
+    async with session_factory() as session:
+        full = await fetch_index_projection(session, user_id=USER_A)
+        limited = await fetch_index_projection(session, user_id=USER_A, limit=3)
+        one_more = await fetch_index_projection(session, user_id=USER_A, limit=4)
+    assert len(limited) == 3
+    assert [str(row["memory_id"]) for row in limited] == [str(row["memory_id"]) for row in full][:3]
+    # 多取一条即可判定"还有更多"，不必把整份注册表读出来
+    assert len(one_more) == 4
+
+
 # ---------------------------------------------------------------------------
 # memory.read：活动版本 + 删除抑制
 # ---------------------------------------------------------------------------

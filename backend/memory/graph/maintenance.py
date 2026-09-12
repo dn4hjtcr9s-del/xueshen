@@ -448,6 +448,11 @@ async def _execute_batch(
                 active_storage_key=stored.storage_key,
                 active_checksum=stored.checksum,
             )
+            # review I-11①：迁移只写 version + current 的话，index 投影的 aliases/keywords/related
+            # 会一直是空的（0008 的 docstring 声称回填由本任务完成）。这里在同一事务里刷新投影。
+            await ctx.memory_service.refresh_index_projection(
+                session, user_id=row["user_id"], memory_id=row["memory_id"]
+            )
             await store.materialize_current(
                 user_id=row["user_id"], memory_id=row["memory_id"], content=encoded
             )

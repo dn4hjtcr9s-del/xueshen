@@ -59,24 +59,43 @@ async def get_run_by_key(session: AsyncSession, *, idempotency_key: str) -> dict
 
 
 async def list_open_runs(
-    session: AsyncSession, *, maintenance_type: str, limit: int
+    session: AsyncSession,
+    *,
+    maintenance_type: str,
+    limit: int,
+    idempotency_suffix: str | None = None,
 ) -> list[dict[str, Any]]:
     """列出某类维护任务中仍在进行（``status='running'``）的 run。
 
     专供 0 点批量任务的收尾 sweep（OPEN-011，用户 2026-09-12 裁决 A）：该任务的 run 在
     正常路径下不会被收尾——证据被消费完后用户就不再出现在 `list_pending_batch_user_ids`
     的扫描结果里，因此需要按类型扫一遍把"已无待入批证据"的 run 关掉。
+
+    ``idempotency_suffix`` 把"只要某一天产生的 run"这个过滤**下推到 SQL**（review 调度项）：
+    调用方传 ``:{date}`` 即可，``None`` 表示不过滤（既有语义）。此前由调用方先
+    ``ORDER BY created_at ASC LIMIT :limit`` 再在 Python 里按后缀筛，历史残留的 running
+    run 一旦超过 ``limit`` 就会**永久挤占当天 run 的名额**，当天 run 永远收不了尾。
+    后缀由调用方按 :data:`backend.memory.contracts.batch.BATCH_IDEMPOTENCY_KEY_TEMPLATE`
+    现算（本函数不认识具体幂等键模板），且只含 ``:`` + 日期，不含 LIKE 元字符。
     """
+    params: dict[str, Any] = {"maintenance_type": maintenance_type, "limit": limit}
+    suffix_clause = ""
+    if idempotency_suffix is not None:
+        params["suffix"] = f"%{idempotency_suffix}"
+        suffix_clause = " AND idempotency_key LIKE :suffix"
     result = await session.execute(
         text(
             """
             SELECT * FROM memory_maintenance_runs
             WHERE maintenance_type = :maintenance_type AND status = 'running'
+            """
+            + suffix_clause
+            + """
             ORDER BY created_at ASC
             LIMIT :limit
             """
         ),
-        {"maintenance_type": maintenance_type, "limit": limit},
+        params,
     )
     return [dict(row) for row in result.mappings().all()]
 

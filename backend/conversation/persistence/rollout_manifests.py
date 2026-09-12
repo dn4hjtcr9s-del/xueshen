@@ -1,12 +1,22 @@
 """conversation_rollout_segments 仓储（memory-rebuild §5.4 Phase 2）。
 
-段状态机（Phase 0 决策的三段式）：
+段状态机（Phase 0 决策的三段式 + I-1 修复后的复用语义）：
 
 - ``open``：本地热段，尚未上传；``object_key``/``object_etag``/``sha256``/``byte_size``/
   ``ordinal_end`` 均可空。**懒创建**——首次真正写入（文件物化）时才建行，因此空 turn
   不会在 manifest 留下痕迹。
-- ``sealed``：对象已上传且 manifest 已登记，上述字段全部必填且此后不可变。
-- ``deleted``：逻辑删除 tombstone；跨节点恢复时旧 ``open`` 段也走这条路（保留审计）。
+- ``sealed``：对象已上传且 manifest 已登记，上述字段全部必填且此后不可变
+  （``put_immutable`` 对"同 key 异内容"必须抛 :class:`ObjectHashMismatchError`）。
+- ``deleted``：逻辑删除 tombstone；跨节点恢复时的旧段、以及同一 turn 重试时被新段
+  继承序号范围的旧段都走这条路（保留审计与原对象引用）。
+
+一个 turn 最多一个非删除段（``uq_rollout_segment_turn_active``）。因此"重试复用"的
+落地方式是：新段沿用旧段的 ``ordinal_start``（与本地热段文件），但使用**新的
+``segment_id``**（因此是新的对象 key），旧行在同一事务里被标 ``deleted``。
+
+``(turn_id)`` 与 ``(thread_id, ordinal_start)`` 的唯一性都只对**非 deleted 行**成立
+（部分唯一索引，见迁移 0008 / 0009）。后者正是"标废旧行 + 复用同一 ordinal_start"
+能成立的前提。
 
 **封存顺序铁律**（§5.4）：先上传对象成功，再在同一 PG 事务内写 manifest 与 message
 pointer，事务成功后才把段标为 sealed。反向顺序会产生"manifest 指向不存在对象"的
@@ -39,9 +49,14 @@ async def insert_open(
     turn_id: UUID,
     ordinal_start: int,
     created_at: datetime | None = None,
-) -> None:
-    """登记一个 ``open`` 段（首次写入时调用；重复调用幂等）。"""
-    await session.execute(
+) -> bool:
+    """登记一个 ``open`` 段，返回是否**真的插入了行**。
+
+    调用方必须看返回值：``ON CONFLICT (segment_id) DO NOTHING`` 命中时返回 ``False``
+    （该段早已登记）。I-1 的根因之一正是"登记是否成功"不可判定——调用方只能把异常
+    吞成一行 warning，于是"对象已上传但没有 manifest 行"静默成立。
+    """
+    result = await session.execute(
         text(
             """
             INSERT INTO conversation.conversation_rollout_segments (
@@ -60,6 +75,7 @@ async def insert_open(
             "created_at": created_at or datetime.now(UTC),
         },
     )
+    return bool(getattr(result, "rowcount", 0) == 1)
 
 
 async def get_by_id(session: AsyncSession, segment_id: UUID) -> dict[str, Any] | None:
@@ -79,14 +95,19 @@ async def get_by_id(session: AsyncSession, segment_id: UUID) -> dict[str, Any] |
     return dict(row) if row is not None else None
 
 
-async def get_open_by_turn(session: AsyncSession, turn_id: UUID) -> dict[str, Any] | None:
-    """按 turn 找未封存段——崩溃重跑时决定"续写还是重建"（§1.7 步骤 2）。"""
+async def get_active_by_turn(session: AsyncSession, turn_id: UUID) -> dict[str, Any] | None:
+    """按 turn 找**非删除**段——崩溃重跑时决定"续写、复用还是新建"（§1.7 步骤 2）。
+
+    与 :func:`get_open_by_turn` 的区别：``sealed`` 段同样返回。一个 turn 第一次尝试
+    若已走到 ``close_turn``（图抛异常 → finally 封存），重试时只剩 ``sealed`` 行；
+    只查 ``open`` 会让重试无条件新建段，撞上 ``uq_rollout_segment_turn_active``。
+    """
     row = (
         (
             await session.execute(
                 text(
                     f"SELECT {_COLUMNS} FROM conversation.conversation_rollout_segments "
-                    "WHERE turn_id = :turn_id AND status = 'open' "
+                    "WHERE turn_id = :turn_id AND status IN ('open', 'sealed') "
                     "ORDER BY ordinal_start DESC LIMIT 1"
                 ),
                 {"turn_id": turn_id},
@@ -96,6 +117,27 @@ async def get_open_by_turn(session: AsyncSession, turn_id: UUID) -> dict[str, An
         .first()
     )
     return dict(row) if row is not None else None
+
+
+async def next_ordinal_start(session: AsyncSession, thread_id: UUID) -> int:
+    """该 thread 下一个**安全**的 ``ordinal_start``：所有行（含 deleted）的最大末序号 + 1。
+
+    跨节点重建时新段的身份无法从本地文件反推（本地文件已不在），必须由 manifest 给
+    出一个不会与任何既有段范围重叠的起点。把 deleted 行也算进来是有意的：软删段（可能
+    还有对象、消息指针仍指向它）的序号范围也不能被新段复用。
+
+    尚无任何段时返回 ``0``（thread 的第一个段）。
+    """
+    value = (
+        await session.execute(
+            text(
+                "SELECT max(COALESCE(ordinal_end, ordinal_start)) "
+                "FROM conversation.conversation_rollout_segments WHERE thread_id = :thread_id"
+            ),
+            {"thread_id": thread_id},
+        )
+    ).scalar()
+    return 0 if value is None else int(value) + 1
 
 
 async def list_by_thread(
@@ -135,6 +177,10 @@ async def seal(
 
     返回 False 表示段已被别的执行者封存、已删除，或 fencing 校验失败——调用方
     据此判断"不是我封的"，不要把它当成成功。
+
+    ``ordinal_end`` 只前进不后退（``GREATEST``）：复用已封存段续写时，重试可能**没有**
+    产生比上次更多的记录，直接写较小的 ``ordinal_end`` 会让整个封存事务撞建表时生成的
+    范围约束（``conversation_rollout_segments_check``）而失败，并留下孤儿对象。
     """
     fence_clause = ""
     params: dict[str, Any] = {
@@ -161,7 +207,9 @@ async def seal(
         text(
             "UPDATE conversation.conversation_rollout_segments AS s "
             "SET status = 'sealed', object_key = :object_key, object_etag = :object_etag, "
-            "    sha256 = :sha256, byte_size = :byte_size, ordinal_end = :ordinal_end, "
+            "    sha256 = :sha256, byte_size = :byte_size, "
+            "    ordinal_end = GREATEST(COALESCE(s.ordinal_end, s.ordinal_start), "
+            "                          :ordinal_end), "
             "    sealed_at = :sealed_at "
             "WHERE s.segment_id = :segment_id AND s.status = 'open'" + fence_clause
         ),
@@ -176,7 +224,22 @@ async def mark_deleted(
     segment_id: UUID,
     deleted_at: datetime | None = None,
 ) -> bool:
-    """把段标记为 ``deleted``（tombstone），保留行以便审计与 reconcile 对账。"""
+    """把段标记为 ``deleted``（tombstone），保留行以便审计与 reconcile 对账。
+
+    同时清空仍指向该段的 ``conversation_messages`` 四列指针：软删不会触发 0007 的
+    ``BEFORE DELETE`` 触发器（那只在硬删行时生效），而"重试复用同一序号范围/跨节点
+    重建"都会把段标废——留着指针就是一条指向已废段的悬垂引用。四列由 CHECK 约束
+    要求同真同假，因此必须一次写全。
+    """
+    await session.execute(
+        text(
+            "UPDATE conversation.conversation_messages "
+            "SET segment_id = NULL, rollout_ordinal = NULL, "
+            "    rollout_byte_offset_start = NULL, rollout_byte_offset_end = NULL "
+            "WHERE segment_id = :segment_id"
+        ),
+        {"segment_id": segment_id},
+    )
     result = await session.execute(
         text(
             "UPDATE conversation.conversation_rollout_segments "
