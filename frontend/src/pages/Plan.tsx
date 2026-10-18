@@ -120,13 +120,17 @@ export function PlanPage({ goChat }: { goChat: (prompt?: string) => void }) {
     void load();
   }, [authUser, ready, load]);
 
-  if (!ready || learner === undefined) {
+  // 首屏性能审计 #1：ready=false（鉴权恢复中）不做整页等待——把 learner 视为
+  // null 直接渲染访客引导骨架，ready 后由 effect 拉取计划记忆并平滑替换；
+  // 仅"已就绪但计划记忆还在加载"保留提示。
+  if (ready && learner === undefined) {
     return (
       <div role="status" className="section-note" style={{ padding: "18px 0" }}>
         正在读取你的计划记忆…
       </div>
     );
   }
+  const viewLearner = ready ? learner : null;
 
   if (loadError) {
     return (
@@ -142,7 +146,7 @@ export function PlanPage({ goChat }: { goChat: (prompt?: string) => void }) {
     );
   }
 
-  if (!learner || learner.plans.length === 0) {
+  if (!viewLearner || viewLearner.plans.length === 0) {
     return (
       <>
         <div className="plan-mast rise">
@@ -205,7 +209,7 @@ export function PlanPage({ goChat }: { goChat: (prompt?: string) => void }) {
     );
   }
 
-  const plan = buildPlanFromLearner(learner);
+  const plan = buildPlanFromLearner(viewLearner);
   let taskNo = 0;
 
   return (

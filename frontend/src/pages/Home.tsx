@@ -87,15 +87,6 @@ function useHomeActivityState(): HomeActivityState {
   return state;
 }
 
-function HomeLoading() {
-  return (
-    <div className="home-loading rise" role="status" aria-live="polite">
-      <span className="home-loading-mark">∴</span>
-      <span>正在准备你的学习主页…</span>
-    </div>
-  );
-}
-
 function NewUserHome({ goChat, go }: HomePageProps) {
   const { user: authUser } = useAuth();
   const isLoggedIn = authUser !== null;
@@ -373,7 +364,9 @@ function ReturningUserHome({ goChat, go, knowledgeSummaryAvailable = false }: Ho
 export function HomePage(props: HomePageProps) {
   const state = useHomeActivityState();
 
-  if (state === "loading") return <HomeLoading />;
-  if (state === "new") return <NewUserHome {...props} />;
-  return <ReturningUserHome {...props} />;
+  // 首屏性能审计 #1：不做整页 loading 门禁。鉴权恢复（refresh）与
+  // "是否已有学习活动"判定都是异步的，期间先渲染 NewUserHome
+  // （其内部本就区分登录/访客两种文案），数据就绪后平滑替换为对应版本。
+  if (state === "returning") return <ReturningUserHome {...props} />;
+  return <NewUserHome {...props} />;
 }

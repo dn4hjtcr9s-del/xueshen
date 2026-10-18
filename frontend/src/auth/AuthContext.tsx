@@ -31,13 +31,17 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 async function restoreSession(): Promise<AuthUser | null> {
-  // 页面刷新后 access token 为空：先静默 refresh 恢复，再 /me 取用户信息。
+  // 页面刷新后 access token 为空：先静默 refresh 恢复。
+  // refresh 响应与 login 同构、已携带 user（后端 _token_response），直接采用，
+  // 省掉启动时 refresh → /me 两趟串行请求（首屏性能审计 #1：ready 门禁期间
+  // 整页 loading，慢网络下 1s+）。仅"等锁期间复用其他标签页广播的 token"
+  // 这一罕见路径拿不到 user 载荷，才回退补一次 /me。
   // 未登录（访客）也直接进入主应用（main.tsx 不设门禁），这里只决定
   // 是否展示已登录用户信息，失败时保持匿名浏览。
   try {
-    const token = await restoreSessionWithRefresh();
-    if (!token) return null;
-    return await apiMe();
+    const restored = await restoreSessionWithRefresh();
+    if (!restored) return null;
+    return (restored.user as AuthUser | undefined) ?? (await apiMe());
   } catch {
     return null;
   }

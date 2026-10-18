@@ -6,10 +6,22 @@
     <title>学神 · 数学学习</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- 首屏性能审计 #1：Google Fonts CSS 原为渲染阻塞（rel=stylesheet），
+         fonts.googleapis.com 在国内不稳定，挂起时首屏被拖住数秒。
+         改为异步加载（media="print" 降级为非阻塞，onload 后切回 all），
+         字体就绪前走 styles.css 的系统字体兜底栈；权重精简/自托管子集化属审计 #2。 -->
     <link
       href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;0,9..144,600;1,9..144,400&family=IBM+Plex+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;500;600;700;900&display=swap"
       rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
     />
+    <noscript>
+      <link
+        href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;0,9..144,600;1,9..144,400&family=IBM+Plex+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;500;600;700;900&display=swap"
+        rel="stylesheet"
+      />
+    </noscript>
   </head>
   <body>
     <div id="root"></div>

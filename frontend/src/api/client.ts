@@ -62,7 +62,15 @@ export async function errorFromResponse(response: Response, fallback: string): P
 
 // 全局 single-flight refresh（方案 §9.3）：所有并发 401 共享同一个刷新 Promise，
 // 杜绝"第一个 refresh 轮换后第二个被误判重放导致整族撤销"。
-let refreshPromise: Promise<boolean> | null = null;
+/** refresh 结果：ok 表示拿到可用 access token；user 为 refresh 响应携带的
+ *  用户信息（与 login 响应同构，省掉启动恢复时的 /me 一趟；仅本标签页实际
+ *  发起请求时存在，复用其他标签页广播 token 时为空，调用方需自行补取 /me）。 */
+interface RefreshResult {
+  ok: boolean;
+  user?: unknown;
+}
+
+let refreshPromise: Promise<RefreshResult> | null = null;
 
 // 复审 P1-2 / P1：单页 refreshPromise 只能协调同一 JS context。多个浏览器标签页
 // 共享 HttpOnly refresh Cookie 但各自有独立 context，必须用 Web Locks 串行化跨
@@ -112,7 +120,7 @@ export function setSessionExpiredHandler(handler: (() => void) | null): void {
   sessionExpiredHandler = handler;
 }
 
-async function doRefreshRequest(): Promise<boolean> {
+async function doRefreshRequest(): Promise<RefreshResult> {
   const epochBeforeRequest = getLogoutEpoch();
   let response: Response;
   try {
@@ -122,7 +130,7 @@ async function doRefreshRequest(): Promise<boolean> {
     });
   } catch {
     // 复审 P2：网络/网关故障是可重试故障，不清 token、不广播会话失效
-    return false;
+    return { ok: false };
   }
   if (response.status === 401) {
     // 仅 401 AUTH_SESSION_INVALID 才视为凭据失效
@@ -130,26 +138,26 @@ async function doRefreshRequest(): Promise<boolean> {
     incrementLogoutEpoch();
     broadcast({ type: "session-expired", epoch: getLogoutEpoch() });
     sessionExpiredHandler?.();
-    return false;
+    return { ok: false };
   }
   if (!response.ok) {
     // 复审 P2：429 / 5xx 是临时故障，保留现有会话，稍后自然重试
-    return false;
+    return { ok: false };
   }
   // 复审 P1：请求期间若收到其他标签页的 logout/session-expired（epoch 变化），
   // 丢弃本次响应，不得写 token、不得广播新 access token
   if (getLogoutEpoch() !== epochBeforeRequest) {
     setAccessToken(null);
-    return false;
+    return { ok: false };
   }
-  const data = (await response.json()) as { access_token?: string };
+  const data = (await response.json()) as { access_token?: string; user?: unknown };
   setAccessToken(data.access_token ?? null);
   broadcast({
     type: "access-token",
     token: data.access_token,
     epoch: getLogoutEpoch(),
   });
-  return Boolean(data.access_token);
+  return { ok: Boolean(data.access_token), user: data.user };
 }
 
 // 复审 P1：无 Web Locks 环境下的同页面互斥队列——logout 与 refresh 串行执行，
@@ -175,7 +183,7 @@ export async function withRefreshLock<T>(task: () => Promise<T>): Promise<T> {
   }
 }
 
-async function refreshSession(): Promise<boolean> {
+async function refreshSession(): Promise<RefreshResult> {
   if (!refreshPromise) {
     refreshPromise = (async () => {
       try {
@@ -184,15 +192,16 @@ async function refreshSession(): Promise<boolean> {
         // 复审 P1：等锁期间必须复查 logout epoch——任何标签页在本标签页排队
         // 期间发生 logout（本地退出或 401 失效），本标签页不得发起 refresh、
         // 不得广播新 access token，直接按会话失效处理
-        const refreshOrReuse = async (): Promise<boolean> => {
+        const refreshOrReuse = async (): Promise<RefreshResult> => {
           if (getLogoutEpoch() !== epochBefore) {
             setAccessToken(null);
-            return false;
+            return { ok: false };
           }
           // 复审 P2：等锁期间若其他标签页已广播新 token（或已失效），
-          // 直接复用该结果，不再发起一次轮换（避免连续换 Cookie 触发限流）
+          // 直接复用该结果，不再发起一次轮换（避免连续换 Cookie 触发限流）。
+          // 复用路径拿不到 user 载荷，恢复会话的调用方需回退 /me。
           if (getAccessTokenGeneration() !== generationBefore) {
-            return getAccessToken() !== null;
+            return { ok: getAccessToken() !== null };
           }
           return await doRefreshRequest();
         };
@@ -208,12 +217,18 @@ async function refreshSession(): Promise<boolean> {
   return refreshPromise;
 }
 
+/** 启动恢复会话的结果：token + refresh 响应携带的用户（可能缺失，见 RefreshResult）。 */
+export interface RestoredSession {
+  token: string;
+  user?: unknown;
+}
+
 /** 供 AuthContext 启动时恢复会话（single-flight 与 401 流程共享同一实现）。 */
-export async function restoreSessionWithRefresh(): Promise<string | null> {
-  if (await refreshSession()) {
-    return getAccessToken();
-  }
-  return null;
+export async function restoreSessionWithRefresh(): Promise<RestoredSession | null> {
+  const result = await refreshSession();
+  if (!result.ok) return null;
+  const token = getAccessToken();
+  return token ? { token, user: result.user } : null;
 }
 
 export interface RequestOptions {
@@ -255,7 +270,7 @@ export async function request<T>(
   let response = await rawFetch(method, path, options);
   // 统一 401 → single-flight refresh → 重放一次（auth 端点自身除外）
   if (response.status === 401 && !options.auth) {
-    if (await refreshSession()) {
+    if ((await refreshSession()).ok) {
       response = await rawFetch(method, path, options);
     }
   }
