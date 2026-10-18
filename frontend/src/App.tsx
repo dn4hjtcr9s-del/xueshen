@@ -1,6 +1,6 @@
 // 生产前端样例骨架：左侧图标窄轨 + 顶部工具条 + 页面切换 + 通知面板。
 // 通知面板（方案 §6.5/§6.6）：Memory + Community 双域合并展示。
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   Bell,
   BookOpenText,
@@ -8,7 +8,6 @@ import {
   Home,
   MessageCircle,
   Network,
-  Search,
   Users,
 } from "lucide-react";
 import type { PageKey } from "./data";
@@ -26,12 +25,23 @@ import {
 import { Masthead } from "./ui";
 import { SiteFooter } from "./SiteFooter";
 import { HomePage } from "./pages/Home";
-import { ChatPage } from "./pages/Chat";
 import { PlanPage } from "./pages/Plan";
-import { KnowledgeMapPage } from "./pages/KnowledgeMap";
-import { KnowledgeSummariesPage } from "./pages/KnowledgeSummaries";
-import { CommunityPage } from "./pages/community";
 import { ProfilePage } from "./pages/Profile";
+
+// 首屏性能审计 P2-5：914 KB 单 JS bundle 无分包，react-markdown/katex/d3/
+// react-force-graph-2d 全部进首屏主包。按页 React.lazy 拆分，四个重页
+// （对话=katex+markdown、知识地图=force-graph、知识总结、社区）各自成块，
+// 首屏主包预计减半以上；katex.min.css 移入 StreamingMarkdown 随对话块加载。
+const ChatPage = lazy(() => import("./pages/Chat").then((m) => ({ default: m.ChatPage })));
+const KnowledgeMapPage = lazy(() =>
+  import("./pages/KnowledgeMap").then((m) => ({ default: m.KnowledgeMapPage })),
+);
+const KnowledgeSummariesPage = lazy(() =>
+  import("./pages/KnowledgeSummaries").then((m) => ({ default: m.KnowledgeSummariesPage })),
+);
+const CommunityPage = lazy(() =>
+  import("./pages/community").then((m) => ({ default: m.CommunityPage })),
+);
 
 const KNOWLEDGE_SUMMARY_ENABLED = import.meta.env.VITE_KNOWLEDGE_SUMMARY_ENABLED === "true";
 
@@ -52,7 +62,8 @@ function formatStudioDate(now: Date): string {
 }
 
 const MASTHEADS: Record<PageKey, { kicker: string; title: string; aside: string[] }> = {
-  home: { kicker: "Tuesday · 星期二", title: "今日", aside: ["VOL.04 — 特征值与对角化", "第 12 天连续学习"] },
+  // 审计 P3：kicker/aside 不得硬编码与真实日期矛盾的虚构信息（原为 "Tuesday · 星期二"）
+  home: { kicker: "Today · 今日", title: "今日", aside: ["XUESHEN MATH STUDIO"] },
   chat: { kicker: "Ask · 有问必答", title: "AI 对话", aside: ["讲解模式", "引用可溯源"] },
   plan: { kicker: "Plan · 循序渐进", title: "学习计划", aside: ["等待你的第一个目标", "由 AI 生成并动态调整"] },
   map: { kicker: "Atlas · 了如指掌", title: "知识地图", aside: ["关系驱动布局", "初中 → 高中 → 大学"] },
@@ -157,7 +168,7 @@ function NotifPanel({
 }
 
 export default function App() {
-  const { initials, user } = useAuth();
+  const { initials, user, ready } = useAuth();
   const [page, setPage] = useState<PageKey>("home");
   const [chatDraft, setChatDraft] = useState("");
   const [showNotif, setShowNotif] = useState(false);
@@ -176,12 +187,22 @@ export default function App() {
   const summaryDiagnosticRecorded = useRef(false);
   const knowledgeSummaryAvailable = KNOWLEDGE_SUMMARY_ENABLED && !summaryFeatureUnavailable;
 
+  // 通知加载代际计数：并发的多次加载（自动重拉 + 开面板 + read-all 刷新）
+  // 只有最新一代允许写入状态，避免先到后至的响应互相覆盖提示文案
+  // （审计 P1-2 改造后 ready && user 自动重拉与 readAll 刷新可能交叠）。
+  const notifLoadGenRef = useRef(0);
+  // 错误文案的归属：load=接口加载失败（重试成功即可清除）；readall=全部已读
+  // 部分失败（属于本次操作的结果，后续自动重拉不得清除，关面板或下次操作才清除）。
+  const notifErrorKindRef = useRef<"load" | "readall" | null>(null);
+
   const loadNotifications = useCallback(async () => {
     // §6.5：Promise.allSettled 并行读取；任一域失败仍展示另一域 + 局部错误提示
+    const generation = ++notifLoadGenRef.current;
     const [memoryResult, communityResult] = await Promise.allSettled([
       listNotifications(),
       listCommunityNotifications(),
     ]);
+    if (generation !== notifLoadGenRef.current) return;
     const memoryOk = memoryResult.status === "fulfilled";
     const communityOk = communityResult.status === "fulfilled";
     const memoryItems = memoryOk ? memoryResult.value.items : [];
@@ -196,8 +217,13 @@ export default function App() {
     const communityUnread = communityOk ? communityResult.value.unread_count : 0;
     setUnreadTotal(memoryUnread + communityUnread);
     if (memoryOk && communityOk) {
-      setNotifError(null);
+      // readall 失败文案属于用户操作结果，自动重拉成功也不清除
+      if (notifErrorKindRef.current !== "readall") {
+        notifErrorKindRef.current = null;
+        setNotifError(null);
+      }
     } else {
+      notifErrorKindRef.current = "load";
       setNotifError(
         (memoryOk ? "" : "Memory 通知加载失败；") +
           (communityOk ? "" : "社区通知加载失败；") +
@@ -206,26 +232,56 @@ export default function App() {
     }
   }, []);
 
+  // 首屏性能审计 P1-2：挂载时不等鉴权结果就并发拉通知，访客必然全 401，还会在
+  // 通知面板留下"加载失败"错误；登录成功后通知也不会自动重拉，红点要用户手动点
+  // 铃铛才更新。改为：等 ready && user 再发，user 变化（登录）后自动重拉；
+  // 登出（user 由有变无）才清空通知与红点，纯访客不发请求也不做无谓清理。
+  const hadUserRef = useRef(false);
   useEffect(() => {
+    if (!ready) return;
+    if (!user) {
+      if (hadUserRef.current) {
+        hadUserRef.current = false;
+        setNotifications([]);
+        setUnreadTotal(0);
+        notifErrorKindRef.current = null;
+        setNotifError(null);
+      }
+      return;
+    }
+    hadUserRef.current = true;
     void loadNotifications();
-  }, [loadNotifications]);
+  }, [ready, user, loadNotifications]);
 
   const toggleNotif = () => {
     setShowNotif((v) => {
-      if (!v) void loadNotifications();
+      // 访客打开面板不重拉（避免 401 风暴与"加载失败"残留）
+      if (!v && user) void loadNotifications();
       return !v;
     });
   };
 
   const readAll = async () => {
     // §6.5 #4：并发调用两个域的 read-all；部分失败后刷新两域并提示
+    notifErrorKindRef.current = null;
     const [memoryResult, communityResult] = await Promise.allSettled([
       markAllMemoryNotificationsRead(),
       markAllCommunityNotificationsRead(),
     ]);
     await loadNotifications();
     if (memoryResult.status === "rejected" || communityResult.status === "rejected") {
+      // 标注为"操作结果"错误：后续到达的自动重拉成功也不得清除本条提示
+      notifErrorKindRef.current = "readall";
       setNotifError("部分通知标记失败");
+    }
+  };
+
+  const closeNotif = () => {
+    setShowNotif(false);
+    // 关面板时清除"全部已读"操作结果提示，避免下次打开残留
+    if (notifErrorKindRef.current === "readall") {
+      notifErrorKindRef.current = null;
+      setNotifError(null);
     }
   };
 
@@ -315,10 +371,8 @@ export default function App() {
       <div className="main">
         <header className="utility-bar">
           <div className="utility-date">{formatStudioDate(new Date())}</div>
-          <div className="topbar-search">
-            <Search size={13} />
-            <span>搜索知识点、对话、总结…</span>
-          </div>
+          {/* 审计 P3：原 topbar-search 是纯装饰（span 无输入无事件却长得像可交互控件），
+              直接移除；顶部只保留真实可用的控件。 */}
           <button className="icon-btn" onClick={toggleNotif} aria-label="通知">
             <Bell size={15} strokeWidth={1.8} />
             {unreadTotal > 0 && <span className="dot" />}
@@ -344,26 +398,34 @@ export default function App() {
               />
             )}
             {page === "home" && <HomePage goChat={goChat} go={(p) => setPage(p)} knowledgeSummaryAvailable={knowledgeSummaryAvailable} />}
-            {page === "chat" && <ChatPage initialPrompt={chatDraft} chatTarget={chatTarget} onOpenSummary={openKnowledgeSummary} />}
-            {page === "plan" && <PlanPage goChat={goChat} />}
-            {page === "map" && <KnowledgeMapPage goChat={goChat} />}
-            {page === "summaries" && knowledgeSummaryAvailable && (
-              <KnowledgeSummariesPage
-                onOpenChat={openChatTarget}
-                targetSummaryId={summaryTargetId}
-                onTargetConsumed={() => setSummaryTargetId(null)}
-                onFeatureUnavailable={handleSummaryFeatureUnavailable}
-              />
-            )}
-            {communityVisited && (
-              <div style={page === "community" ? undefined : { display: "none" }}>
-                <CommunityPage
-                  targetPostId={communityTargetPostId}
-                  onTargetConsumed={() => setCommunityTargetPostId(null)}
-                  onLoginRequired={communityLoginRequired}
+            <Suspense
+              fallback={
+                <div role="status" className="section-note" style={{ padding: "18px 0" }}>
+                  页面加载中…
+                </div>
+              }
+            >
+              {page === "chat" && <ChatPage initialPrompt={chatDraft} chatTarget={chatTarget} onOpenSummary={openKnowledgeSummary} />}
+              {page === "plan" && <PlanPage goChat={goChat} />}
+              {page === "map" && <KnowledgeMapPage goChat={goChat} />}
+              {page === "summaries" && knowledgeSummaryAvailable && (
+                <KnowledgeSummariesPage
+                  onOpenChat={openChatTarget}
+                  targetSummaryId={summaryTargetId}
+                  onTargetConsumed={() => setSummaryTargetId(null)}
+                  onFeatureUnavailable={handleSummaryFeatureUnavailable}
                 />
-              </div>
-            )}
+              )}
+              {communityVisited && (
+                <div style={page === "community" ? undefined : { display: "none" }}>
+                  <CommunityPage
+                    targetPostId={communityTargetPostId}
+                    onTargetConsumed={() => setCommunityTargetPostId(null)}
+                    onLoginRequired={communityLoginRequired}
+                  />
+                </div>
+              )}
+            </Suspense>
             {page === "profile" && <ProfilePage />}
           </div>
         </main>
@@ -374,7 +436,7 @@ export default function App() {
         <NotifPanel
           items={notifications}
           error={notifError}
-          onClose={() => setShowNotif(false)}
+          onClose={closeNotif}
           onReadAll={() => void readAll()}
           onOpenPost={openCommunityPost}
         />

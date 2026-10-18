@@ -320,6 +320,9 @@ export function KnowledgeMapPage({ goChat }: { goChat: () => void }) {
   }, [hoveredId, selectedId, visibleIds]);
 
   // 阶段力把大学推向上方、初中推向下方；碰撞力只负责留出呼吸空间。
+  // 审计 P2-7：力配置与"适应全图"定时器只随数据（snapshot）/视口变化重建。
+  // 原先依赖 visibleNodes——搜索每次按键都会重建 graphData，导致定时器被
+  // 重置，用户输完搜索词 2.6s 后视图被强行拉回全景（"抢视图"）。
   useEffect(() => {
     if (!canvasSupported || !graphRef.current || visibleNodes.length === 0) return;
     const stageForce = forceY<VisualNode>((node) =>
@@ -358,7 +361,9 @@ export function KnowledgeMapPage({ goChat }: { goChat: () => void }) {
       2600,
     );
     return () => window.clearTimeout(fitTimer);
-  }, [canvasSupported, viewport.height, viewport.width, visibleNodes]);
+    // 刻意不依赖 visibleNodes：见上方审计 P2-7 注释
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvasSupported, viewport.height, viewport.width, snapshot]);
 
   useEffect(() => {
     if (canvasSupported) graphRef.current?.resumeAnimation();
@@ -722,7 +727,8 @@ export function KnowledgeMapPage({ goChat }: { goChat: () => void }) {
               }
               warmupTicks={240}
               cooldownTicks={220}
-              cooldownTime={9000}
+              // 审计 P2-7：cooldownTime 原为 9000，力导向结束后 Canvas 动画仍空跑 9 秒
+              cooldownTime={3000}
               d3AlphaDecay={0.028}
               d3VelocityDecay={0.36}
               enableNodeDrag

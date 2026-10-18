@@ -28,6 +28,14 @@ const COMMUNITY_NOTIF = {
   reply_id: "22222222-2222-4222-8222-222222222222",
 };
 
+const LOGIN_USER = {
+  user_id: "00000000-0000-0000-0000-000000000a01",
+  username: "alice01",
+  email: null,
+  status: "active",
+  created_at: "2026-08-13T00:00:00+00:00",
+};
+
 function renderApp() {
   return render(
     <AuthProvider>
@@ -37,7 +45,23 @@ function renderApp() {
 }
 
 describe("App 通知面板（§6.5）", () => {
-  beforeEach(() => server.resetHandlers());
+  beforeEach(() => {
+    server.resetHandlers();
+    // 审计 P1-2 后通知只在"鉴权就绪且已登录"时加载：refresh 返回已登录用户，
+    // 登录后 App 自动拉取通知（无需先点铃铛）；首页活动判定的三个接口给空数据。
+    server.use(
+      http.post("*/api/v1/auth/refresh", () =>
+        HttpResponse.json({ access_token: "test-access-token", token_type: "bearer", expires_in: 300, user: LOGIN_USER }),
+      ),
+      http.get("*/memory-api/api/v1/conversations", () =>
+        HttpResponse.json({ items: [], next_cursor: null, has_more: false }),
+      ),
+      http.get("*/memory-api/api/v1/memory/index", () =>
+        HttpResponse.json({ version: 0, entries: [], updated_at: null, stale: false }),
+      ),
+      http.get("*/memory-api/api/v1/knowledge-graph/me/nodes", () => HttpResponse.json([])),
+    );
+  });
 
   it("双域通知合并按 created_at DESC 排序，key 含 source", async () => {
     server.use(

@@ -2,6 +2,10 @@
 //
 // 流式期间通过 splitConcealed 把未闭合构造尾部灰化显示；终态（非 streaming）
 // 不启用 conceal，直接全量渲染。
+//
+// 首屏性能审计 P2-5：katex 样式随本组件所在懒加载块（对话页）拆分，
+// 不再由 main.tsx 全局引入阻塞首屏。
+import "katex/dist/katex.min.css";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";

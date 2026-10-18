@@ -22,6 +22,9 @@ export interface TurnEventStreamOptions {
 }
 
 const BACKOFF_MS = [500, 1000, 2000, 5000];
+// 首屏性能审计 P1-3：重连总次数上限。原实现退避封顶 5s 但无限次——token 失效后
+// 会在后台每 5 秒空转一次，界面永远停在"正在连接…"。打满上限后转入失败终态。
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 /**
  * 建立并维持一条 Fetch SSE 流。
@@ -93,6 +96,12 @@ export function startTurnEventStream(options: TurnEventStreamOptions): () => voi
       },
       onerror: (error) => {
         if (controller.signal.aborted || stopped) throw error;
+        // 审计 P1-3：401/403 且刷新失败是终态（再连也是 401），直接上抛并
+        // 通知调用方展示失败提示，不再进入重连循环。
+        if (error.message.startsWith("SSE 认证失败")) {
+          options.onError?.(new Error("SSE_AUTH_FAILED"));
+          throw error;
+        }
         scheduleReconnect();
         throw error; // fetch-event-source 要求 throw 才断开
       },
@@ -111,6 +120,12 @@ export function startTurnEventStream(options: TurnEventStreamOptions): () => voi
 
   const scheduleReconnect = () => {
     if (stopped || retryTimer !== null || controller.signal.aborted) return;
+    // 审计 P1-3：打满重连上限后停止后台空转，转入失败终态由调用方提示用户
+    if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+      stopped = true;
+      options.onError?.(new Error("SSE_RECONNECT_EXHAUSTED"));
+      return;
+    }
     const delay = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)];
     attempt += 1;
     retryTimer = setTimeout(() => {

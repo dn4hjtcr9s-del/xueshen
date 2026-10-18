@@ -214,18 +214,6 @@ body::before {
 
 .utility-date { font-family: var(--mono); font-size: 10.5px; letter-spacing: 1px; color: var(--ink-faint); margin-right: auto; }
 
-.topbar-search {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: transparent;
-  border: 1px solid var(--line);
-  padding: 6px 14px;
-  width: 230px;
-  color: var(--ink-faint);
-  font-size: 12.5px;
-}
-
 .icon-btn {
   position: relative;
   border: 1px solid var(--line);
@@ -1235,7 +1223,6 @@ body::before {
   .home-grid, .map-layout, .checkin-layout, .profile-grid { grid-template-columns: 1fr; }
   .onboarding-hero-copy { padding-right: 12px; }
   .group-grid { grid-template-columns: 1fr; }
-  .topbar-search { display: none; }
   .hero-ghost { display: none; }
   .hero-seal { position: static; transform: none; margin-top: 22px; text-align: left; }
   .hero-seal .seal { margin: 0; }

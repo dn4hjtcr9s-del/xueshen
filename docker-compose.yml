@@ -193,16 +193,15 @@ services:
     build:
       context: ./frontend
     ports:
-      # 评审 #9：仅绑定 loopback
-      - "127.0.0.1:4173:4173"
-    environment:
-      # 评审 P1-3：容器内 localhost 指向自身；代理必须指向 memory-api 服务
-      MEMORY_DEV_API_TARGET: http://memory-api:8000
-      # 开发预览：Vite 代理向 /memory-api 注入 X-Dev-User-Id，
-      # 访客免登录浏览也能正常加载数据（§18.1；生产构建不含此逻辑）
-      MEMORY_DEV_USER_ID: "00000000-0000-4000-8000-000000000001"
+      # 评审 #9：仅绑定 loopback。审计 P3：容器内改由 nginx 托管（80），
+      # 宿主机端口仍为 4173，浏览器 origin 不变
+      - "127.0.0.1:4173:80"
     depends_on:
       - memory-api
+    # 说明（审计 P3）：镜像内 nginx 反代 compose 网络的 memory-api:8000，
+    # 与生产"宿主机 nginx 反代本机 8000"同构；不再注入 Dev Auth
+    # （X-Dev-User-Id 仅为 vite dev/preview 的开发便利，见 vite.config.ts），
+    # 容器内验收请用真实账号登录，访客免登录开发调试请用 `npm run dev`。
 
 volumes:
   postgres-data:

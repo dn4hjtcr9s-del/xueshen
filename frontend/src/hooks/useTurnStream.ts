@@ -182,6 +182,19 @@ export function useTurnStream(
             status: "failed",
             error: { code: "EVENT_REPLAY_EXPIRED", message: "事件流已过期，请刷新" },
           }));
+        } else if (error.message === "SSE_AUTH_FAILED") {
+          // 审计 P1-3：401/403 且刷新失败是终态，不再无限重连空转
+          setState((current) => ({
+            ...current,
+            status: "failed",
+            error: { code: "SSE_AUTH_FAILED", message: "登录状态已失效，请重新登录后重试" },
+          }));
+        } else if (error.message === "SSE_RECONNECT_EXHAUSTED") {
+          setState((current) => ({
+            ...current,
+            status: "failed",
+            error: { code: "SSE_RECONNECT_EXHAUSTED", message: "连接多次中断，请检查网络后重试" },
+          }));
         }
       },
     });

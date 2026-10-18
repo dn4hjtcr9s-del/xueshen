@@ -120,7 +120,7 @@ export function setSessionExpiredHandler(handler: (() => void) | null): void {
   sessionExpiredHandler = handler;
 }
 
-async function doRefreshRequest(): Promise<RefreshResult> {
+async function doRefreshRequest(hadLocalSession: boolean): Promise<RefreshResult> {
   const epochBeforeRequest = getLogoutEpoch();
   let response: Response;
   try {
@@ -133,8 +133,16 @@ async function doRefreshRequest(): Promise<RefreshResult> {
     return { ok: false };
   }
   if (response.status === 401) {
-    // 仅 401 AUTH_SESSION_INVALID 才视为凭据失效
+    // 仅 401 AUTH_SESSION_INVALID 才视为凭据失效。
+    // 首屏性能审计 P1-1：纯访客（本地从未持有 access token，例如访客标签页
+    // 的接口 401 触发静默 refresh，refresh Cookie 本就不存在）与"会话失效"
+    // 在前端不可区分；此时绝不能递增 epoch / 广播 session-expired——否则
+    // 旁边已登录的标签页会被误清登录态。访客只静默清理本地（本就为空的）
+    // token，已登录标签页凭各自的 refresh Cookie 自愈。
     setAccessToken(null);
+    if (!hadLocalSession) {
+      return { ok: false };
+    }
     incrementLogoutEpoch();
     broadcast({ type: "session-expired", epoch: getLogoutEpoch() });
     sessionExpiredHandler?.();
@@ -189,6 +197,9 @@ async function refreshSession(): Promise<RefreshResult> {
       try {
         const generationBefore = getAccessTokenGeneration();
         const epochBefore = getLogoutEpoch();
+        // 审计 P1-1：本轮 refresh 发起前本地是否持有过 access token——
+        // 区分"纯访客"与"会话失效"的唯一可靠前端证据
+        const hadLocalSession = getAccessToken() !== null;
         // 复审 P1：等锁期间必须复查 logout epoch——任何标签页在本标签页排队
         // 期间发生 logout（本地退出或 401 失效），本标签页不得发起 refresh、
         // 不得广播新 access token，直接按会话失效处理
@@ -203,7 +214,7 @@ async function refreshSession(): Promise<RefreshResult> {
           if (getAccessTokenGeneration() !== generationBefore) {
             return { ok: getAccessToken() !== null };
           }
-          return await doRefreshRequest();
+          return await doRefreshRequest(hadLocalSession);
         };
         // 复审 P3：统一经 withRefreshLock——Web Locks 可用时用跨标签页锁，
         // 不可用时退化为同页互斥队列（logout 与 refresh 同队列串行），

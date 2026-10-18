@@ -46,9 +46,16 @@ type HomePageProps = {
   knowledgeSummaryAvailable?: boolean;
 };
 
-function useHomeActivityState(): HomeActivityState {
+function useHomeActivityState(): {
+  state: HomeActivityState;
+  /** 审计 P1-4：三个真实数据源的计数，供生产环境首页展示真实概览 */
+  conversationCount: number;
+  memoryCount: number;
+  graphCount: number;
+} {
   const { user: authUser, ready } = useAuth();
   const [state, setState] = useState<HomeActivityState>("loading");
+  const [counts, setCounts] = useState({ conversationCount: 0, memoryCount: 0, graphCount: 0 });
 
   useEffect(() => {
     if (!ready) {
@@ -57,6 +64,7 @@ function useHomeActivityState(): HomeActivityState {
     }
     if (!authUser) {
       setState("new");
+      setCounts({ conversationCount: 0, memoryCount: 0, graphCount: 0 });
       return;
     }
 
@@ -70,13 +78,13 @@ function useHomeActivityState(): HomeActivityState {
       getMyGraphStates(),
     ]).then(([conversationResult, memoryResult, graphResult]) => {
       if (cancelled) return;
-      const hasConversation =
-        conversationResult.status === "fulfilled" && conversationResult.value.items.length > 0;
-      const hasMemory =
-        memoryResult.status === "fulfilled" && memoryResult.value.entries.length > 0;
-      const hasGraphState =
-        graphResult.status === "fulfilled" && graphResult.value.length > 0;
-      setState(hasConversation || hasMemory || hasGraphState ? "returning" : "new");
+      const conversationCount =
+        conversationResult.status === "fulfilled" ? conversationResult.value.items.length : 0;
+      const memoryCount =
+        memoryResult.status === "fulfilled" ? memoryResult.value.entries.length : 0;
+      const graphCount = graphResult.status === "fulfilled" ? graphResult.value.length : 0;
+      setCounts({ conversationCount, memoryCount, graphCount });
+      setState(conversationCount > 0 || memoryCount > 0 || graphCount > 0 ? "returning" : "new");
     });
 
     return () => {
@@ -84,7 +92,7 @@ function useHomeActivityState(): HomeActivityState {
     };
   }, [authUser, ready]);
 
-  return state;
+  return { state, ...counts };
 }
 
 function NewUserHome({ goChat, go }: HomePageProps) {
@@ -361,12 +369,117 @@ function ReturningUserHome({ goChat, go, knowledgeSummaryAvailable = false }: Ho
   );
 }
 
+// 审计 P1-4：生产环境的已有用户首页——只渲染有真实数据源支撑的内容
+// （对话/记忆/图谱计数 + 知识总结数 + 继续学习入口），不展示任何虚构数字。
+function RealReturningHome({
+  goChat,
+  go,
+  knowledgeSummaryAvailable = false,
+  conversationCount,
+  memoryCount,
+  graphCount,
+}: HomePageProps & {
+  conversationCount: number;
+  memoryCount: number;
+  graphCount: number;
+}) {
+  const { user: authUser } = useAuth();
+  const [summaryStats, setSummaryStats] = useState<Awaited<ReturnType<typeof getKnowledgeSummaryStats>> | null>(null);
+
+  useEffect(() => {
+    if (!knowledgeSummaryAvailable) return;
+    void getKnowledgeSummaryStats().then(setSummaryStats).catch(() => setSummaryStats(null));
+  }, [knowledgeSummaryAvailable]);
+
+  return (
+    <>
+      <div className="hero rise">
+        <div className="hero-ghost">λ</div>
+        <div className="hero-kicker">WELCOME BACK · 欢迎回来</div>
+        <h1 className="hero-greet">
+          欢迎回来，{authUser?.username ?? "同学"}。
+          <br />
+          今天从上次停下的地方<span className="mark">继续</span>。
+        </h1>
+        <div className="hero-sub">
+          你的问答会在这里沉淀成可复用知识，随时可以回来看。
+        </div>
+        <div className="hero-actions">
+          <button className="btn btn-red" onClick={() => goChat()}>
+            <MessageCircle size={15} /> 去问 AI
+          </button>
+          {knowledgeSummaryAvailable && (
+            <button className="btn btn-ghost" onClick={() => go("summaries")}>
+              <RotateCcw size={15} /> 查看最近更新
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="home-grid">
+        <div>
+          <SectionHead num="01" title="继续学习" note="RESUME" />
+          <button className="continue-strip rise" style={{ animationDelay: "0.1s" }} onClick={() => goChat()}>
+            <MessageCircle size={18} style={{ flexShrink: 0 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="continue-title">
+                {conversationCount > 0 ? "回到对话，接着上次的问题继续" : "开始第一段对话"}
+              </div>
+              <div className="continue-preview">
+                {conversationCount > 0
+                  ? "已有的问答记录都在对话页，随时可以接着追问。"
+                  : "提出一个你真正想弄懂的问题，主页会从真实学习位置接住你。"}
+              </div>
+            </div>
+            <ArrowRight size={16} style={{ opacity: 0.6 }} />
+          </button>
+        </div>
+
+        <div>
+          <SectionHead num="02" title="学习足迹" note="REAL DATA" />
+          <div className="stat-strip rise" style={{ animationDelay: "0.16s" }}>
+            <div className="stat-cell">
+              <div className="stat-num">{conversationCount}<em>条</em></div>
+              <div className="stat-label">对话记录</div>
+            </div>
+            <div className="stat-cell">
+              <div className="stat-num">{memoryCount}<em>条</em></div>
+              <div className="stat-label">记忆条目</div>
+            </div>
+            <div className="stat-cell">
+              <div className="stat-num">{graphCount}<em>个</em></div>
+              <div className="stat-label">图谱状态</div>
+            </div>
+            <div className="stat-cell">
+              <div className="stat-num">{summaryStats?.active_count ?? "—"}<em>篇</em></div>
+              <div className="stat-label">知识总结</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export function HomePage(props: HomePageProps) {
-  const state = useHomeActivityState();
+  const activity = useHomeActivityState();
 
   // 首屏性能审计 #1：不做整页 loading 门禁。鉴权恢复（refresh）与
   // "是否已有学习活动"判定都是异步的，期间先渲染 NewUserHome
   // （其内部本就区分登录/访客两种文案），数据就绪后平滑替换为对应版本。
-  if (state === "returning") return <ReturningUserHome {...props} />;
+  if (activity.state === "returning") {
+    // 审计 P1-4：ReturningUserHome 的连续天数/本周分钟/掌握度雷达/今日任务
+    // 全部来自 data.ts 静态 Mock，仅 DEV 展示（与 Profile 页 SHOW_MOCK 同策略）；
+    // 生产环境渲染只有真实数据源的 RealReturningHome。
+    if (import.meta.env.DEV) return <ReturningUserHome {...props} />;
+    return (
+      <RealReturningHome
+        {...props}
+        conversationCount={activity.conversationCount}
+        memoryCount={activity.memoryCount}
+        graphCount={activity.graphCount}
+      />
+    );
+  }
   return <NewUserHome {...props} />;
 }

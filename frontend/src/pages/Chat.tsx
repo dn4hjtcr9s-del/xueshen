@@ -19,6 +19,7 @@ import {
 import { useConversation } from "../hooks/useConversation";
 import { useKnowledgeSummaryGeneration } from "../hooks/useKnowledgeSummaryGeneration";
 import { useTurnStream } from "../hooks/useTurnStream";
+import { restoreSessionWithRefresh } from "../api/client";
 import type { ConversationMessage, TurnProgressItem } from "../types/conversation";
 
 const STARTER_PROMPTS = [
@@ -80,7 +81,12 @@ export function ChatPage({
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [pendingUser, setPendingUser] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const { state: stream, reset: resetStream } = useTurnStream(streamUrl);
+  // 审计 P1-3：SSE 401/403 时先尝试静默 refresh 再重连；刷新失败则由
+  // startTurnEventStream 转入 SSE_AUTH_FAILED 失败终态（原先不传钩子，
+  // 401 后直接无限重连，界面永久停在"正在连接…"）。
+  const { state: stream, reset: resetStream } = useTurnStream(streamUrl, {
+    onAuthFailure: async () => (await restoreSessionWithRefresh()) !== null,
+  });
   const hasHistory = threads.length > 0;
   const showLiveAssistant = stream.status !== "idle";
   const visibleMessages =
