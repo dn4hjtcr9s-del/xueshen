@@ -8,6 +8,8 @@ active corpus 合法过滤词表从 RAG 库（books/chunks 表）去重生成并
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
@@ -15,6 +17,29 @@ from backend.conversation.contracts.retrieval import (
     FILTER_VOCABULARY_VERSION,
     ActiveCorpusVocabulary,
 )
+
+#: CORPUS_SCOPE 视图中章节前缀的注入上限（防超长章节表挤占回答预算；
+#: 截断时置 chapter_prefixes_truncated=true，不静默丢内容）。
+CORPUS_SCOPE_CHAPTER_PREFIXES_MAX = 50
+
+
+def build_corpus_scope_view(vocabulary: ActiveCorpusVocabulary) -> dict[str, Any]:
+    """由 active corpus 词表导出回答侧 CORPUS_SCOPE 视图（书目/学段/章节前缀）。
+
+    供 AnswerContextView 注入，回答"你能教什么/有没有某本书"类问题时以本视图为准。
+    无 active corpus 时 available=false，提示词按"语料暂未装配"口径回答。
+    """
+    chapter_prefixes = list(vocabulary.allowed_chapter_prefixes)
+    truncated = len(chapter_prefixes) > CORPUS_SCOPE_CHAPTER_PREFIXES_MAX
+    return {
+        "available": bool(vocabulary.allowed_book_ids),
+        "version": vocabulary.version,
+        "book_ids": list(vocabulary.allowed_book_ids),
+        "grade_levels": list(vocabulary.allowed_grade_levels),
+        "chapter_prefixes": chapter_prefixes[:CORPUS_SCOPE_CHAPTER_PREFIXES_MAX],
+        "chapter_prefixes_truncated": truncated,
+        "chapter_count": len(chapter_prefixes),
+    }
 
 
 class ActiveCorpusVocabularyLoader:

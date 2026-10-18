@@ -203,8 +203,13 @@ class ContextService:
         answer_contract: dict[str, Any] | None = None,
         evidence_assessment: dict[str, Any] | None = None,
         retrieval_decision: dict[str, Any] | None = None,
+        corpus_scope: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """AnswerContextView（§9.4）：注入回答合同和局部证据状态。"""
+        """AnswerContextView（§9.4）：注入回答合同和局部证据状态。
+
+        corpus_scope：当前语料覆盖范围（build_corpus_scope_view 导出），
+        对应 ANSWER 提示词 CORPUS_SCOPE 分区；缺省为空 dict（提示词按"暂未装配"口径）。
+        """
         return {
             "current_user_request": snapshot.current_message,
             "conversation_context": {
@@ -224,6 +229,7 @@ class ContextService:
             "answer_contract": answer_contract or {},
             "evidence_assessment": evidence_assessment or {},
             "retrieval_decision": retrieval_decision or {},
+            "corpus_scope": corpus_scope or {},
             "degraded_flags": degraded_flags,
             "answer_rules": {
                 "max_followups": 3,

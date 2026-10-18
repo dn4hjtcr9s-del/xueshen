@@ -61,11 +61,14 @@ async def generate_answer(
     *,
     runtime: ConversationRuntimeContext,
     context_service: Any,
+    corpus_scope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """生成回答（单次模型调用；deltas 持久化 + 服务端 citation 构造）。
 
     记忆工具开启时本节点可被重复进入：每次进入生成"一轮"输出，模型请求工具时把
     调用交给 `memory_tool` 节点，执行完再回到本节点续写（§5.7 tool-call loop）。
+    corpus_scope 由 builder 闭包注入（active corpus 静态快照），对应提示词
+    CORPUS_SCOPE 分区。
     """
     snapshot = state.get("snapshot") or {}
     evidence_set = state.get("evidence_set") or {}
@@ -92,6 +95,7 @@ async def generate_answer(
         answer_contract=answer_contract.model_dump(mode="json"),
         evidence_assessment=state.get("evidence_assessment"),
         retrieval_decision=rewrite_plan.get("retrieval_decision") or {},
+        corpus_scope=corpus_scope,
     )
 
     attempt = _AnswerAttempt(

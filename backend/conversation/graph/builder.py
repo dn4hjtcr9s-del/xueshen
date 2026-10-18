@@ -57,6 +57,7 @@ from backend.conversation.graph.nodes import (
 )
 from backend.conversation.graph.progress import emit_progress
 from backend.conversation.graph.state import ConversationGraphState, ConversationRuntimeContext
+from backend.conversation.services.corpus_vocabulary import build_corpus_scope_view
 
 
 def build_conversation_graph(
@@ -86,6 +87,8 @@ def build_conversation_graph(
         )
     max_subqueries = int(settings.conversation_retrieval_max_subqueries)
     vocabulary = vocabulary or ActiveCorpusVocabulary()
+    # CORPUS_SCOPE 视图：active corpus 是进程级静态快照，图构建时导出一次即可。
+    corpus_scope = build_corpus_scope_view(vocabulary)
 
     graph: StateGraph = StateGraph(ConversationGraphState)
 
@@ -386,7 +389,10 @@ def build_conversation_graph(
             },
         )
         result = await answer_node.generate_answer(
-            raw_state, runtime=runtime_context, context_service=context_service
+            raw_state,
+            runtime=runtime_context,
+            context_service=context_service,
+            corpus_scope=corpus_scope,
         )
         await emit_progress(
             runtime_context,
