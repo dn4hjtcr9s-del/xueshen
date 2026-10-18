@@ -93,8 +93,8 @@ backup 容器每日 03:17（UTC）逐库 `pg_dump -Fc` 到 named volume `backups
 | python 基础镜像补丁版（根 Dockerfile FROM） | python:3.13.15-slim（chore f2148b1 已提交） | 所有者 | 2026-08-31 |
 | node 构建镜像补丁版 | node:24.20.0-slim | 所有者 | 2026-08-31 |
 | Docker Engine / Compose 版本 | 29.7.2 / v5.5.0 | 所有者 | 2026-08-31 |
-| git commit | 660c745 | 所有者 | 2026-10-18 |
-| 本次部署范围（660c745） | 仅前端产物重建 + 宿主机 nginx 站点配置更新（http2/gzip/静态缓存/入口 no-cache）；后端镜像仍为 xueshen-backend:224a820（GIT_SHA 未变），无数据库迁移，backend 服务未重启 | 所有者 | 2026-10-18 |
+| git commit | 2aa2296 | 所有者 | 2026-10-18 |
+| 最近两次部署范围 | 660c745：仅前端产物重建 + 宿主机 nginx 站点配置（http2/gzip/静态缓存/入口 no-cache），后端未动；2aa2296：conversation ANSWER 提示词（身份段 + CORPUS_SCOPE 注入，cherry-pick 自 feat/answer-agent-prompts 的 ecbbe0b+ae1b0a4），重建 xueshen-backend:2aa2296 并全栈重启，postgres/backup 仅重打标签，migrate 幂等通过（exit 0），前端 dist 随 up -d 顺带重建（代码未变、产物内容一致） | 所有者 | 2026-10-18 |
 | 回滚用旧 commit | 5252d20（P5 首次拉栈基线） | 所有者 | 2026-08-31 |
 | 前端产物目录 | /opt/xueshen/frontend/dist | 所有者 | 2026-08-31 |
 | 域名 / CDN 域名 / DNS | xueshen.xin + www.xueshen.xin / tkkx5xhrb.hd-bkt.clouddn.com（仅 HTTP 可用，见偏离项）/ A 记录已生效 | 所有者 | 2026-08-31 |
